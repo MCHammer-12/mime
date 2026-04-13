@@ -1,5 +1,55 @@
 # Session Log
 
+## 2026-04-10 to 2026-04-13 — forwarder research + deterministic parser + local viewer
+
+**Done**
+- Unblocked redoapp GitHub access (SAML SSO auth for MCHammer-12)
+- Cloned redoapp/redo monorepo to ~/code/redoapp (44k files)
+- Fully mapped the production email forwarder pipeline (3 stages, 2 LLM calls) → `docs/RESEARCH-forwarder.md`
+- Wrote comprehensive explainer doc → `docs/EXPLAINER-pipeline.md`
+- Extracted templates from a second Klaviyo account (merchant-2, 27 templates) — confirmed kl-* class pattern is universal
+- Discovered 84% of templates use `gxp-kl-*` prefix (Grid Pixel template variant) — parser handles both
+- **Built deterministic cheerio parser** (`src/parser/index.ts`) — zero LLM, walks Klaviyo DOM classes:
+  - Handles both `kl-*` and `gxp-kl-*` class schemes
+  - Extracts all 10 AI block types: header, menu, text, image, button, line, spacer, column, socials, product grids
+  - Extracts fonts, colors, padding, URLs directly from inline styles
+  - 415 templates tested: 374 clean (90%), 41 with warnings, 0 failures
+- **Built local email renderer** (`src/renderer/`) using production Redo block components copied from redoapp:
+  - Same React → MJML → HTML pipeline as production
+  - Production global styles (p margin reset, quill styles, responsive breakpoints)
+  - All 10 block types rendering
+- **Built side-by-side comparison viewer** (`src/viewer.ts`):
+  - Klaviyo original vs Redo rendered, desktop/mobile toggle, synced scrolling
+  - Playwright screenshot support for automated visual comparison
+- **Built EmailTemplate exporter** (`src/export-template.ts`):
+  - Outputs production-shaped MongoDB document JSON with valid ObjectIds
+  - Matches exact field names, enum values, and types from redo/model/src/email-template.ts
+- Added second Klaviyo account extraction (merchant-2, pk_75b33...)
+
+**Key decisions**
+1. **No LLM needed for Klaviyo migration** — Klaviyo HTML has semantic classes that map directly to Redo block types. Deterministic parser is faster, cheaper, and zero-hallucination.
+2. **Copy + strip production renderer** — copied real block components from redoapp with stubs for tracking/UTM/AMP deps, rather than writing approximations.
+3. **Scope: Klaviyo first, arbitrary HTML later** — nail the deterministic Klaviyo migration, then separately decide whether to improve the LLM-based forwarder for arbitrary emails.
+
+**Files created/changed**
+- `src/parser/index.ts` — Klaviyo HTML → Section[] cheerio parser
+- `src/parser/style-utils.ts` — inline CSS parsing utilities
+- `src/parser/smoke-test.ts` — parser test + JSON export
+- `src/renderer/` — full production-cloned renderer (blocks, stubs, types, utils)
+- `src/viewer.ts` — comparison viewer with desktop/mobile toggle
+- `src/export-template.ts` — full EmailTemplate JSON exporter
+- `src/screenshot.ts`, `src/screenshot-batch.ts` — Playwright visual comparison
+- `docs/RESEARCH-forwarder.md` — forwarder pipeline breakdown
+- `docs/EXPLAINER-pipeline.md` — full system explainer (Temporal, MJML, block schema, pipeline walkthrough)
+- `docs/CONTEXT.md` — updated with redoapp file pointers
+
+**Next steps**
+1. Show exported EmailTemplate JSON to eng team — validate structure against a real prod document
+2. Hook up to Redo API to import templates directly (POST EmailTemplate)
+3. Handle edge cases: discount code detection, Klaviyo template variables → Redo variables
+4. Build the flow automation duplicator (the other track — Klaviyo flow topology is already extracted)
+5. Polish parser: product grid title/button extraction, line divider visibility, remaining 41 warning templates
+
 ## 2026-04-08 — extractor + flow topology breakthrough
 
 **Done**
