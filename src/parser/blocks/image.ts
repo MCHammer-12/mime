@@ -2,6 +2,7 @@ import type { ImageBlock } from "../../renderer/types.js";
 import { EmailBlockType, EMAIL_MAX_WIDTH_PX } from "../../renderer/types.js";
 import { parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
 import { type $, type El, nextId, sel } from "../helpers.js";
+import { classifyKlaviyoUrl } from "../url-mapping.js";
 import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
@@ -9,7 +10,7 @@ export function parseImageBlock(
   $: $,
   $td: cheerio.Cheerio<El>,
   $wrapper: cheerio.Cheerio<El>,
-  _ctx: ParseContext,
+  ctx: ParseContext,
 ): ImageBlock | null {
   const $img = $td.find("img").first();
   if ($img.length === 0) return null;
@@ -19,6 +20,7 @@ export function parseImageBlock(
   const alt = $img.attr("alt") || "";
   const $link = $td.find(sel("kl-img-link")).first();
   const clickthrough = $link.length > 0 ? $link.attr("href") || "" : undefined;
+  if (clickthrough) classifyKlaviyoUrl(clickthrough, EmailBlockType.IMAGE, ctx);
 
   // Inner padding: prefer kl-img-base-auto-width, fall back to direct img container td
   let $paddingTd = $td.find(sel("kl-img-base-auto-width")).first();

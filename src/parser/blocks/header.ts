@@ -2,6 +2,7 @@ import type { ImageBlock, Section } from "../../renderer/types.js";
 import { EmailBlockType, EMAIL_MAX_WIDTH_PX } from "../../renderer/types.js";
 import { parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
 import { type $, type El, findCls, nextId } from "../helpers.js";
+import { classifyKlaviyoUrl } from "../url-mapping.js";
 import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
@@ -14,7 +15,7 @@ import type * as cheerio from "cheerio";
 export function parseHeaderBlock(
   $: $,
   $wrapper: cheerio.Cheerio<El>,
-  _ctx: ParseContext,
+  ctx: ParseContext,
 ): Section[] {
   const blocks: Section[] = [];
 
@@ -49,6 +50,9 @@ export function parseHeaderBlock(
     const logoTdStyle = parseInlineStyles($logo.attr("style"));
     const logoTdPadding = parsePadding(logoTdStyle);
 
+    const logoHref = $logoLink.attr("href") || undefined;
+    if (logoHref) classifyKlaviyoUrl(logoHref, EmailBlockType.IMAGE, ctx);
+
     blocks.push({
       type: EmailBlockType.IMAGE,
       blockId: nextId(),
@@ -62,7 +66,7 @@ export function parseHeaderBlock(
         left: horizontalInnerPadding,
       },
       altText: $logoImg.attr("alt") || undefined,
-      clickthroughUrl: $logoLink.attr("href") || undefined,
+      clickthroughUrl: logoHref,
     } satisfies ImageBlock);
   }
 

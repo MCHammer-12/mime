@@ -2,6 +2,7 @@ import type { MenuBlock, Section } from "../../renderer/types.js";
 import { Alignment, EmailBlockType } from "../../renderer/types.js";
 import { parseColor, parseFontFamily, parseFontSize, parseInlineStyles, parsePadding } from "../style-utils.js";
 import { type $, type El, findCls, nextId } from "../helpers.js";
+import { classifyKlaviyoUrl } from "../url-mapping.js";
 import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
@@ -12,7 +13,7 @@ import type * as cheerio from "cheerio";
 export function parseMenuFromHeader(
   $: $,
   $wrapper: cheerio.Cheerio<El>,
-  _ctx: ParseContext,
+  ctx: ParseContext,
 ): MenuBlock | null {
   const $settingsTd = findCls($wrapper, "hlb-block-settings-content").first();
   const settingsStyle = parseInlineStyles($settingsTd.attr("style"));
@@ -32,6 +33,7 @@ export function parseMenuFromHeader(
     const label = $link.text().trim();
     if (!label) return;
     const href = $link.attr("href") || "#";
+    if (href !== "#") classifyKlaviyoUrl(href, EmailBlockType.MENU, ctx);
     const align = ($(wrap).attr("align") || "center").toLowerCase();
     const linkStyle = parseInlineStyles($link.attr("style"));
     const weightRaw = (linkStyle["font-weight"] || "").toLowerCase();

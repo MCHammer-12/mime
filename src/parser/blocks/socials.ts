@@ -13,6 +13,7 @@ import {
   parsePx,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
+import { classifyKlaviyoUrl } from "../url-mapping.js";
 import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
@@ -21,7 +22,7 @@ const DEFAULT_ICON_PADDING = 10;
 export function parseSocialsBlock(
   $: $,
   $wrapper: cheerio.Cheerio<El>,
-  _ctx: ParseContext,
+  ctx: ParseContext,
 ): SocialsBlock | null {
   const socialLinks: SocialItem[] = [];
   let detectedColor: string | null = null;
@@ -32,6 +33,7 @@ export function parseSocialsBlock(
     const href = $link.attr("href") || "";
     const platform = detectSocialPlatform(href);
     if (!platform) return;
+    if (href) classifyKlaviyoUrl(href, EmailBlockType.SOCIALS, ctx);
 
     const $img = $link.find("img").first();
     if ($img.length > 0) {

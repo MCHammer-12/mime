@@ -2,35 +2,9 @@ import type { Section } from "../../renderer/types.js";
 import { Alignment, ButtonLinkType, EmailBlockType } from "../../renderer/types.js";
 import { parseColor, parseFontFamily, parseFontSize, parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
-import { mapKlaviyoLink } from "../url-mapping.js";
+import { classifyKlaviyoUrl } from "../url-mapping.js";
 import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
-
-// Three-state policy for Klaviyo variables in button links:
-// - mapKlaviyoLink knows it → passes through as dynamic-variable (OK)
-// - Matches UNSUPPORTED_VARIABLES → ctx.unsupportedFeatures (blocks template)
-// - Unknown {{ }} variable → ctx.reviewItems (non-blocking review list)
-const KLAVIYO_VAR_RE = /\{\{[^}]+\}\}|\{%[^%]+%\}/;
-
-const UNSUPPORTED_VARIABLES: { pattern: RegExp; reason: string }[] = [
-  { pattern: /^gift_card\./i, reason: "gift_card" },
-  { pattern: /^customer\.reset_password_url$/i, reason: "customer.reset_password_url" },
-  { pattern: /^customer\.account_activation_url$/i, reason: "customer.account_activation_url" },
-  { pattern: /^fulfillment\.tracking_urls/i, reason: "fulfillment.tracking_urls" },
-  { pattern: /^tracking_url$/i, reason: "tracking_url" },
-];
-
-function extractVariableName(href: string): string {
-  const m = href.match(/\{\{\s*([^}|\s]+)/);
-  return m ? m[1] : href;
-}
-
-function classifyVariable(varName: string): "unsupported" | "review" {
-  for (const { pattern } of UNSUPPORTED_VARIABLES) {
-    if (pattern.test(varName)) return "unsupported";
-  }
-  return "review";
-}
 
 export function parseButtonBlock(
   $: $,
@@ -73,27 +47,7 @@ export function parseButtonBlock(
     $innerTable.attr("width") === "100%" ||
     false;
 
-  const mapped = mapKlaviyoLink(href);
-  // If mapKlaviyoLink didn't recognize this {{ }} variable, classify it:
-  // - explicitly unsupported → block the template
-  // - unknown → put it on a review list for the user to classify later
-  if (mapped.linkType === "web-page" && KLAVIYO_VAR_RE.test(href)) {
-    const varName = extractVariableName(href);
-    const kind = classifyVariable(varName);
-    if (kind === "unsupported") {
-      ctx.unsupportedFeatures.push({
-        blockType: EmailBlockType.BUTTON,
-        reason: varName,
-        context: href,
-      });
-    } else {
-      ctx.reviewItems.push({
-        blockType: EmailBlockType.BUTTON,
-        variableName: varName,
-        context: href,
-      });
-    }
-  }
+  const mapped = classifyKlaviyoUrl(href, EmailBlockType.BUTTON, ctx);
   const linkFields =
     mapped.linkType === "dynamic-variable"
       ? {
