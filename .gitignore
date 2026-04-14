@@ -7,3 +7,4 @@ samples/
 .auth/
 .DS_Store
 *.log
+.viewer/

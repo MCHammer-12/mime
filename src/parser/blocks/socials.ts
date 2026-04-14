@@ -1,0 +1,100 @@
+import type { SocialItem, SocialsBlock } from "../../renderer/types.js";
+import {
+  Alignment,
+  EmailBlockType,
+  SocialIconColor,
+  SocialPlatform,
+} from "../../renderer/types.js";
+import {
+  detectSocialIconColor,
+  detectSocialPlatform,
+  parseInlineStyles,
+  parsePadding,
+  parsePx,
+} from "../style-utils.js";
+import { type $, type El, nextId } from "../helpers.js";
+import type * as cheerio from "cheerio";
+
+const DEFAULT_ICON_PADDING = 10;
+
+export function parseSocialsBlock(
+  $: $,
+  $wrapper: cheerio.Cheerio<El>,
+  _warnings: string[],
+): SocialsBlock | null {
+  const socialLinks: SocialItem[] = [];
+  let detectedColor: string | null = null;
+  let iconPadding: number | null = null;
+
+  $wrapper.find("a").each((i, link) => {
+    const $link = $(link);
+    const href = $link.attr("href") || "";
+    const platform = detectSocialPlatform(href);
+    if (!platform) return;
+
+    const $img = $link.find("img").first();
+    if ($img.length > 0) {
+      const c = detectSocialIconColor($img.attr("src") || "");
+      if (detectedColor === null || detectedColor === "original") {
+        detectedColor = c;
+      }
+    }
+
+    if (iconPadding === null) {
+      const $parentDiv = $link.closest("div[style*='inline-block']");
+      const parentStyle = parseInlineStyles($parentDiv.attr("style"));
+      const px = parsePx(parentStyle["padding-right"]);
+      if (px !== undefined) iconPadding = px;
+    }
+
+    socialLinks.push({
+      id: `social-${i}`,
+      platform: platform as SocialPlatform,
+      url: href,
+    });
+  });
+
+  if (socialLinks.length === 0) return null;
+
+  const $td = $wrapper.find("td").first();
+  const tdStyle = parseInlineStyles($td.attr("style"));
+
+  const $alignDiv = $wrapper.find("div[style*='text-align']").first();
+  const alignStyle = parseInlineStyles($alignDiv.attr("style"));
+  const alignment = mapTextAlign(alignStyle["text-align"]);
+
+  return {
+    type: EmailBlockType.SOCIALS,
+    blockId: nextId(),
+    sectionPadding: parsePadding(tdStyle),
+    sectionColor: tdStyle["background-color"] || "#ffffff",
+    socialLinks,
+    iconColor: mapIconColor(detectedColor),
+    iconPadding: iconPadding ?? DEFAULT_ICON_PADDING,
+    alignment,
+  };
+}
+
+function mapIconColor(raw: string | null): SocialIconColor {
+  // Prod SocialIconColor enum is black/white/gray only — map "original"
+  // (Klaviyo /default/ colorful brand icons) to BLACK since it's the
+  // closest valid prod value for a solid-styled icon set.
+  switch (raw) {
+    case "white":
+      return SocialIconColor.WHITE;
+    case "gray":
+      return SocialIconColor.GRAY;
+    case "black":
+    case "original":
+    case null:
+    default:
+      return SocialIconColor.BLACK;
+  }
+}
+
+function mapTextAlign(value: string | undefined): Alignment {
+  const v = (value || "").trim().toLowerCase();
+  if (v === "left") return Alignment.LEFT;
+  if (v === "right") return Alignment.RIGHT;
+  return Alignment.CENTER;
+}

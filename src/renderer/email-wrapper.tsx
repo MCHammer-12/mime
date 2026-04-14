@@ -1,0 +1,15 @@
+export enum GlobalEmailClass {
+  MJML_BODY = "mjml-body",
+  MJML_PREVIEW_BODY = "mjml-preview-body",
+  MJML_PREVIEW_STYLE_TAG = "mjml-preview-style-tag",
+  SPINNER = "spinner",
+  LINE_ITEM_LOADER = "line-item-loader",
+  SUBMITTING_OVERLAY = "submitting-overlay",
+  APPLE_MAIL_ONLY = "apple-mail-show",
+  APPLE_MAIL_HIDE = "apple-mail-hide",
+  FORCE_FALLBACK = "force-fallback",
+  OBJECT_FIT_CONTAIN = "contain",
+  OBJECT_FIT_COVER = "cover",
+  STACK_ON_MOBILE = "stack-on-mobile",
+  OVERFLOW_X_AUTO = "o-x-auto",
+}
