@@ -3,17 +3,13 @@ import { Alignment, ButtonLinkType, EmailBlockType } from "../../renderer/types.
 import { parseColor, parseFontFamily, parseFontSize, parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import { mapKlaviyoLink } from "../url-mapping.js";
+import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
 // Three-state policy for Klaviyo variables in button links:
 // - mapKlaviyoLink knows it → passes through as dynamic-variable (OK)
-// - Matches UNSUPPORTED_VARIABLES → "UNSUPPORTED:" warning (template routes to
-//   manual migration; these are ones we've explicitly decided not to support)
-// - Unknown {{ }} variable → "REVIEW:" warning (surfaces on a review list so
-//   the user can later classify it: add to mapKlaviyoLink, or add here)
-// TODO-SHARED: replace warnings "UNSUPPORTED:"/"REVIEW:" prefix convention with
-// proper `unsupportedFeatures` + `reviewItems` arrays on ParseResult once
-// src/parser/index.ts is editable.
+// - Matches UNSUPPORTED_VARIABLES → ctx.unsupportedFeatures (blocks template)
+// - Unknown {{ }} variable → ctx.reviewItems (non-blocking review list)
 const KLAVIYO_VAR_RE = /\{\{[^}]+\}\}|\{%[^%]+%\}/;
 
 const UNSUPPORTED_VARIABLES: { pattern: RegExp; reason: string }[] = [
@@ -39,7 +35,7 @@ function classifyVariable(varName: string): "unsupported" | "review" {
 export function parseButtonBlock(
   $: $,
   $td: cheerio.Cheerio<El>,
-  warnings: string[],
+  ctx: ParseContext,
 ): Section | null {
   const $a = $td.find("a").first();
   if ($a.length === 0) return null;
@@ -84,10 +80,19 @@ export function parseButtonBlock(
   if (mapped.linkType === "web-page" && KLAVIYO_VAR_RE.test(href)) {
     const varName = extractVariableName(href);
     const kind = classifyVariable(varName);
-    const prefix = kind === "unsupported" ? "UNSUPPORTED" : "REVIEW";
-    warnings.push(
-      `${prefix}: button link uses Klaviyo variable "${varName}" (${href})`,
-    );
+    if (kind === "unsupported") {
+      ctx.unsupportedFeatures.push({
+        blockType: EmailBlockType.BUTTON,
+        reason: varName,
+        context: href,
+      });
+    } else {
+      ctx.reviewItems.push({
+        blockType: EmailBlockType.BUTTON,
+        variableName: varName,
+        context: href,
+      });
+    }
   }
   const linkFields =
     mapped.linkType === "dynamic-variable"

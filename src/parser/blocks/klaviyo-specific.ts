@@ -2,9 +2,9 @@
  * Klaviyo-only blocks: video, preview quote (review), and drop shadow.
  * None of these have a Redo equivalent.
  *
- * Video + preview quote: skip entirely, emit SKIPPED: warning.
+ * Video + preview quote: skip entirely, push to ctx.skippedBlocks.
  * Drop shadow: if bodyBackgroundColor is white, emit an Image block pointing
- *   to the pre-made drop shadow asset; otherwise skip with REVIEW: warning.
+ *   to the pre-made drop shadow asset; otherwise skip via ctx.skippedBlocks.
  *
  * Returning null from tryParseKlaviyoSpecific means "not a klaviyo-specific
  * block" — the dispatcher should continue checking other block types.
@@ -16,6 +16,7 @@ import type { ImageBlock, Section } from "../../renderer/types.js";
 import { EmailBlockType } from "../../renderer/types.js";
 import { parseInlineStyles, parsePadding } from "../style-utils.js";
 import { type $, type El, nextId, sel } from "../helpers.js";
+import type { ParseContext } from "../index.js";
 
 const DROP_SHADOW_LOCAL_PATH = "pics/drop-shadow.png";
 // TODO-SHARED: upload pics/drop-shadow.png to Redo CDN and replace this path
@@ -24,27 +25,32 @@ const DROP_SHADOW_LOCAL_PATH = "pics/drop-shadow.png";
 export function tryParseKlaviyoSpecific(
   $: $,
   $wrapper: cheerio.Cheerio<El>,
-  warnings: string[],
+  ctx: ParseContext,
   bodyBackgroundColor: string,
 ): Section[] | null {
   if (isVideoBlock($wrapper)) {
-    warnings.push("SKIPPED: Klaviyo video block — not supported in Redo");
+    ctx.skippedBlocks.push({
+      blockType: "video",
+      reason: "Klaviyo video block — not supported in Redo",
+    });
     return [];
   }
 
   if (isPreviewQuoteBlock($, $wrapper)) {
-    warnings.push(
-      "SKIPPED: Klaviyo preview quote (review) block — not supported in Redo",
-    );
+    ctx.skippedBlocks.push({
+      blockType: "preview-quote",
+      reason: "Klaviyo preview quote (review) block — not supported in Redo",
+    });
     return [];
   }
 
   const $shadowImg = findDropShadowImg($, $wrapper);
   if ($shadowImg.length > 0) {
     if (!isWhiteBackground(bodyBackgroundColor)) {
-      warnings.push(
-        `REVIEW: Klaviyo drop shadow block skipped — email body background is ${bodyBackgroundColor}, drop shadow only works on white`,
-      );
+      ctx.skippedBlocks.push({
+        blockType: "drop-shadow",
+        reason: `body background is ${bodyBackgroundColor}, drop shadow only works on white`,
+      });
       return [];
     }
     return [buildDropShadowImageBlock($wrapper)];

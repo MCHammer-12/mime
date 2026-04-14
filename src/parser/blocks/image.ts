@@ -2,13 +2,14 @@ import type { ImageBlock } from "../../renderer/types.js";
 import { EmailBlockType, EMAIL_MAX_WIDTH_PX } from "../../renderer/types.js";
 import { parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
 import { type $, type El, nextId, sel } from "../helpers.js";
+import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
 export function parseImageBlock(
   $: $,
   $td: cheerio.Cheerio<El>,
   $wrapper: cheerio.Cheerio<El>,
-  _warnings: string[],
+  _ctx: ParseContext,
 ): ImageBlock | null {
   const $img = $td.find("img").first();
   if ($img.length === 0) return null;

@@ -27,7 +27,14 @@ if (!htmlPath) {
 
 // Parse the HTML
 const html = readFileSync(htmlPath, "utf-8");
-const { sections, warnings, bodyBackgroundColor } = parseKlaviyoHtml(html);
+const {
+  sections,
+  warnings,
+  unsupportedFeatures,
+  reviewItems,
+  skippedBlocks,
+  bodyBackgroundColor,
+} = parseKlaviyoHtml(html);
 
 // Read optional Klaviyo API JSON for metadata
 let klaviyoMeta: { name?: string; subject?: string; created?: string } = {};
@@ -83,6 +90,24 @@ console.log(`  Background: ${emailTemplate.emailBackgroundColor}`);
 if (warnings.length > 0) {
   console.log(`  Warnings: ${warnings.length}`);
   for (const w of warnings) console.log(`    - ${w}`);
+}
+
+if (unsupportedFeatures.length > 0) {
+  console.log(`  Unsupported (blocks template): ${unsupportedFeatures.length}`);
+  for (const u of unsupportedFeatures)
+    console.log(`    - [${u.blockType}] ${u.reason} → ${u.context}`);
+}
+
+if (reviewItems.length > 0) {
+  console.log(`  Review items: ${reviewItems.length}`);
+  for (const r of reviewItems)
+    console.log(`    - [${r.blockType}] ${r.variableName} → ${r.context}`);
+}
+
+if (skippedBlocks.length > 0) {
+  console.log(`  Skipped blocks: ${skippedBlocks.length}`);
+  for (const s of skippedBlocks)
+    console.log(`    - [${s.blockType}] ${s.reason}`);
 }
 
 // Also print a summary of the sections for quick review

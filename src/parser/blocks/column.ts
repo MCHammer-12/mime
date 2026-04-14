@@ -16,6 +16,7 @@ import {
   parsePadding,
 } from "../style-utils.js";
 import { type $, type El, findCls, hasClass, nextId } from "../helpers.js";
+import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
 const NESTABLE_TYPES = new Set<EmailBlockType>([
@@ -46,8 +47,8 @@ const NESTABLE_TYPES = new Set<EmailBlockType>([
 export function parseColumnRow(
   $: $,
   $columns: cheerio.Cheerio<El>,
-  warnings: string[],
-  parseColumnContent: ($: $, $col: cheerio.Cheerio<El>, warnings: string[]) => Section[],
+  ctx: ParseContext,
+  parseColumnContent: ($: $, $col: cheerio.Cheerio<El>, ctx: ParseContext) => Section[],
 ): Section[] {
   const widths: number[] = [];
   let alignment = VerticalAlignment.TOP;
@@ -64,7 +65,7 @@ export function parseColumnRow(
     if (valign === "middle" || valign === "center") alignment = VerticalAlignment.CENTER;
     else if (valign === "bottom") alignment = VerticalAlignment.BOTTOM;
 
-    perColumnBlocks.push(parseColumnContent($, $col, warnings));
+    perColumnBlocks.push(parseColumnContent($, $col, ctx));
   });
 
   // Bail condition: any column contains a non-nestable block (product,
@@ -74,7 +75,7 @@ export function parseColumnRow(
     arr.some((b) => !NESTABLE_TYPES.has(b.type)),
   );
   if (hasNonNestable) {
-    warnings.push(
+    ctx.warnings.push(
       `Column row contains a non-nestable block (product or complex layout) — emitting contents as standalone sections.`,
     );
     return perColumnBlocks.flat();
@@ -154,7 +155,7 @@ function extractRowContext(
 export function parseSplitBlock(
   $: $,
   $td: cheerio.Cheerio<El>,
-  warnings: string[],
+  ctx: ParseContext,
 ): ColumnBlock | null {
   const $subblocks = findCls($td, "kl-split-subblock");
   const $left = $subblocks.first();
@@ -171,8 +172,8 @@ export function parseSplitBlock(
   if (valign === "middle" || valign === "center") alignment = VerticalAlignment.CENTER;
   else if (valign === "bottom") alignment = VerticalAlignment.BOTTOM;
 
-  const leftBlock = parseSplitSubblock($, $left, warnings);
-  const rightBlock = parseSplitSubblock($, $right, warnings);
+  const leftBlock = parseSplitSubblock($, $left, ctx);
+  const rightBlock = parseSplitSubblock($, $right, ctx);
 
   // Section color from the outer wrapping td (kl-split's parent chain)
   let sectionColor = "#ffffff";
@@ -208,7 +209,7 @@ export function parseSplitBlock(
 function parseSplitSubblock(
   $: $,
   $subblock: cheerio.Cheerio<El>,
-  _warnings: string[],
+  _ctx: ParseContext,
 ): NonRecursiveBlock | null {
   const subblockPadding = parsePaddingFromSpacer($subblock);
 

@@ -2,6 +2,7 @@ import type { ImageBlock, Section } from "../../renderer/types.js";
 import { EmailBlockType, EMAIL_MAX_WIDTH_PX } from "../../renderer/types.js";
 import { parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
 import { type $, type El, findCls, nextId } from "../helpers.js";
+import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
 /**
@@ -13,7 +14,7 @@ import type * as cheerio from "cheerio";
 export function parseHeaderBlock(
   $: $,
   $wrapper: cheerio.Cheerio<El>,
-  warnings: string[],
+  _ctx: ParseContext,
 ): Section[] {
   const blocks: Section[] = [];
 

@@ -14,6 +14,7 @@ import {
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import { parseTextBlock } from "./text.js";
+import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
 /**
@@ -40,7 +41,7 @@ const STANDALONE_COUPON_SPLIT_RE =
 export function tryParseDiscountFromText(
   $: $,
   $td: cheerio.Cheerio<El>,
-  warnings: string[],
+  ctx: ParseContext,
 ): Section[] | null {
   const $div = $td.children("div").first();
   if ($div.length === 0) return null;
@@ -69,7 +70,7 @@ export function tryParseDiscountFromText(
   for (const match of matches) {
     const before = html.slice(cursor, match.index);
     if (hasVisibleContent(before)) {
-      const tb = textBlockFromSegment($, $td, before, warnings);
+      const tb = textBlockFromSegment($, $td, before, ctx);
       if (tb) blocks.push(tb);
     }
 
@@ -83,7 +84,7 @@ export function tryParseDiscountFromText(
 
   const tail = html.slice(cursor);
   if (hasVisibleContent(tail)) {
-    const tb = textBlockFromSegment($, $td, tail, warnings);
+    const tb = textBlockFromSegment($, $td, tail, ctx);
     if (tb) blocks.push(tb);
   }
 
@@ -98,11 +99,11 @@ function textBlockFromSegment(
   $: $,
   $td: cheerio.Cheerio<El>,
   segmentHtml: string,
-  warnings: string[],
+  ctx: ParseContext,
 ): TextBlock | null {
   const $clone = $td.clone();
   $clone.children("div").first().html(segmentHtml);
-  return parseTextBlock($, $clone, warnings);
+  return parseTextBlock($, $clone, ctx);
 }
 
 function extractStyleAttr(spanTag: string): string | undefined {

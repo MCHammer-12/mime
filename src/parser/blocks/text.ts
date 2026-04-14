@@ -8,6 +8,7 @@ import {
   parsePadding,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
+import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
 const BLOCK_ELEMENT_RE = /<(h[1-6]|div|table|ul|ol|blockquote|hr|pre)[\s>]/i;
@@ -195,7 +196,7 @@ export function stripStandaloneCoupons(html: string): string {
 export function parseTextBlock(
   $: $,
   $td: cheerio.Cheerio<El>,
-  _warnings: string[],
+  _ctx: ParseContext,
 ): TextBlock | null {
   const $div = $td.children("div").first();
   if ($div.length === 0) return null;

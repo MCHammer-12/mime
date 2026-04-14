@@ -2,6 +2,7 @@ import type { MenuBlock, Section } from "../../renderer/types.js";
 import { Alignment, EmailBlockType } from "../../renderer/types.js";
 import { parseColor, parseFontFamily, parseFontSize, parseInlineStyles, parsePadding } from "../style-utils.js";
 import { type $, type El, findCls, nextId } from "../helpers.js";
+import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
 /**
@@ -11,7 +12,7 @@ import type * as cheerio from "cheerio";
 export function parseMenuFromHeader(
   $: $,
   $wrapper: cheerio.Cheerio<El>,
-  _warnings: string[],
+  _ctx: ParseContext,
 ): MenuBlock | null {
   const $settingsTd = findCls($wrapper, "hlb-block-settings-content").first();
   const settingsStyle = parseInlineStyles($settingsTd.attr("style"));

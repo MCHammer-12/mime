@@ -20,6 +20,7 @@ import {
   parsePx,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
+import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
 // ─── Local type shims (TODO-SHARED-product.md) ──────────────────
@@ -146,7 +147,7 @@ function detectCartContext($: $): boolean {
 export function parseProductBlock(
   $: $,
   $product: cheerio.Cheerio<El>,
-  warnings: string[],
+  ctx: ParseContext,
 ): Section | null {
   const $cells = $product.find(".kl-product-cell-stack, .gxp-kl-product-cell-stack");
   if ($cells.length === 0) return null;
@@ -157,9 +158,9 @@ export function parseProductBlock(
   });
 
   if (isDynamic) {
-    return parseDynamicProductBlock($, $product, $cells, warnings);
+    return parseDynamicProductBlock($, $product, $cells, ctx);
   }
-  return parseStaticProductBlock($, $cells, warnings);
+  return parseStaticProductBlock($, $cells, ctx);
 }
 
 // ─── Dynamic: interactive-cart block with pending filter ──────────
@@ -168,7 +169,7 @@ function parseDynamicProductBlock(
   $: $,
   $product: cheerio.Cheerio<El>,
   $cells: cheerio.Cheerio<El>,
-  warnings: string[],
+  ctx: ParseContext,
 ): Section {
   const firstCell = $cells.first();
   const cellText = firstCell.text();
@@ -235,7 +236,7 @@ function parseDynamicProductBlock(
   // Cart vs Best Sellers
   const cartContext = detectCartContext($);
   const pendingFilter = cartContext ? CART_ITEM_FILTER : BEST_SELLERS_FILTER;
-  warnings.push(
+  ctx.warnings.push(
     `Dynamic product block → ${pendingFilter.name} filter (${numberOfProducts} products × ${columns} cols). Verify in Redo editor after import.`,
   );
 
@@ -333,9 +334,9 @@ function defaultLineItemButton(): InlineButton {
 function parseStaticProductBlock(
   $: $,
   $cells: cheerio.Cheerio<El>,
-  warnings: string[],
+  ctx: ParseContext,
 ): ColumnBlock | null {
-  warnings.push(
+  ctx.warnings.push(
     `Static product block with hardcoded content — decomposed to COLUMN of images. Title and button are dropped; consider converting to dynamic products in Redo.`,
   );
 

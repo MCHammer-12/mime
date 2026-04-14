@@ -2,12 +2,13 @@ import type { SpacerBlock } from "../../renderer/types.js";
 import { EmailBlockType } from "../../renderer/types.js";
 import { parseInlineStyles, parsePx } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
+import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
 
 export function parseSpacerBlock(
   $: $,
   $wrapper: cheerio.Cheerio<El>,
-  _warnings: string[],
+  _ctx: ParseContext,
 ): SpacerBlock | null {
   const outerTd = $wrapper.find("td").first();
   const outerStyle = parseInlineStyles(outerTd.attr("style"));

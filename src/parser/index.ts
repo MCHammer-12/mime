@@ -9,9 +9,9 @@
  */
 
 import * as cheerio from "cheerio";
-import type { Section, SpacerBlock } from "../renderer/types.js";
+import type { Section } from "../renderer/types.js";
 import { EmailBlockType } from "../renderer/types.js";
-import { parseInlineStyles, parsePx } from "./style-utils.js";
+import { parseInlineStyles } from "./style-utils.js";
 import { type $, type El, findCls, hasClass, resetBlockCounter, sel } from "./helpers.js";
 
 // Block parsers
@@ -28,16 +28,44 @@ import { parseProductBlock } from "./blocks/product.js";
 import { tryParseDiscountFromText } from "./blocks/discount.js";
 import { tryParseKlaviyoSpecific } from "./blocks/klaviyo-specific.js";
 
-export interface ParseResult {
-  sections: Section[];
+export interface UnsupportedFeature {
+  blockType: EmailBlockType;
+  reason: string;
+  context: string;
+}
+
+export interface ReviewItem {
+  blockType: EmailBlockType;
+  variableName: string;
+  context: string;
+}
+
+export interface SkippedBlock {
+  blockType: "video" | "preview-quote" | "drop-shadow";
+  reason: string;
+}
+
+export interface ParseContext {
   warnings: string[];
+  unsupportedFeatures: UnsupportedFeature[];
+  reviewItems: ReviewItem[];
+  skippedBlocks: SkippedBlock[];
+}
+
+export interface ParseResult extends ParseContext {
+  sections: Section[];
   bodyBackgroundColor: string;
 }
 
 export function parseKlaviyoHtml(html: string): ParseResult {
   resetBlockCounter();
   const $ = cheerio.load(html);
-  const warnings: string[] = [];
+  const ctx: ParseContext = {
+    warnings: [],
+    unsupportedFeatures: [],
+    reviewItems: [],
+    skippedBlocks: [],
+  };
   const sections: Section[] = [];
 
   // Extract body background color
@@ -52,8 +80,8 @@ export function parseKlaviyoHtml(html: string): ParseResult {
   const boundParseColumnContent = (
     $: $,
     $col: cheerio.Cheerio<El>,
-    w: string[],
-  ) => parseColumnContent($, $col, w, bodyBackgroundColor);
+    c: ParseContext,
+  ) => parseColumnContent($, $col, c, bodyBackgroundColor);
 
   // Walk all kl-row elements in document order
   const rows = $(sel("kl-row"));
@@ -63,16 +91,16 @@ export function parseKlaviyoHtml(html: string): ParseResult {
     const $columns = $row.children(sel("kl-column"));
 
     if ($columns.length > 1) {
-      const rowSections = parseColumnRow($, $columns, warnings, boundParseColumnContent);
+      const rowSections = parseColumnRow($, $columns, ctx, boundParseColumnContent);
       sections.push(...rowSections);
     } else if ($columns.length === 1) {
       const $col = $columns.first();
-      const innerBlocks = boundParseColumnContent($, $col, warnings);
+      const innerBlocks = boundParseColumnContent($, $col, ctx);
       sections.push(...innerBlocks);
     }
   });
 
-  return { sections, warnings, bodyBackgroundColor };
+  return { sections, ...ctx, bodyBackgroundColor };
 }
 
 // ─── Single column content extraction (dispatcher) ──────────────
@@ -80,7 +108,7 @@ export function parseKlaviyoHtml(html: string): ParseResult {
 function parseColumnContent(
   $: $,
   $col: cheerio.Cheerio<El>,
-  warnings: string[],
+  ctx: ParseContext,
   bodyBackgroundColor: string,
 ): Section[] {
   const blocks: Section[] = [];
@@ -94,7 +122,7 @@ function parseColumnContent(
     const klaviyoSpecific = tryParseKlaviyoSpecific(
       $,
       $wrapper,
-      warnings,
+      ctx,
       bodyBackgroundColor,
     );
     if (klaviyoSpecific !== null) {
@@ -104,9 +132,9 @@ function parseColumnContent(
 
     // Header/Logo/Menu block
     if (hasClass($wrapper, "hlb-wrapper")) {
-      const headerBlocks = parseHeaderBlock($, $wrapper, warnings);
+      const headerBlocks = parseHeaderBlock($, $wrapper, ctx);
       blocks.push(...headerBlocks);
-      const menuBlock = parseMenuFromHeader($, $wrapper, warnings);
+      const menuBlock = parseMenuFromHeader($, $wrapper, ctx);
       if (menuBlock) blocks.push(menuBlock);
       return;
     }
@@ -115,12 +143,12 @@ function parseColumnContent(
     const $textTd = findCls($wrapper, "kl-text");
     if ($textTd.length > 0) {
       const $first = $textTd.first();
-      const discountSplit = tryParseDiscountFromText($, $first, warnings);
+      const discountSplit = tryParseDiscountFromText($, $first, ctx);
       if (discountSplit) {
         blocks.push(...discountSplit);
         return;
       }
-      const block = parseTextBlock($, $first, warnings);
+      const block = parseTextBlock($, $first, ctx);
       if (block) blocks.push(block);
       return;
     }
@@ -128,7 +156,7 @@ function parseColumnContent(
     // Image block
     const $imageTd = findCls($wrapper, "kl-image");
     if ($imageTd.length > 0) {
-      const block = parseImageBlock($, $imageTd.first(), $wrapper, warnings);
+      const block = parseImageBlock($, $imageTd.first(), $wrapper, ctx);
       if (block) blocks.push(block);
       return;
     }
@@ -136,7 +164,7 @@ function parseColumnContent(
     // Button block
     const $buttonTd = findCls($wrapper, "kl-button");
     if ($buttonTd.length > 0) {
-      const block = parseButtonBlock($, $buttonTd.first(), warnings);
+      const block = parseButtonBlock($, $buttonTd.first(), ctx);
       if (block) blocks.push(block);
       return;
     }
@@ -144,7 +172,7 @@ function parseColumnContent(
     // Split block
     const $splitTd = findCls($wrapper, "kl-split");
     if ($splitTd.length > 0) {
-      const block = parseSplitBlock($, $splitTd.first(), warnings);
+      const block = parseSplitBlock($, $splitTd.first(), ctx);
       if (block) blocks.push(block);
       return;
     }
@@ -152,7 +180,7 @@ function parseColumnContent(
     // Divider line
     const $dividerP = $wrapper.find("p[style*='border-top']");
     if ($dividerP.length > 0) {
-      const block = parseLineBlock($, $dividerP.first(), $wrapper, warnings);
+      const block = parseLineBlock($, $dividerP.first(), $wrapper, ctx);
       if (block) blocks.push(block);
       return;
     }
@@ -162,7 +190,7 @@ function parseColumnContent(
       "img[src*='d3k81ch9hvuctc.cloudfront.net/assets/email/buttons']",
     );
     if ($socialImgs.length > 0) {
-      const block = parseSocialsBlock($, $wrapper, warnings);
+      const block = parseSocialsBlock($, $wrapper, ctx);
       if (block) blocks.push(block);
       return;
     }
@@ -170,7 +198,7 @@ function parseColumnContent(
     // Product grid
     const $productGrid = findCls($wrapper, "kl-product");
     if ($productGrid.length > 0) {
-      const block = parseProductBlock($, $productGrid.first(), warnings);
+      const block = parseProductBlock($, $productGrid.first(), ctx);
       if (block) blocks.push(block);
       return;
     }
@@ -178,13 +206,13 @@ function parseColumnContent(
     // Fallback: spacer (empty wrapper with padding)
     const text = $wrapper.text().trim();
     if (!text && $wrapper.find("img").length === 0) {
-      const spacer = parseSpacerBlock($, $wrapper, warnings);
+      const spacer = parseSpacerBlock($, $wrapper, ctx);
       if (spacer) blocks.push(spacer);
       return;
     }
 
     // Unknown block
-    warnings.push(
+    ctx.warnings.push(
       `Unknown block type in component-wrapper (text: "${text.slice(0, 60)}...")`,
     );
   });
