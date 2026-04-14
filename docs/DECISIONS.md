@@ -1,5 +1,8 @@
 # Decisions
 
+## 2026-04-14 — Socials icon color: lossy mapping to prod enum
+Prod Redo's `SocialIconColor` enum allows only `black`/`white`/`gray`. Local `types.ts` still lists `original` but it fails prod Zod validation. Klaviyo's `/default/` CDN path serves colorful branded icons with no exact Redo equivalent. Decision: `/default/` → `black`. Michael confirmed exact icon color match is not required for migrations as long as background, URLs, and padding are correct.
+
 ## 2026-04-14 — Klaviyo hlb-wrapper → Redo ImageBlock (not HeaderBlock)
 Klaviyo's Header/Logo Bar (`hlb-wrapper`, used by 91% of templates) combines a logo image with optional menu links. Redo has a native `HeaderBlock`, but it auto-pulls the logo from the team's brand kit — unreliable for migrations where the brand kit may not be set. Decision: `parseHeaderBlock` emits an `ImageBlock` for the logo portion (width preserved via calculated horizontal inner padding so a 300px Klaviyo logo renders at ~300px in the 600px Redo email), and `parseMenuFromHeader` separately emits a `MenuBlock` for nav links. The `header.tsx` renderer is now dead code for Klaviyo migrations.
 
