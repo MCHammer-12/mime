@@ -1,5 +1,33 @@
 # Session Log
 
+## 2026-04-14 — Footer block deep-dive (reversed — keep as Text)
+
+**Done**
+- Prototyped Footer block end-to-end: `src/parser/blocks/footer.ts` detecting `kl-text` tds containing `{% unsubscribe %}`, `src/renderer/blocks/footer.tsx` as an MJML analogue of prod `EmailFooter`, dispatcher wire-in in `src/parser/index.ts`, `componentMap` wiring in `src/renderer/index.tsx`, and `element-viewer.ts` typeMap entry.
+- Confirmed extraction correctness on 3 templates (QZCq6B, YchdbL, Sz3XHM): font/color/padding round-trip fine, inner `<div class="textbody">` overrides picked up (Pontano Sans 12px in 2/3).
+- **Reversed the decision after reviewing the rendered footer preview.** Prod FooterBlock forces its own copy/order ("business name / address / Unsubscribe") and destroys Klaviyo's preamble ("No longer want to receive these emails?"). Text block is strictly better: preserves original copy/order verbatim and Redo accepts `{{ unsubscribe_link }}` inline in Text `text` fields (verified via `hasUnsubscribeLink` in `redo/web/.../unsubscribe-link-warning-modal.tsx`).
+- Deleted footer parser/renderer/TODO files, reverted all dispatcher/componentMap/typeMap wire-ins.
+- Rewrote `TODO-SHARED-text.md` PRIORITY 0 with the new plan: export pipeline substitutes `{% unsubscribe %}` → `<a href="{{ unsubscribe_link }}">unsubscribe</a>`, `{{ organization.name }}` → merchant-provided org name, `{{ organization.full_address }}` → formatted merchant address. Org data sourced from Klaviyo Accounts API, falling back to user prompt — placeholders not acceptable.
+
+**Files changed**
+- `src/parser/blocks/TODO-SHARED-text.md` (PRIORITY 0 rewritten)
+- Memory: `project_klaviyo_footer_variables.md` + MEMORY.md hook updated to reflect reversal
+
+**Files created then deleted**
+- `src/parser/blocks/footer.ts`
+- `src/renderer/blocks/footer.tsx`
+- `src/parser/blocks/TODO-SHARED-footer.md`
+
+**Decisions**
+- Keep footer-style text blocks as TextBlock; do NOT convert to Redo's FooterBlock. See DECISIONS.md entry.
+
+**Next steps**
+1. Implement the migration-pipeline text substitution (export-pipeline work, not parser).
+2. Pull org name + address: try Klaviyo Accounts API first, fall back to user prompt; store in `manifest.json` under `account` key.
+3. Audit for non-`{% unsubscribe %}` patterns (`<kl:unsubscribe-link>`, raw unsubscribe URLs) once full template corpus is available.
+
+---
+
 ## 2026-04-14 — Discount block deep-dive
 
 **Done**
