@@ -20,19 +20,44 @@ export function parseInlineStyles(
 }
 
 export function parsePadding(style: Record<string, string>): Padding {
+  let top = 0,
+    right = 0,
+    bottom = 0,
+    left = 0;
+
   if (style["padding"]) {
-    const parts = style["padding"].replace(/px/g, "").trim().split(/\s+/).map(Number);
-    if (parts.length === 1) return { top: parts[0], right: parts[0], bottom: parts[0], left: parts[0] };
-    if (parts.length === 2) return { top: parts[0], right: parts[1], bottom: parts[0], left: parts[1] };
-    if (parts.length === 3) return { top: parts[0], right: parts[1], bottom: parts[2], left: parts[1] };
-    return { top: parts[0], right: parts[1], bottom: parts[2], left: parts[3] };
+    const parts = style["padding"]
+      .replace(/px/g, "")
+      .trim()
+      .split(/\s+/)
+      .map(Number);
+    if (parts.length === 1) {
+      top = right = bottom = left = parts[0]!;
+    } else if (parts.length === 2) {
+      top = bottom = parts[0]!;
+      right = left = parts[1]!;
+    } else if (parts.length === 3) {
+      top = parts[0]!;
+      right = left = parts[1]!;
+      bottom = parts[2]!;
+    } else {
+      top = parts[0]!;
+      right = parts[1]!;
+      bottom = parts[2]!;
+      left = parts[3]!;
+    }
   }
-  return {
-    top: parsePx(style["padding-top"]) ?? 0,
-    right: parsePx(style["padding-right"]) ?? 0,
-    bottom: parsePx(style["padding-bottom"]) ?? 0,
-    left: parsePx(style["padding-left"]) ?? 0,
-  };
+
+  const pt = parsePx(style["padding-top"]);
+  const pr = parsePx(style["padding-right"]);
+  const pb = parsePx(style["padding-bottom"]);
+  const pl = parsePx(style["padding-left"]);
+  if (pt !== undefined) top = pt;
+  if (pr !== undefined) right = pr;
+  if (pb !== undefined) bottom = pb;
+  if (pl !== undefined) left = pl;
+
+  return { top, right, bottom, left };
 }
 
 export function parsePx(value: string | undefined): number | undefined {

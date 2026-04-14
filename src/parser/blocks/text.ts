@@ -1,60 +1,14 @@
 import type { TextBlock } from "../../renderer/types.js";
-import { EmailBlockType, type Padding } from "../../renderer/types.js";
+import { EmailBlockType } from "../../renderer/types.js";
 import {
   parseColor,
   parseFontFamily,
   parseFontSize,
   parseInlineStyles,
-  parsePx,
+  parsePadding,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import type * as cheerio from "cheerio";
-
-/**
- * Parse padding with proper CSS cascade: individual properties override shorthand.
- * The shared parsePadding returns early when shorthand `padding` exists, missing
- * individual overrides like `padding: 0px; padding-top: 18px`.
- */
-function parsePaddingWithOverrides(style: Record<string, string>): Padding {
-  let top = 0,
-    right = 0,
-    bottom = 0,
-    left = 0;
-
-  if (style["padding"]) {
-    const parts = style["padding"]
-      .replace(/px/g, "")
-      .trim()
-      .split(/\s+/)
-      .map(Number);
-    if (parts.length === 1) {
-      top = right = bottom = left = parts[0]!;
-    } else if (parts.length === 2) {
-      top = bottom = parts[0]!;
-      right = left = parts[1]!;
-    } else if (parts.length === 3) {
-      top = parts[0]!;
-      right = left = parts[1]!;
-      bottom = parts[2]!;
-    } else {
-      top = parts[0]!;
-      right = parts[1]!;
-      bottom = parts[2]!;
-      left = parts[3]!;
-    }
-  }
-
-  const pt = parsePx(style["padding-top"]);
-  const pr = parsePx(style["padding-right"]);
-  const pb = parsePx(style["padding-bottom"]);
-  const pl = parsePx(style["padding-left"]);
-  if (pt !== undefined) top = pt;
-  if (pr !== undefined) right = pr;
-  if (pb !== undefined) bottom = pb;
-  if (pl !== undefined) left = pl;
-
-  return { top, right, bottom, left };
-}
 
 const BLOCK_ELEMENT_RE = /<(h[1-6]|div|table|ul|ol|blockquote|hr|pre)[\s>]/i;
 
@@ -262,7 +216,7 @@ export function parseTextBlock(
   return {
     type: EmailBlockType.TEXT,
     blockId: nextId(),
-    sectionPadding: parsePaddingWithOverrides(tdStyle),
+    sectionPadding: parsePadding(tdStyle),
     sectionColor:
       tdStyle["background-color"] || tdStyle["background"] || "#ffffff",
     text: textHtml,
