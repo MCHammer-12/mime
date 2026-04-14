@@ -1,5 +1,34 @@
 # Session Log
 
+## 2026-04-14 — Header block deep-dive + pivot to Image block
+
+**Done**
+- Built element-isolation viewer usage into header block workflow (`npx tsx src/element-viewer.ts header <templates>`)
+- Fixed initial parser discrepancies in `src/parser/blocks/header.ts`:
+  - Logo height heuristic: changed `width/4` → `width/2` (2:1 is typical for logos, not 4:1). Verified against actual image (300x150 PNG).
+  - Alignment: now read from `.hlb-logo` TD's `align` attribute instead of hardcoded `CENTER`
+- Discovered only 27 distinct `hlb-wrapper` structures across 353 templates using it (98% are logo-only, 6% have logo+menu, 0.6% menu-only)
+- Confirmed `gxp-hlb-wrapper` variant (Grid Pixel) is 91% of templates — both prefixes handled by `hasClass()`
+- **Pivoted**: header parser no longer produces `HEADER` blocks. Redo's Header component auto-pulls from brand kit (unreliable for migrations). Instead, `parseHeaderBlock` now returns an `ImageBlock` with the logo. Menu items (when present) continue to be extracted separately by `parseMenuFromHeader` → `MenuBlock`.
+- Logo centering preserved via calculated inner padding: `(600 - sectionPadding - logoWidth) / 2`, so a 300px Klaviyo logo renders at ~300px in the 600px Redo email.
+
+**Key decisions**
+1. **Don't use Redo Header block for migrations** — it auto-pulls logo from brand kit which isn't guaranteed to be set. Use Image block instead for deterministic output.
+2. **Logo width preservation via padding math** — ImageBlock is always full-width, so we inject horizontal inner padding to shrink the rendered image to the original Klaviyo logo width.
+3. **Dispatcher unchanged** — `parseHeaderBlock` function name kept (misleading now), since `src/parser/index.ts` is a frozen shared file during parallel block work.
+
+**Files changed**
+- `src/parser/blocks/header.ts` — now produces `ImageBlock` with calculated padding to preserve logo width
+
+**Non-hlb templates** (~35 templates, cart-discount, checkout-discount, etc.) use plain `kl-image` blocks for logos. Those go through the regular image parser. If we want those treated like headers, needs dispatcher heuristic (first image with "logo" in alt, or similar).
+
+**Next steps**
+1. Rename `parseHeaderBlock` → `parseHeaderLogoAsImage` when dispatcher freeze lifts
+2. Consider deleting `src/renderer/blocks/header.tsx` — now dead code for Klaviyo migrations
+3. Menu block work: address empty menu items with no href (R68eFc has one), add dispatcher heuristic for non-hlb logos
+
+---
+
 ## 2026-04-10 to 2026-04-13 — forwarder research + deterministic parser + local viewer
 
 **Done**

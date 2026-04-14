@@ -1,5 +1,8 @@
 # Decisions
 
+## 2026-04-14 — Klaviyo hlb-wrapper → Redo ImageBlock (not HeaderBlock)
+Klaviyo's Header/Logo Bar (`hlb-wrapper`, used by 91% of templates) combines a logo image with optional menu links. Redo has a native `HeaderBlock`, but it auto-pulls the logo from the team's brand kit — unreliable for migrations where the brand kit may not be set. Decision: `parseHeaderBlock` emits an `ImageBlock` for the logo portion (width preserved via calculated horizontal inner padding so a 300px Klaviyo logo renders at ~300px in the 600px Redo email), and `parseMenuFromHeader` separately emits a `MenuBlock` for nav links. The `header.tsx` renderer is now dead code for Klaviyo migrations.
+
 ## 2026-04-08 — Klaviyo API revision: `2025-10-15`
 The `additional-fields[flow]=definition` param, which returns the full flow graph with edges and branch conditions, is only accepted on revision `2025-10-15` or later. Earlier revisions (including the "current stable" 2024-10-15) return `additional-fields must be in []: (got definition)`. Shared client pinned to `2025-10-15`.
 
