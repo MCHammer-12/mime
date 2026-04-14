@@ -1,5 +1,34 @@
 # Session Log
 
+## 2026-04-14 — Products block (interactive-cart) deep-dive
+
+**Done**
+- Rewrote `src/parser/blocks/product.ts`: now branches on static vs dynamic. Static (hardcoded URLs, no liquid `feeds.` variables) keeps the existing COLUMN-of-images decomposition with a warning. Dynamic (liquid `{% if feeds.|index:N %}` + `{{ item.* }}`) emits a full `interactive-cart` block with styling extracted from the Klaviyo cell: title font/size/color, image corner radius + size bucket (small ≤100 / medium ≤150 / large from `max-height`), button styling (fill, stroke, corner radius, padding, font) reused for both `lineItemButtons` and `checkoutButton`, columns from cell width %, `numberOfProducts` from cell count, `showPrice/Title/Image/Button` detected from liquid var presence.
+- Added a document-level cart-context detector (`CART_CONTEXT_LOOP_RE` scanning the template for `{% for <x> in (event.extra.line_items|items) %}`) memoized per `$` via WeakMap. On hit → `Cart Item` filter default (`products_added_to_cart`, sort price desc, last 90 days, inventory > 0) + `schemaFieldName: "cartContext"`. Otherwise → `Best Sellers` default (random sort via omitted `sortBy`, inventory > 0).
+- Parser output carries a non-prod `_pendingFilter: ProductFilterDoc` on the block. The (not-yet-built) executor will POST this to `https://app-server.getredo.com/marketing-rpc/createProductFilter` and swap the returned `productFilterId` into `recommendedProductFilterId` before creating the template.
+- New placeholder renderer `src/renderer/blocks/product.tsx` draws an N-cell grid styled per the block's own extracted title/button styling — enough to eyeball the layout in the element viewer. Registered in `src/renderer/index.tsx` componentMap under the `"interactive-cart"` string key (widened map type to `Record<string, …>`).
+- Element viewer now filters `product` by `"interactive-cart"` instead of `COLUMN`.
+- Verified on `merchant-2/H76ZS6-newsletter-4-story-boxes` (3×3 dynamic grid, Best Sellers pending filter, extracted Helvetica Neue / 14px / #3d3935 / #1155cc button / cornerRadius 5 / sectionPadding {9,18,9,18}) and static fallback still works on `test-account/QPETZp-flow-template` (4 decomposed COLUMNs + warnings).
+
+**Files changed**
+- `src/parser/blocks/product.ts` (rewritten)
+- `src/parser/blocks/TODO-SHARED-product.md` (new)
+- `src/renderer/blocks/product.tsx` (new)
+- `src/renderer/index.tsx` (+1 import, +1 map entry, widened map type)
+- `src/element-viewer.ts` (typeMap `product` → `"interactive-cart"`)
+- Memory: `project_products_block_mapping.md` + MEMORY.md hook
+
+**Decisions**
+- Dynamic-only for MVP; static decomposition preserved as warning-generating fallback. See DECISIONS.md entry.
+- Filter defaults selected from template HTML alone (Klaviyo Templates API does not expose block-level feed config). Collection-based filters cannot be derived automatically — user must retarget after import.
+
+**Next steps**
+1. Executor work (when the redo/manage import script is built per `reference_template_import_path` memory): wrap `createProductFilter` POST → `EmailTemplateRepo.createTemplate` so `_pendingFilter` → `recommendedProductFilterId` swap happens at import time.
+2. Confirm unresolved enum values in Redo editor: `imageSize` bucket thresholds, `layoutType` value for multi-col. Currently guessed.
+3. When `types.ts` freeze lifts: add `EmailBlockType.PRODUCTS`, `ProductsBlock`, `InlineButton`, `ProductImageSize`, `ProductLayoutType`, `ProductSelectionType` per `TODO-SHARED-product.md`; revert `componentMap` type widening.
+
+---
+
 ## 2026-04-14 — Footer block deep-dive (reversed — keep as Text)
 
 **Done**
