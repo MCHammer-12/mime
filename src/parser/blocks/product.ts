@@ -1,14 +1,17 @@
 import type {
-  ButtonBlock,
   ColumnBlock,
   ImageBlock,
+  InlineButton,
   NonRecursiveBlock,
-  Padding,
+  ProductFilterDoc,
+  ProductImageSize,
+  ProductsBlock,
   Section,
 } from "../../renderer/types.js";
 import {
   Alignment,
   EmailBlockType,
+  Size,
   VerticalAlignment,
 } from "../../renderer/types.js";
 import {
@@ -22,83 +25,6 @@ import {
 import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
-
-// ─── Local type shims (TODO-SHARED-product.md) ──────────────────
-//
-// Redo's interactive-cart block + ProductFilter document aren't in
-// src/renderer/types.ts yet. Defined locally and cast through Section
-// on return. When types.ts is unfrozen, lift these into it.
-
-export interface InlineButton {
-  alignment: Alignment;
-  cornerRadius: number;
-  buttonText: string;
-  padding: Padding;
-  fillColor: string;
-  strokeColor: string;
-  textColor: string;
-  strokeWeight: number;
-  fontFamily: string;
-  fontSize: number;
-}
-
-export type ProductImageSize = "small" | "medium" | "large";
-export type ProductLayoutType = "rows" | "grid";
-export type ProductObjectFit = "cover" | "contain";
-export type ProductSelectionType = "dynamic" | "manual";
-
-export interface ProductsBlock {
-  type: "interactive-cart";
-  blockId: string;
-  sectionPadding: Padding;
-  sectionColor: string;
-  textColor: string;
-  fontFamily: string;
-  titleFontSize?: number;
-  imageCornerRadius: number;
-  checkoutButton: InlineButton;
-  lineItemButtons: InlineButton;
-  numberOfProducts: number;
-  imageSize: ProductImageSize;
-  productSelectionType: ProductSelectionType;
-  showPrice?: boolean;
-  showTitle?: boolean;
-  showImage?: boolean;
-  showButton?: boolean;
-  showQuantity?: boolean;
-  layoutType?: ProductLayoutType;
-  alignment: Alignment;
-  columns: number;
-  stackOnMobile: boolean;
-  manuallySelectedProducts: { productId: string; variantId: string }[];
-  imageAspectRatio?: number;
-  imageObjectFit?: ProductObjectFit;
-  schemaFieldName?: string;
-  provider: "shopify";
-
-  // Non-prod field: the executor reads this, creates the filter via
-  // createProductFilter, then replaces it with recommendedProductFilterId.
-  _pendingFilter?: ProductFilterDoc;
-  recommendedProductFilterId?: string;
-}
-
-export interface ProductFilterDoc {
-  name: string;
-  provider: "shopify";
-  additionalProductFilters: {
-    type: "inventory";
-    inventory: number;
-    comparisonOperator: "greater_than";
-  }[];
-  productRecommendationType:
-    | "best_sellers"
-    | "products_added_to_cart"
-    | "collection";
-  sortBy?: "price_desc" | "price_asc";
-  unit?: "day";
-  value?: number;
-  collectionId?: string;
-}
 
 // ─── Filter defaults ───────────────────────────────────────────────
 
@@ -241,7 +167,7 @@ function parseDynamicProductBlock(
   );
 
   const block: ProductsBlock = {
-    type: "interactive-cart",
+    type: EmailBlockType.PRODUCTS,
     blockId: nextId(),
     sectionPadding,
     sectionColor,
@@ -269,7 +195,7 @@ function parseDynamicProductBlock(
     _pendingFilter: pendingFilter,
   };
 
-  return block as unknown as Section;
+  return block;
 }
 
 function extractInlineButton(
@@ -361,6 +287,9 @@ function parseStaticProductBlock(
         altText: $img.attr("alt") || undefined,
         clickthroughUrl: $link.length > 0 ? $link.attr("href") : undefined,
         padding: { top: 0, right: 0, bottom: 0, left: 0 },
+        horizontalPadding: Size.CUSTOM,
+        verticalPadding: Size.CUSTOM,
+        showCaption: false,
       } satisfies ImageBlock);
     } else {
       cols.push(null);

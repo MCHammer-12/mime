@@ -1,5 +1,5 @@
 import type { ImageBlock } from "../../renderer/types.js";
-import { EmailBlockType, EMAIL_MAX_WIDTH_PX } from "../../renderer/types.js";
+import { EmailBlockType, EMAIL_MAX_WIDTH_PX, Size } from "../../renderer/types.js";
 import { parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
 import { type $, type El, nextId, sel } from "../helpers.js";
 import { classifyKlaviyoUrl } from "../url-mapping.js";
@@ -60,6 +60,8 @@ export function parseImageBlock(
     altText: alt || undefined,
     clickthroughUrl: clickthrough,
     padding,
+    horizontalPadding: Size.CUSTOM,
+    verticalPadding: Size.CUSTOM,
     showCaption: false,
   };
 }

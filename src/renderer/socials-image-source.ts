@@ -121,7 +121,6 @@ export const SocialsIconSource: Record<
   SocialIconColor,
   Record<SocialPlatform, string>
 > = {
-  [SocialIconColor.ORIGINAL]: GraySocialsIconSource,
   [SocialIconColor.BLACK]: BlackSocialsIconSource,
   [SocialIconColor.WHITE]: WhiteSocialsIconSource,
   [SocialIconColor.GRAY]: GraySocialsIconSource,

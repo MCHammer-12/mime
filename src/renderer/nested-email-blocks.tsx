@@ -38,4 +38,5 @@ export const nestedEmailBlocks: Record<
     Component: NestedEmailDiscount,
     useMjmlTextWrapper: true,
   },
+  [EmailBlockType.PRODUCTS]: undefined,
 };

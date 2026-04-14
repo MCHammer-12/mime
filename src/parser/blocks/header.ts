@@ -1,5 +1,5 @@
 import type { ImageBlock, Section } from "../../renderer/types.js";
-import { EmailBlockType, EMAIL_MAX_WIDTH_PX } from "../../renderer/types.js";
+import { EmailBlockType, EMAIL_MAX_WIDTH_PX, Size } from "../../renderer/types.js";
 import { parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
 import { type $, type El, findCls, nextId } from "../helpers.js";
 import { classifyKlaviyoUrl } from "../url-mapping.js";
@@ -67,6 +67,9 @@ export function parseHeaderBlock(
       },
       altText: $logoImg.attr("alt") || undefined,
       clickthroughUrl: logoHref,
+      horizontalPadding: Size.CUSTOM,
+      verticalPadding: Size.CUSTOM,
+      showCaption: false,
     } satisfies ImageBlock);
   }
 

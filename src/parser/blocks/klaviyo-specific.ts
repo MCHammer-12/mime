@@ -13,7 +13,7 @@
 
 import type * as cheerio from "cheerio";
 import type { ImageBlock, Section } from "../../renderer/types.js";
-import { EmailBlockType } from "../../renderer/types.js";
+import { EmailBlockType, Size } from "../../renderer/types.js";
 import { parseInlineStyles, parsePadding } from "../style-utils.js";
 import { type $, type El, nextId, sel } from "../helpers.js";
 import type { ParseContext } from "../index.js";
@@ -105,6 +105,8 @@ function buildDropShadowImageBlock(
     imageUrl: DROP_SHADOW_LOCAL_PATH,
     altText: "Shadow",
     padding: { top: 0, right: 0, bottom: 0, left: 0 },
+    horizontalPadding: Size.CUSTOM,
+    verticalPadding: Size.CUSTOM,
     showCaption: false,
   };
 }

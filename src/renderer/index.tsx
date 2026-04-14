@@ -22,9 +22,7 @@ import {
   Section,
 } from "./types.js";
 
-// "interactive-cart" is the PRODUCTS block type. Not in EmailBlockType enum
-// yet — see src/parser/blocks/TODO-SHARED-product.md.
-const componentMap: Record<string, React.NamedExoticComponent<any>> = {
+const componentMap: Record<EmailBlockType, React.NamedExoticComponent<any>> = {
   [EmailBlockType.SPACER]: EmailSpacer,
   [EmailBlockType.LINE]: EmailLine,
   [EmailBlockType.TEXT]: EmailText,
@@ -35,7 +33,7 @@ const componentMap: Record<string, React.NamedExoticComponent<any>> = {
   [EmailBlockType.MENU]: EmailMenu,
   [EmailBlockType.SOCIALS]: EmailSocials,
   [EmailBlockType.DISCOUNT]: EmailDiscount,
-  "interactive-cart": EmailProducts,
+  [EmailBlockType.PRODUCTS]: EmailProducts,
 };
 
 const defaultRenderContext: EmailRenderContextType = {

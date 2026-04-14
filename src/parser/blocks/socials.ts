@@ -38,7 +38,7 @@ export function parseSocialsBlock(
     const $img = $link.find("img").first();
     if ($img.length > 0) {
       const c = detectSocialIconColor($img.attr("src") || "");
-      if (detectedColor === null || detectedColor === "original") {
+      if (detectedColor === null) {
         detectedColor = c;
       }
     }
@@ -79,17 +79,14 @@ export function parseSocialsBlock(
 }
 
 function mapIconColor(raw: string | null): SocialIconColor {
-  // Prod SocialIconColor enum is black/white/gray only — map "original"
-  // (Klaviyo /default/ colorful brand icons) to BLACK since it's the
+  // Prod SocialIconColor enum is black/white/gray only. Klaviyo /default/
+  // colorful brand icons ("original") get mapped to BLACK since it's the
   // closest valid prod value for a solid-styled icon set.
   switch (raw) {
     case "white":
       return SocialIconColor.WHITE;
     case "gray":
       return SocialIconColor.GRAY;
-    case "black":
-    case "original":
-    case null:
     default:
       return SocialIconColor.BLACK;
   }

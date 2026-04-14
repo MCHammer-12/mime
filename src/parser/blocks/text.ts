@@ -14,37 +14,16 @@ import type * as cheerio from "cheerio";
 const BLOCK_ELEMENT_RE = /<(h[1-6]|div|table|ul|ol|blockquote|hr|pre)[\s>]/i;
 
 /**
- * Wrap plain text in <p> tags, applying text-align if non-default.
- * Avoids wrapping block-level elements (h1-h6, table, etc.) in <p>.
+ * Wrap plain text in <p> tags. Block-level elements (h1-h6, table, etc.)
+ * and HTML that already contains <p> tags are returned as-is.
+ *
+ * Alignment used to be written into the HTML here; now it's emitted as
+ * TextBlock.textAlign and consumed by the renderer instead.
  */
-function wrapText(
-  html: string,
-  textAlign: string | undefined,
-): string {
-  const alignStyle =
-    textAlign && textAlign !== "left"
-      ? ` style="text-align: ${textAlign}"`
-      : "";
-
-  if (html.includes("<p")) {
-    if (alignStyle && !html.includes("text-align")) {
-      return html.replace(/<p(?=[\s>])/g, `<p${alignStyle}`);
-    }
-    return html;
-  }
-
+function wrapText(html: string): string {
+  if (html.includes("<p")) return html;
   if (BLOCK_ELEMENT_RE.test(html)) return html;
-
-  return `<p${alignStyle}>${html}</p>`;
-}
-
-/**
- * Wrap text content in a div with line-height when it differs from the
- * renderer's default (1.42). The inline style overrides MjmlText's lineHeight.
- */
-function applyLineHeight(html: string, lineHeight: string | undefined): string {
-  if (!lineHeight || lineHeight === "1.42") return html;
-  return `<div style="line-height: ${lineHeight}">${html}</div>`;
+  return `<p>${html}</p>`;
 }
 
 /** Strip empty <table> elements that are template noise. */
@@ -210,9 +189,10 @@ export function parseTextBlock(
 
   textHtml = stripEmptyTables(textHtml);
   textHtml = stripStandaloneCoupons(textHtml);
+  textHtml = wrapText(textHtml);
+
   const textAlign = divStyle["text-align"];
-  textHtml = wrapText(textHtml, textAlign);
-  textHtml = applyLineHeight(textHtml, divStyle["line-height"]);
+  const lineHeight = divStyle["line-height"];
 
   return {
     type: EmailBlockType.TEXT,
@@ -225,5 +205,7 @@ export function parseTextBlock(
     fontSize: parseFontSize(divStyle["font-size"]),
     fontFamily: parseFontFamily(divStyle["font-family"]),
     linkColor: parseColor(linkStyle["color"] || divStyle["color"]),
+    ...(textAlign ? { textAlign } : {}),
+    ...(lineHeight ? { lineHeight } : {}),
   };
 }

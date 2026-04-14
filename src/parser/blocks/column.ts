@@ -7,7 +7,7 @@ import type {
   Section,
   TextBlock,
 } from "../../renderer/types.js";
-import { EmailBlockType, VerticalAlignment } from "../../renderer/types.js";
+import { EmailBlockType, Size, VerticalAlignment } from "../../renderer/types.js";
 import {
   parseColor,
   parseFontFamily,
@@ -258,6 +258,8 @@ function parseSplitSubblock(
       altText: $img.attr("alt") || undefined,
       clickthroughUrl: $link.length > 0 ? $link.attr("href") : undefined,
       padding: subblockPadding,
+      horizontalPadding: Size.CUSTOM,
+      verticalPadding: Size.CUSTOM,
       showCaption: false,
     } satisfies ImageBlock;
   }

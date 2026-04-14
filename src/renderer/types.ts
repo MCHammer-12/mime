@@ -21,6 +21,19 @@ export enum EmailBlockType {
   MENU = "menu",
   SOCIALS = "socials",
   DISCOUNT = "discount",
+  PRODUCTS = "interactive-cart",
+}
+
+export enum Size {
+  SMALL = "small",
+  MEDIUM = "medium",
+  LARGE = "large",
+  CUSTOM = "custom",
+}
+
+export enum ImageType {
+  URL = "url",
+  UPLOAD = "upload",
 }
 
 export const TRACKING_ATTRIBUTES_CLASS_PREFIX = "redo-track-";
@@ -89,7 +102,6 @@ export enum SocialPlatform {
 }
 
 export enum SocialIconColor {
-  ORIGINAL = "original",
   BLACK = "black",
   WHITE = "white",
   GRAY = "gray",
@@ -130,6 +142,8 @@ export interface LineBlock extends BaseBlock {
   type: EmailBlockType.LINE;
   color: string;
   padding: Padding;
+  horizontalPadding: Size;
+  verticalPadding: Size;
 }
 
 export interface TextBlock extends BaseBlock {
@@ -139,6 +153,8 @@ export interface TextBlock extends BaseBlock {
   fontFamily: string;
   linkColor: string;
   text: string;
+  lineHeight?: string;
+  textAlign?: string;
 }
 
 export interface ButtonBlock extends BaseBlock {
@@ -182,12 +198,15 @@ export interface ImageBlock extends BaseBlock {
   type: EmailBlockType.IMAGE;
   imageUrl: string;
   croppedImageUrl?: string;
-  showCaption?: boolean;
+  showCaption: boolean;
   caption?: string;
   altText?: string;
   clickthroughUrl?: string;
   aspectRatio?: number;
   padding: Padding;
+  horizontalPadding: Size;
+  verticalPadding: Size;
+  imageSourceType?: ImageType;
   cropConfig?: CropConfigV1;
   cropConfigV2?: CropConfigV2;
 }
@@ -253,6 +272,80 @@ export interface DiscountBlock extends BaseBlock {
   discountId?: string;
 }
 
+// ---------------------------- Products block ----------------------------
+
+export interface InlineButton {
+  alignment: Alignment;
+  cornerRadius: number;
+  buttonText: string;
+  padding: Padding;
+  fillColor: string;
+  strokeColor: string;
+  textColor: string;
+  strokeWeight: number;
+  fontFamily: string;
+  fontSize: number;
+}
+
+export type ProductImageSize = "small" | "medium" | "large";
+export type ProductLayoutType = "rows" | "grid";
+export type ProductObjectFit = "cover" | "contain";
+export type ProductSelectionType = "dynamic" | "manual";
+
+export interface ManuallySelectedProduct {
+  productId: string;
+  variantId: string;
+}
+
+export interface ProductFilterDoc {
+  name: string;
+  provider: "shopify";
+  additionalProductFilters: {
+    type: "inventory";
+    inventory: number;
+    comparisonOperator: "greater_than";
+  }[];
+  productRecommendationType:
+    | "best_sellers"
+    | "products_added_to_cart"
+    | "collection";
+  sortBy?: "price_desc" | "price_asc";
+  unit?: "day";
+  value?: number;
+  collectionId?: string;
+}
+
+export interface ProductsBlock extends BaseBlock {
+  type: EmailBlockType.PRODUCTS;
+  textColor: string;
+  fontFamily: string;
+  titleFontSize?: number;
+  imageCornerRadius: number;
+  checkoutButton: InlineButton;
+  lineItemButtons: InlineButton;
+  numberOfProducts: number;
+  imageSize: ProductImageSize;
+  productSelectionType: ProductSelectionType;
+  showPrice?: boolean;
+  showTitle?: boolean;
+  showImage?: boolean;
+  showButton?: boolean;
+  showQuantity?: boolean;
+  layoutType?: ProductLayoutType;
+  alignment: Alignment;
+  columns: number;
+  stackOnMobile: boolean;
+  manuallySelectedProducts: ManuallySelectedProduct[];
+  imageAspectRatio?: number;
+  imageObjectFit?: ProductObjectFit;
+  schemaFieldName?: string;
+  provider: "shopify";
+  recommendedProductFilterId?: string;
+  // Non-prod: executor reads this, POSTs to createProductFilter, then replaces
+  // it with recommendedProductFilterId. Stripped before the template reaches prod.
+  _pendingFilter?: ProductFilterDoc;
+}
+
 export type NonRecursiveBlock =
   | SpacerBlock
   | LineBlock
@@ -274,7 +367,7 @@ export interface ColumnBlock extends BaseBlock {
   columnWidths?: number[] | null;
 }
 
-export type Section = NonRecursiveBlock | ColumnBlock;
+export type Section = NonRecursiveBlock | ColumnBlock | ProductsBlock;
 
 // ---------------------------- Hydrated types ----------------------------
 
@@ -310,6 +403,7 @@ export namespace Section {
   export type Menu = MenuBlock;
   export type Socials = SocialsBlock;
   export type Discount = DiscountBlock;
+  export type Products = ProductsBlock;
 }
 
 export type HttpsUrl = `https://${string}`;

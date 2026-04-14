@@ -207,10 +207,11 @@ export const EmailText = memo(function EmailText(
     >
       <MjmlColumn>
         <MjmlText
+          align={props.textAlign as any}
           color={props.textColor}
           fontFamily={fontFamilyWithFallback}
           fontSize={props.fontSize}
-          lineHeight="1.42"
+          lineHeight={props.lineHeight ?? "1.42"}
           padding="0"
         >
           {parsedText}
@@ -242,7 +243,8 @@ export const NestedEmailText = memo(function NestedEmailText(
         color: props.textColor,
         fontFamily: fontFamilyWithFallback,
         fontSize: props.fontSize,
-        lineHeight: "1.42", // From Quill's core stylesheet
+        lineHeight: props.lineHeight ?? "1.42",
+        textAlign: props.textAlign as any,
         backgroundColor: props.sectionColor,
         paddingBottom: padding.bottom,
         paddingLeft: padding.left,
