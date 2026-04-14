@@ -1,5 +1,8 @@
 # Decisions
 
+## 2026-04-14 — Discount: split text block, not a hybrid
+Klaviyo `{% coupon_code 'Name' %}` can appear either standalone (its own line between `<br/>`s) or inline in a sentence. Redo has no inline coupon primitive — a coupon must be its own DiscountBlock with an associated Redo discount object. Decision: deterministic parser handles standalone coupons only, splitting the surrounding text block into `[text, discount, text]`; inline coupons are left in the text block for the migration's downstream AI-rewrite pass to handle. Michael explicitly confirmed this over a "text/discount hybrid" block, which was considered and rejected because the prod schema offers no such hybrid.
+
 ## 2026-04-14 — Socials icon color: lossy mapping to prod enum
 Prod Redo's `SocialIconColor` enum allows only `black`/`white`/`gray`. Local `types.ts` still lists `original` but it fails prod Zod validation. Klaviyo's `/default/` CDN path serves colorful branded icons with no exact Redo equivalent. Decision: `/default/` → `black`. Michael confirmed exact icon color match is not required for migrations as long as background, URLs, and padding are correct.
 

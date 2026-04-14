@@ -1,5 +1,33 @@
 # Session Log
 
+## 2026-04-14 — Discount block deep-dive
+
+**Done**
+- New parser `src/parser/blocks/discount.ts` exports `tryParseDiscountFromText`. Given a `kl-text` TD, it scans the inner HTML for standalone `{% coupon_code 'Name' %}` variables (bounded by `<br/>` or string edges) and splits the text block into `[text before, discount, text after, ...]` — multiple coupons per block handled.
+- Inline mid-sentence coupons (e.g. "Just use code {% coupon_code %} at checkout") are intentionally left in the text block for the downstream AI-rewrite pass; they never produce a discount block from the deterministic parser.
+- Style cascade is innermost-wins: coupon's immediate `<span style=...>` → inherited open wrappers (via a small tag-stack walk) → outer text-block div. This correctly picks up nested `text-align: center` and wrapping-span `font-family: Alegreya Sans` even when the outer div is `text-align: left` / `Helvetica Neue`.
+- Wired into the dispatcher (`src/parser/index.ts`) between the footer check and the normal text parser. When the discount splitter returns a non-null array we push those blocks and skip the text parser for that wrapper.
+- Renderer (`src/renderer/blocks/discount.tsx`) now falls back to `"XXXXXX"` when `props.discountCode` is undefined outside the builder env — so parser preview shows a visible placeholder instead of an empty block.
+- Verified against RyMuGA-2 (standalone, single `<br/>` bounds) and XvRVJY-2 (standalone, `<br/><br/>` bounds) via `src/element-viewer.ts discount …`. Batch parser green: 415 templates, 0 failures.
+
+**Files changed**
+- `src/parser/blocks/discount.ts` (new)
+- `src/parser/blocks/TODO-SHARED-discount.md` (new)
+- `src/parser/index.ts` (wiring — 1 import + 5-line dispatch)
+- `src/renderer/blocks/discount.tsx` (XXXXXX fallback)
+
+**Decisions**
+- Split into separate blocks (text + discount + text) rather than a text/discount "hybrid" block. Confirmed by Michael: this matches `project_coupon_to_discount.md` — Redo has no inline coupon primitive, so the discount must be its own block with an associated Redo discount object. The "hybrid" idea was considered but not chosen.
+- Klaviyo coupon name (e.g. `"AbandonedCheckout"`) is **not** stored on the parsed DiscountBlock. Per project memory, the downstream flow generates a real Redo discount using a user-provided prefix + AI-inferred amount/type; the Klaviyo name isn't the mapping key.
+- Inline coupons are not touched by this terminal — they stay in the text block until the migration's AI-rewrite pass runs.
+- Discount blocks are rare in the Klaviyo dataset (only 2 of 415 test templates produce one with standalone coupons), so rare-case correctness was prioritized over coverage.
+
+**Next steps**
+1. Implement the migration-layer transforms referenced in `project_coupon_to_discount.md`: (a) discount object creation via Redo API with user-supplied prefix, (b) LLM rewrite of text blocks containing inline coupons.
+2. Consider whether `stripStandaloneCoupons` in `blocks/text.ts` can be deleted once the splitter has proven coverage — it's now redundant for standalone cases but harmless as a safety net.
+
+---
+
 ## 2026-04-14 — Menu block deep-dive
 
 **Done**
