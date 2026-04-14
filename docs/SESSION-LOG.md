@@ -1,5 +1,28 @@
 # Session Log
 
+## 2026-04-14 — Menu block deep-dive
+
+**Done**
+- Fixed `parseMenuFromHeader` across H76ZS6, Hda2jD, K4ca2Z (all 1-item HLBs) plus multi-item examples YjRTWe and X57xAh (3 items each).
+- `sectionPadding` now extracted from `hlb-block-settings-content` (was hardcoded `{0,0,0,0}`, causing horizontal misalignment with the sibling logo image). Top zeroed when an `hlb-logo` sibling exists so the split image+menu sections don't double up vertical padding.
+- Iterate per `kl-hlb-wrap` wrapper instead of `.find("a")` across the whole wrapper block — pairs each item with its own alignment attribute.
+- `alignment` now read from the wrapper's `align` attribute (was hardcoded `CENTER`).
+- Font-weight, font-style, and text-decoration extracted from link inline style and encoded into label HTML as `<strong>`/`<em>`/`<u>` wrappers (bold = weight ≥ 600 or "bold"/"bolder").
+
+**Files changed**
+- `src/parser/blocks/menu.ts`
+
+**Decisions**
+- Font-weight / italic / underline carried via Quill-style inline tags in label HTML since `MenuBlock` schema has no `fontWeight` field.
+- Didn't wire up `itemSpacing` / `useCustomSpacing`. Klaviyo's `mso-padding-alt` + `<a>` `padding` describes per-link internal padding (button-styled link), not inter-item gap. Redo's itemSpacing would subtract from section padding and shift the text, degrading alignment. Leave unset.
+- Only 2 of 388 test templates have true multi-item menus — most Klaviyo HLBs in this dataset are logo + single CTA link.
+
+**Next steps**
+1. Consider Header/Menu consolidation — some HLBs might be better represented as a Header block (logo) + Button block (single CTA) rather than Image + 1-item Menu.
+2. If a menu-only HLB (no logo) shows up, verify top padding applies correctly (code path exists but untested).
+
+---
+
 ## 2026-04-14 — Socials block deep-dive
 
 **Done**
