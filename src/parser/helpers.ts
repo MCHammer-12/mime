@@ -3,16 +3,16 @@
  */
 
 import * as cheerio from "cheerio";
+import { ObjectId } from "bson";
 
 export type $ = cheerio.CheerioAPI;
 export type El = cheerio.Element;
 
-let blockCounter = 0;
 export function resetBlockCounter(): void {
-  blockCounter = 0;
+  // no-op: blockIds are now ObjectIds, not sequential counters
 }
 export function nextId(): string {
-  return `block-${++blockCounter}`;
+  return new ObjectId().toString();
 }
 
 /** Select by class, matching both kl- and gxp-kl- variants */

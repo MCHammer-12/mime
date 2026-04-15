@@ -47,20 +47,15 @@ if (jsonPath) {
   };
 }
 
-// Stamp blockIds (production uses MongoDB ObjectIds)
-const sectionsWithIds = sections.map((s) => ({
-  ...s,
-  blockId: new ObjectId().toString(),
-}));
-
 // Build the complete EmailTemplate object — same shape as Redo's MongoDB document
+// (parser already stamps ObjectId blockIds on every block, including nested column children)
 const emailTemplate = {
   _id: new ObjectId().toString(),
   name: klaviyoMeta.name || htmlPath.split("/").pop()?.replace(".html", "") || "Imported Template",
   subject: klaviyoMeta.subject || "",
   templateType: "marketing",
   category: "Marketing",
-  schemaType: "marketing-email",
+  schemaType: "marketing_email",
   emailPreview: null,
   emailBackgroundColor: bodyBackgroundColor,
   contentBackgroundColor: "#ffffff",
@@ -70,7 +65,7 @@ const emailTemplate = {
     cityStateZip: "City, ST 12345",
     country: "United States",
   },
-  sections: sectionsWithIds,
+  sections,
   linkColor: "#0000ee",
   team: null, // Set to actual teamId when importing
   createdAt: klaviyoMeta.created || new Date().toISOString(),
