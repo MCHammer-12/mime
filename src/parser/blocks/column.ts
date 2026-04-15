@@ -81,14 +81,25 @@ export function parseColumnRow(
     return perColumnBlocks.flat();
   }
 
+  // Bail when zippering would produce >1 stacked ColumnBlock. Redo's
+  // ColumnBlock stacks each row as its own full-width section on mobile,
+  // which breaks the per-column reading order Klaviyo gives you. Emit the
+  // contents flat with a warning so the importer can review post-import.
+  const nestablePerColumn: NonRecursiveBlock[][] = perColumnBlocks.map((arr) =>
+    arr.filter((b): b is NonRecursiveBlock => NESTABLE_TYPES.has(b.type)),
+  );
+  const wouldStack = nestablePerColumn.some((a) => a.length > 1);
+  if (wouldStack) {
+    ctx.warnings.push(
+      `Multi-column row has stacked content per column — emitting contents flat (mobile reflow won't preserve column-by-column order). Review post-import.`,
+    );
+    return perColumnBlocks.flat();
+  }
+
   const $row = $columns.first().parent();
   const stackOnMobile = hasClass($row, "colstack") || $row.hasClass("colstack");
   const { sectionColor } = extractRowContext($, $columns);
 
-  // Zipper: cast nestable blocks into row-indexed ColumnBlock sections.
-  const nestablePerColumn: NonRecursiveBlock[][] = perColumnBlocks.map((arr) =>
-    arr.filter((b): b is NonRecursiveBlock => NESTABLE_TYPES.has(b.type)),
-  );
   const rowCount = Math.max(1, ...nestablePerColumn.map((a) => a.length));
 
   const sections: ColumnBlock[] = [];

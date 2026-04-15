@@ -18,7 +18,7 @@ import { type $, type El, findCls, hasClass, resetBlockCounter, sel } from "./he
 import { parseTextBlock } from "./blocks/text.js";
 import { parseImageBlock } from "./blocks/image.js";
 import { parseButtonBlock } from "./blocks/button.js";
-import { parseHeaderBlock } from "./blocks/header.js";
+import { parseHeaderLogoAsImage } from "./blocks/header.js";
 import { parseMenuFromHeader } from "./blocks/menu.js";
 import { parseLineBlock } from "./blocks/line.js";
 import { parseSpacerBlock } from "./blocks/spacer.js";
@@ -132,7 +132,7 @@ function parseColumnContent(
 
     // Header/Logo/Menu block
     if (hasClass($wrapper, "hlb-wrapper")) {
-      const headerBlocks = parseHeaderBlock($, $wrapper, ctx);
+      const headerBlocks = parseHeaderLogoAsImage($, $wrapper, ctx);
       blocks.push(...headerBlocks);
       const menuBlock = parseMenuFromHeader($, $wrapper, ctx);
       if (menuBlock) blocks.push(menuBlock);

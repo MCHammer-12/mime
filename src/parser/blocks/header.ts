@@ -12,7 +12,7 @@ import type * as cheerio from "cheerio";
  * which isn't reliable for migrations. Instead, we convert the logo portion to
  * a plain Image block (menu items are handled separately by parseMenuFromHeader).
  */
-export function parseHeaderBlock(
+export function parseHeaderLogoAsImage(
   $: $,
   $wrapper: cheerio.Cheerio<El>,
   ctx: ParseContext,

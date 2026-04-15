@@ -16,8 +16,12 @@ export function parseImageBlock(
   if ($img.length === 0) return null;
 
   const src = $img.attr("src") || "";
-  if (!src) return null;
   const alt = $img.attr("alt") || "";
+  if (!src) {
+    ctx.warnings.push(
+      `Image placeholder (no src) — emitting empty Image block for merchant to fill`,
+    );
+  }
   const $link = $td.find(sel("kl-img-link")).first();
   const clickthrough = $link.length > 0 ? $link.attr("href") || "" : undefined;
   if (clickthrough) classifyKlaviyoUrl(clickthrough, EmailBlockType.IMAGE, ctx);

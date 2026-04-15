@@ -184,7 +184,7 @@ function parseDynamicProductBlock(
     showTitle,
     showImage,
     showButton,
-    layoutType: columns === 1 ? "rows" : "grid",
+    layoutType: columns === 1 ? "rows" : "columns",
     alignment: Alignment.CENTER,
     columns,
     stackOnMobile: true,

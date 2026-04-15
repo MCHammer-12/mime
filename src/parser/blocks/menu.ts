@@ -8,7 +8,7 @@ import type * as cheerio from "cheerio";
 
 /**
  * Extract menu from a header/hlb-wrapper block.
- * Called by the dispatcher after parseHeaderBlock.
+ * Called by the dispatcher after parseHeaderLogoAsImage.
  */
 export function parseMenuFromHeader(
   $: $,

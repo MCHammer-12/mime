@@ -12,12 +12,20 @@ export function parseButtonBlock(
   ctx: ParseContext,
 ): Section | null {
   const $a = $td.find("a").first();
-  if ($a.length === 0) return null;
-
-  const href = $a.attr("href") || "";
-
-  const aStyle = parseInlineStyles($a.attr("style"));
   const $bgTd = $td.find("td[bgcolor]").first();
+  // Klaviyo placeholder buttons have no <a> — text + styling live on the inner <p>
+  const isPlaceholder = $a.length === 0;
+  const $textEl = isPlaceholder ? $bgTd.find("p").first() : $a;
+  if (isPlaceholder && $textEl.length === 0) return null;
+  if (isPlaceholder) {
+    ctx.warnings.push(
+      `Button placeholder (no link) — emitting empty Button block for merchant to fill`,
+    );
+  }
+
+  const href = isPlaceholder ? "" : ($a.attr("href") || "");
+
+  const aStyle = parseInlineStyles($textEl.attr("style"));
   const bgTdStyle = parseInlineStyles($bgTd.attr("style"));
   const bgColor =
     $bgTd.attr("bgcolor") ||
@@ -64,7 +72,7 @@ export function parseButtonBlock(
     blockId: nextId(),
     sectionPadding: parsePadding(outerStyle),
     sectionColor: outerStyle["background-color"] || "#ffffff",
-    buttonText: $a.text().trim(),
+    buttonText: $textEl.text().trim(),
     fillColor: bgColor,
     textColor: parseColor(aStyle["color"]),
     strokeColor,

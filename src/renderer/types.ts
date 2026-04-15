@@ -288,9 +288,9 @@ export interface InlineButton {
 }
 
 export type ProductImageSize = "small" | "medium" | "large";
-export type ProductLayoutType = "rows" | "grid";
+export type ProductLayoutType = "rows" | "columns";
 export type ProductObjectFit = "cover" | "contain";
-export type ProductSelectionType = "dynamic" | "manual";
+export type ProductSelectionType = "dynamic" | "static";
 
 export interface ManuallySelectedProduct {
   productId: string;
