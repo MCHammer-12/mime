@@ -4,7 +4,7 @@
 Automation project for manual processes Michael does at Redo. Primary target: Klaviyo → Redo email migration workflow, and improving Redo's existing HTML → JSON email parser.
 
 ## Status
-Deterministic Klaviyo → Redo email parser working end-to-end. 415 templates tested (90% clean, 0 failures). Full pipeline: Klaviyo HTML → cheerio parse → Section[] → production renderer → HTML. Side-by-side comparison viewer built. EmailTemplate exporter outputs production-shaped MongoDB JSON. Next: demo to eng team, hook up to Redo API for live imports.
+Parser split into per-block modules + deep-dived across all 12 elements (text, image, button, header, menu, line, spacer, socials, column, discount, products, klaviyo-specific). Shared-file refactors (warnings/URL classifier/types/parsePadding) landed. 416 templates parse with 0 failures. Import executor scaffolded in `~/code/redoapp/redo/manage/` (uncommitted). Human-input UX designed end-to-end (8 merchant touchpoints, see `project_migration_human_input_ux` memory + DECISIONS.md). Next: local redoapp setup to run end-to-end test, then PR import executor, then build Package E (migration pipeline: AI for inline coupon rewrite + variable substitution + discount objects + font preflight + Shopify resolver for static products).
 
 ## Two tracks
 - **current/** — deterministic Klaviyo HTML → Redo Section[] parser (no LLM). Uses cheerio to walk kl-*/gxp-kl-* classes. Production renderer cloned from redoapp for local verification.
@@ -19,14 +19,30 @@ Deterministic Klaviyo → Redo email parser working end-to-end. 415 templates te
 - Mermaid for flow visualization
 
 ## Key files — parser + renderer + viewer
-- `src/parser/index.ts` — **main parser**: Klaviyo HTML → Section[] (cheerio, deterministic)
-- `src/parser/style-utils.ts` — inline CSS parsing (padding, colors, fonts, borders, social detection)
+- `src/parser/index.ts` — **dispatcher**: walks rows, delegates to per-block parsers
+- `src/parser/blocks/<type>.ts` — per-element parsers (12 files: text, image, button, header, menu, line, spacer, socials, column, discount, product, klaviyo-specific)
+- `src/parser/blocks/TODO-SHARED-*.md` — follow-up notes per element
+- `src/parser/helpers.ts` — dispatcher helpers (sel, hasClass, findCls, nextId)
+- `src/parser/style-utils.ts` — inline CSS parsing
+- `src/parser/url-mapping.ts` — Klaviyo URL classifier, mapKlaviyoLink, UNSUPPORTED_VARIABLES
+- `src/parser/batch-test.ts` — regression check across all template corpora
 - `src/renderer/index.tsx` — **renderer entry**: Section[] → HTML (production MJML pipeline)
 - `src/renderer/blocks/*.tsx` — production block components (copied from redoapp)
-- `src/renderer/types.ts` — all Redo block types, enums, Hydrated<> wrapper
-- `src/viewer.ts` — side-by-side comparison viewer (Klaviyo vs Redo, desktop/mobile toggle)
+- `src/renderer/types.ts` — all Redo block types, aligned with prod Zod schemas
+- `src/element-viewer.ts` — per-element isolated preview (3+ blocks of one type)
+- `src/viewer.ts` — full side-by-side comparison viewer (Klaviyo vs Redo)
 - `src/export-template.ts` — full EmailTemplate JSON exporter (production MongoDB shape)
 - `src/screenshot.ts` / `src/screenshot-batch.ts` — Playwright visual comparison
+
+## Plans
+- `plans/element-deep-dive.md` — per-element parallel work breakdown (complete)
+- `plans/consolidated-todos.md` — 8 work packages (A–H) for post-deep-dive refactors; A+B+C+D landed
+
+## Import path (in redoapp, not mime)
+- `~/code/redoapp/redo/manage/src/import-klaviyo-templates.ts` — executor script (uncommitted)
+- Uses `EmailTemplateRepo.createTemplate` per pattern in `copy-template-to-teams.ts`
+- Handles `_pendingFilter` → `recommendedProductFilterId` swap via `createProductFilter`
+- See memory: `reference_template_import_path`
 
 ## Key files — extractors
 - `src/klaviyo.ts` — shared client (paginate, retry, revision `2025-10-15`)

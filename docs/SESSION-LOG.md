@@ -1,5 +1,65 @@
 # Session Log
 
+## 2026-04-14 — Integration session: parser split, parallel element work, import path design
+
+**Done**
+- **Parser refactor** — split monolithic `src/parser/index.ts` into per-block modules under `src/parser/blocks/<type>.ts` with a thin dispatcher. Enabled parallel per-element deep-dive work across multiple terminals without merge conflicts.
+- **Element-isolation viewer** — built `src/element-viewer.ts` that parses templates, filters to one block type, renders each matching block in its own card with JSON toggle. Redo-only (no Klaviyo side-by-side); user compares against the real Klaviyo UI independently.
+- **Parallel element deep-dives** (across ~10 terminals): text, image, button, header, menu, line, spacer, socials, column, discount, products, klaviyo-specific (video/preview-quote/drop-shadow). Each terminal wrote its own session log + TODO-SHARED note.
+- **Shared-file refactors (Packages A+B+C+D) landed:**
+  - `6d76162` — Upstreamed `parsePadding` shorthand override bug fix into `src/parser/style-utils.ts`
+  - `9375c37` — Replaced string-prefix warning convention (`REVIEW:`, `UNSUPPORTED:`, `SKIPPED:`) with structured `ParseContext` fields
+  - `3bea718` — Hoisted Klaviyo URL classifier into `src/parser/url-mapping.ts` for reuse across button/image/menu/socials
+  - `caf90ad` — Aligned `src/renderer/types.ts` with prod Zod schemas (PRODUCTS enum, Size, horizontalPadding/verticalPadding, showCaption, lineHeight/textAlign, removed SocialIconColor.ORIGINAL)
+- **TODO-SHARED complete for all 12 elements** — wrote missing files for image, line, header, menu, socials, spacer, column. Previously existed for button, discount, klaviyo-specific, product, text.
+- **Consolidated work plan** — `plans/consolidated-todos.md` groups all per-element TODOs into 8 work packages (A–H) with dependencies and parallelization guidance.
+- **Import executor scaffolded** — `~/code/redoapp/redo/manage/src/import-klaviyo-templates.ts` (216 lines, uncommitted in redoapp) using `ArgumentParser`, `TeamRepo`, `ProductFilterRepo`, `EmailTemplateRepo`. Handles `_pendingFilter` → `recommendedProductFilterId` swap.
+- **Track 4 (polish)** kicked off in parallel terminal.
+- **Local redoapp setup** initiated in separate terminal to enable end-to-end testing against a local MongoDB + running redoapp web/api. Setup documentation being written to `docs/SETUP-local-redoapp.md`.
+- **Human-input UX design** — walked through all 8 merchant-input touchpoints and locked decisions (see DECISIONS.md + `project_migration_human_input_ux` memory): store ID (CLI flag), discount prefix (default "RE"), discount amount/type (trust+prompt ambiguous), org name/address (Klaviyo API→confirm), image-as-button (strip+flag), fonts (preflight block, no upload), URL variables (interactive M/U/S prompts), static products (Shopify resolver with Column fallback).
+- **Research validated:** Klaviyo→Redo template import path (`EmailTemplateRepo.createTemplate` via `redo/manage` script, modeled on `copy-template-to-teams.ts`); brand kit font upload API (scriptable but deferred); Shopify product resolution (live `ShopifyProvider.searchProducts` GraphQL, no cache needed); team vs store ID (same ObjectId, different user-facing term).
+
+**Files created/changed**
+- `src/parser/index.ts` — dispatcher-only refactor
+- `src/parser/helpers.ts` (new)
+- `src/parser/style-utils.ts` — parsePadding shorthand fix
+- `src/parser/url-mapping.ts` (new) — hoisted classifier, mapKlaviyoLink, UNSUPPORTED_VARIABLES
+- `src/parser/blocks/*.ts` — 12 per-element parsers (new from split)
+- `src/parser/blocks/TODO-SHARED-*.md` — per-element follow-up notes (complete set of 12)
+- `src/parser/batch-test.ts` (new) — batch regression check
+- `src/renderer/types.ts` — aligned with prod Zod
+- `src/renderer/blocks/*.tsx` — updated per element deep-dives
+- `src/element-viewer.ts` (new)
+- `plans/element-deep-dive.md` (new)
+- `plans/consolidated-todos.md` (new)
+- `~/code/redoapp/redo/manage/src/import-klaviyo-templates.ts` (new, uncommitted) — import executor scaffold
+- Memory: `reference_template_import_path`, `reference_team_store_id`, `reference_brand_kit_font_upload`, `project_klaviyo_blocks_not_in_redo`, `project_migration_human_input_ux`
+
+**Decisions (see DECISIONS.md)**
+- Static product blocks: Shopify GraphQL handle resolver with Column-of-Images fallback (supersedes earlier "static→Column only" decision)
+- AI-minimal pipeline (AI only for inline coupon sentence rewriting; everything else deterministic+prompts)
+- Font provisioning: preflight-block, no programmatic upload
+- "Store ID" is the user-facing term; internal code uses `team`
+
+**State at session end**
+- Parser: 416 templates parsed, 0 failures (warnings 312, down from 322 before refactor)
+- Packages complete: A, B, C, D
+- Package G: scaffolded in redoapp, not yet tested against live DB
+- Package H (polish): running in parallel terminal
+- Package E (AI migration pipeline): deferred until G + local redoapp setup complete
+- Local redoapp setup: in progress in separate terminal
+
+**Next steps**
+1. Let Track 4 (Package H polish) complete and merge
+2. Let local redoapp setup complete; verify `bazel build //redo/manage:import-klaviyo-templates` succeeds
+3. Seed a test team in local Mongo, run the import script against it with a small migration (e.g. `merchant-2`, 27 templates)
+4. Open imported templates in the local Redo builder UI; verify rendering matches the local viewer
+5. Iterate on any discrepancies
+6. Once local end-to-end works: PR the import executor to redoapp, run against a real test team in prod
+7. After prod path is proven: start Package E (migration pipeline — AI + variable substitution + discount objects + font preflight + Shopify resolver for static products)
+
+---
+
 ## 2026-04-14 — Products block (interactive-cart) deep-dive
 
 **Done**
