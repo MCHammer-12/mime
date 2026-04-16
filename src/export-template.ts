@@ -19,6 +19,7 @@ import { ObjectId } from "bson";
 import { parseKlaviyoHtml } from "./parser/index.js";
 import { fetchAccount } from "./fetch-account.js";
 import { transformSections } from "./transform.js";
+import { buildFontPlan } from "./fonts.js";
 
 async function main() {
   const htmlPath = process.argv[2];
@@ -71,6 +72,11 @@ async function main() {
     console.warn("  Warning: KLAVIYO_API_KEY not set. Skipping variable substitution.");
   }
 
+  // Font plan: collect custom fonts across all blocks, resolve via Google
+  // Fonts. Attached as non-prod `_fontPlan` for the importer to consume
+  // (auto-register resolvable fonts; block on unresolved).
+  const fontPlan = await buildFontPlan(sections);
+
   // Build the complete EmailTemplate object
   const emailTemplate = {
     _id: new ObjectId().toString(),
@@ -94,6 +100,7 @@ async function main() {
     createdAt: klaviyoMeta.created || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     isPlainText: false,
+    _fontPlan: fontPlan,
   };
 
   // Write output
@@ -131,6 +138,16 @@ async function main() {
     console.log(`  Skipped blocks: ${skippedBlocks.length}`);
     for (const s of skippedBlocks)
       console.log(`    - [${s.blockType}] ${s.reason}`);
+  }
+
+  if (fontPlan.entries.length > 0) {
+    console.log(`  Fonts: ${fontPlan.entries.length}${fontPlan.hasUnresolved ? " (unresolved present — importer will block)" : ""}`);
+    for (const e of fontPlan.entries) {
+      const status = e.resolution.available
+        ? `${e.resolution.files.length} files`
+        : `UNRESOLVED: ${e.resolution.reason}`;
+      console.log(`    - ${e.family} [${e.usedBy.join(", ")}] → ${status}`);
+    }
   }
 
   console.log(`\n  Section breakdown:`);
