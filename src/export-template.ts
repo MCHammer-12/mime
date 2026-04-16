@@ -54,22 +54,46 @@ async function main() {
     };
   }
 
-  // Post-parse variable substitution (requires Klaviyo API key)
+  // Post-parse variable substitution + AI inline-coupon rewrite
   const apiKey = process.env.KLAVIYO_API_KEY;
+  const skipAi =
+    process.env.SKIP_AI === "1" ||
+    !(
+      process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ||
+      process.env.ANTHROPIC_API_KEY
+    );
   let sections = rawSections;
   let substitutions: string[] = [];
+  let aiRewrites = 0;
+  let aiUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
 
   if (apiKey) {
     try {
       const account = await fetchAccount(apiKey);
-      const result = transformSections(rawSections, account);
+      const result = await transformSections(rawSections, account, {
+        skipAi,
+      });
       sections = result.sections;
       substitutions = result.substitutions;
+      aiRewrites = result.aiRewrites;
+      aiUsage = result.aiUsage;
     } catch (e: any) {
-      console.warn(`  Warning: Klaviyo account fetch failed (${e.message}). Variables left as-is.`);
+      console.warn(
+        `  Warning: transform failed (${e.message}). Output may be partial.`,
+      );
     }
   } else {
     console.warn("  Warning: KLAVIYO_API_KEY not set. Skipping variable substitution.");
+  }
+  if (skipAi) {
+    console.warn(
+      "  Warning: AI skipped (SKIP_AI=1 or no Anthropic key). Skipping inline-coupon rewrite.",
+    );
   }
 
   // Font plan: collect custom fonts across all blocks, resolve via Google
@@ -115,6 +139,13 @@ async function main() {
   if (substitutions.length > 0) {
     console.log(`  Substitutions: ${substitutions.length}`);
     for (const s of substitutions) console.log(`    - ${s}`);
+  }
+
+  if (aiRewrites > 0) {
+    console.log(`  AI inline-coupon rewrites: ${aiRewrites}`);
+    console.log(
+      `    tokens — input: ${aiUsage.inputTokens}, output: ${aiUsage.outputTokens}, cache read: ${aiUsage.cacheReadTokens}, cache write: ${aiUsage.cacheCreationTokens}`,
+    );
   }
 
   if (warnings.length > 0) {
