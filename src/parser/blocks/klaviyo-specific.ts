@@ -18,9 +18,13 @@ import { parseInlineStyles, parsePadding } from "../style-utils.js";
 import { type $, type El, nextId, sel } from "../helpers.js";
 import type { ParseContext } from "../index.js";
 
-const DROP_SHADOW_LOCAL_PATH = "pics/drop-shadow.png";
-// TODO-SHARED: upload pics/drop-shadow.png to Redo CDN and replace this path
-// with the CDN URL before running migrations against prod templates.
+// On Replit, set `DROP_SHADOW_URL` in Secrets to the deployed static asset URL
+// (e.g. `https://<subdomain>.replit.app/drop-shadow.png`). The PNG itself lives
+// at `pics/drop-shadow.png` and gets bundled into the Replit deploy.
+// See TODO-SHARED-klaviyo-specific.md Priority 0.
+const DROP_SHADOW_URL =
+  process.env.DROP_SHADOW_URL ??
+  "https://PLACEHOLDER.replit.app/drop-shadow.png";
 
 export function tryParseKlaviyoSpecific(
   $: $,
@@ -102,7 +106,7 @@ function buildDropShadowImageBlock(
       outerStyle["background-color"] ||
       wrapperStyle["background-color"] ||
       "#ffffff",
-    imageUrl: DROP_SHADOW_LOCAL_PATH,
+    imageUrl: DROP_SHADOW_URL,
     altText: "Shadow",
     padding: { top: 0, right: 0, bottom: 0, left: 0 },
     horizontalPadding: Size.CUSTOM,

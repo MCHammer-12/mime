@@ -8,12 +8,14 @@ Covers the three Klaviyo block types with no Redo equivalent (see `project_klavi
 | Preview quote (review) | `kl-review-gutter` inside wrapper OR wrapper class matches `kl-review-*` | skip | `SKIPPED:` |
 | Drop shadow | wrapper has `<img src="*bottom_shadow_*.png">` | Image block using local path OR skip | none on success; `REVIEW:` if body bg ≠ white |
 
-## Priority 0: Hoist drop-shadow asset to CDN
+## Priority 0: Set DROP_SHADOW_URL env var on Replit
 
-`imageUrl` is set to the local path `pics/drop-shadow.png`. This will not load when the template is rendered in Redo. Before running migrations against prod templates:
+`DROP_SHADOW_URL` resolves to `process.env.DROP_SHADOW_URL ?? "https://PLACEHOLDER.replit.app/drop-shadow.png"`. The PNG lives at `pics/drop-shadow.png` and will be bundled into the Replit deploy. Before running migrations against prod templates:
 
-1. Upload `pics/drop-shadow.png` to the same CDN/bucket Redo uses for stock imagery
-2. Replace `DROP_SHADOW_LOCAL_PATH` in `klaviyo-specific.ts` with the CDN URL
+1. Deploy mime to Replit (Static Deployment, or static dir of a Reserved VM / Autoscale deploy). Confirm `pics/drop-shadow.png` is served at a public path.
+2. Set `DROP_SHADOW_URL` in Replit Secrets to the real `https://<subdomain>.replit.app/<path>/drop-shadow.png`. No code change required — env-var override is the intended mechanism.
+3. Add an early guard (parser init or export step) that throws if `DROP_SHADOW_URL` still resolves to the `PLACEHOLDER` value, so a misconfigured deploy fails loud instead of shipping broken templates. Not yet implemented.
+4. Sanity-check by opening a parsed template in Gmail and confirming the drop shadow loads.
 
 ## Priority 1: Warning prefix convention → structured fields
 
