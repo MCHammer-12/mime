@@ -21,10 +21,11 @@ export type MappedLink =
 
 const CHECKOUT_URL_PATTERNS: RegExp[] = [
   // {{ event.URL }} — abandoned cart / abandoned checkout default
-  /^\s*\{\{\s*event\.URL\s*\}\}\s*$/,
-  // {{ event.CheckoutURL }}
-  /^\s*\{\{\s*event\.CheckoutURL\s*\}\}\s*$/,
-  // {{ event.extra.checkout_url }} (optionally with |default:'' or similar filters)
+  // (optional Liquid filter suffix, e.g. `|default:''`)
+  /^\s*\{\{\s*event\.URL\s*(\|[^}]*)?\s*\}\}\s*$/,
+  // {{ event.CheckoutURL }} (optional Liquid filter)
+  /^\s*\{\{\s*event\.CheckoutURL\s*(\|[^}]*)?\s*\}\}\s*$/,
+  // {{ event.extra.checkout_url }} (optional Liquid filter)
   /^\s*\{\{\s*event\.extra\.checkout_url\s*(\|[^}]*)?\s*\}\}\s*$/,
 ];
 
@@ -38,7 +39,7 @@ export const UNSUPPORTED_VARIABLES: { pattern: RegExp; reason: string }[] = [
   { pattern: /^gift_card\./i, reason: "gift_card" },
   { pattern: /^customer\.reset_password_url$/i, reason: "customer.reset_password_url" },
   { pattern: /^customer\.account_activation_url$/i, reason: "customer.account_activation_url" },
-  { pattern: /^fulfillment\.tracking_urls/i, reason: "fulfillment.tracking_urls" },
+  { pattern: /^fulfillment\.tracking_urls?/i, reason: "fulfillment.tracking_url(s)" },
   { pattern: /^tracking_url$/i, reason: "tracking_url" },
 ];
 
