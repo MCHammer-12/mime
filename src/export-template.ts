@@ -15,24 +15,36 @@
  */
 
 import { readFileSync, writeFileSync } from "fs";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { ObjectId } from "bson";
 import { parseKlaviyoHtml } from "./parser/index.js";
-import { fetchAccount } from "./fetch-account.js";
+import { fetchAccount, type KlaviyoAccount } from "./fetch-account.js";
 import { transformSections } from "./transform.js";
 import { buildFontPlan } from "./fonts.js";
 
-async function main() {
-  const htmlPath = process.argv[2];
-  const jsonPath = process.argv[3];
+export interface ExportResult {
+  outPath: string;
+  name: string;
+  sectionCount: number;
+  substitutions: string[];
+  aiRewrites: number;
+  aiUsage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number };
+  warnings: string[];
+  unsupportedFeatures: { blockType: string; reason: string; context: string }[];
+  reviewItems: { blockType: string; variableName: string; context: string }[];
+  skippedBlocks: { blockType: string; reason: string }[];
+  fontPlan: Awaited<ReturnType<typeof buildFontPlan>>;
+}
 
-  if (!htmlPath) {
-    console.error(
-      "Usage: KLAVIYO_API_KEY=pk_... npx tsx src/export-template.ts <template.html> [template-api.json]",
-    );
-    process.exit(1);
-  }
-
-  // Parse the HTML
+/**
+ * Core per-template export. Pass a pre-fetched `account` (or null to skip
+ * variable substitution). `skipAi` suppresses the inline-coupon LLM call.
+ */
+export async function exportTemplate(
+  htmlPath: string,
+  opts: { account: KlaviyoAccount | null; skipAi: boolean },
+): Promise<ExportResult> {
   const html = readFileSync(htmlPath, "utf-8");
   const {
     sections: rawSections,
@@ -43,9 +55,10 @@ async function main() {
     bodyBackgroundColor,
   } = parseKlaviyoHtml(html);
 
-  // Read optional Klaviyo API JSON for metadata
+  // Infer metadata from a sibling .json file if present
+  const jsonPath = htmlPath.replace(/\.html$/, ".json");
   let klaviyoMeta: { name?: string; subject?: string; created?: string } = {};
-  if (jsonPath) {
+  if (existsSync(jsonPath)) {
     const raw = JSON.parse(readFileSync(jsonPath, "utf-8"));
     klaviyoMeta = {
       name: raw.attributes?.name || raw.name,
@@ -54,57 +67,29 @@ async function main() {
     };
   }
 
-  // Post-parse variable substitution + AI inline-coupon rewrite
-  const apiKey = process.env.KLAVIYO_API_KEY;
-  const skipAi =
-    process.env.SKIP_AI === "1" ||
-    !(
-      process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ||
-      process.env.ANTHROPIC_API_KEY
-    );
   let sections = rawSections;
   let substitutions: string[] = [];
   let aiRewrites = 0;
-  let aiUsage = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-  };
+  let aiUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
 
-  if (apiKey) {
-    try {
-      const account = await fetchAccount(apiKey);
-      const result = await transformSections(rawSections, account, {
-        skipAi,
-      });
-      sections = result.sections;
-      substitutions = result.substitutions;
-      aiRewrites = result.aiRewrites;
-      aiUsage = result.aiUsage;
-    } catch (e: any) {
-      console.warn(
-        `  Warning: transform failed (${e.message}). Output may be partial.`,
-      );
-    }
-  } else {
-    console.warn("  Warning: KLAVIYO_API_KEY not set. Skipping variable substitution.");
-  }
-  if (skipAi) {
-    console.warn(
-      "  Warning: AI skipped (SKIP_AI=1 or no Anthropic key). Skipping inline-coupon rewrite.",
-    );
+  if (opts.account) {
+    const result = await transformSections(rawSections, opts.account, { skipAi: opts.skipAi });
+    sections = result.sections;
+    substitutions = result.substitutions;
+    aiRewrites = result.aiRewrites;
+    aiUsage = result.aiUsage;
   }
 
-  // Font plan: collect custom fonts across all blocks, resolve via Google
-  // Fonts. Attached as non-prod `_fontPlan` for the importer to consume
-  // (auto-register resolvable fonts; block on unresolved).
   const fontPlan = await buildFontPlan(sections);
 
-  // Build the complete EmailTemplate object
+  const name =
+    klaviyoMeta.name ||
+    htmlPath.split("/").pop()?.replace(".html", "") ||
+    "Imported Template";
+
   const emailTemplate = {
     _id: new ObjectId().toString(),
-    name: klaviyoMeta.name || htmlPath.split("/").pop()?.replace(".html", "") || "Imported Template",
+    name,
     subject: klaviyoMeta.subject || "",
     templateType: "marketing",
     category: "Marketing",
@@ -127,71 +112,103 @@ async function main() {
     _fontPlan: fontPlan,
   };
 
-  // Write output
   const outPath = htmlPath.replace(/\.html$/, ".redo-template.json");
   writeFileSync(outPath, JSON.stringify(emailTemplate, null, 2));
 
-  console.log(`Exported Redo EmailTemplate: ${outPath}`);
-  console.log(`  Name: ${emailTemplate.name}`);
-  console.log(`  Sections: ${emailTemplate.sections.length}`);
-  console.log(`  Background: ${emailTemplate.emailBackgroundColor}`);
+  return {
+    outPath,
+    name,
+    sectionCount: sections.length,
+    substitutions,
+    aiRewrites,
+    aiUsage,
+    warnings,
+    unsupportedFeatures,
+    reviewItems,
+    skippedBlocks,
+    fontPlan,
+  };
+}
 
-  if (substitutions.length > 0) {
-    console.log(`  Substitutions: ${substitutions.length}`);
-    for (const s of substitutions) console.log(`    - ${s}`);
+function printResult(r: ExportResult, verbose: boolean) {
+  console.log(`  Name: ${r.name}`);
+  console.log(`  Sections: ${r.sectionCount}`);
+  if (r.substitutions.length > 0) {
+    console.log(`  Substitutions: ${r.substitutions.length}`);
+    if (verbose) for (const s of r.substitutions) console.log(`    - ${s}`);
   }
+  if (r.aiRewrites > 0) {
+    console.log(`  AI rewrites: ${r.aiRewrites} (in:${r.aiUsage.inputTokens} out:${r.aiUsage.outputTokens} cache-r:${r.aiUsage.cacheReadTokens})`);
+  }
+  if (r.warnings.length > 0) {
+    console.log(`  Warnings: ${r.warnings.length}`);
+    if (verbose) for (const w of r.warnings) console.log(`    - ${w}`);
+  }
+  if (r.unsupportedFeatures.length > 0) {
+    console.log(`  Unsupported: ${r.unsupportedFeatures.length}`);
+    if (verbose) for (const u of r.unsupportedFeatures) console.log(`    - [${u.blockType}] ${u.reason}`);
+  }
+  if (r.reviewItems.length > 0) {
+    console.log(`  Review items: ${r.reviewItems.length}`);
+    if (verbose) for (const ri of r.reviewItems) console.log(`    - [${ri.blockType}] ${ri.variableName}`);
+  }
+  if (r.skippedBlocks.length > 0) {
+    console.log(`  Skipped: ${r.skippedBlocks.length}`);
+    if (verbose) for (const s of r.skippedBlocks) console.log(`    - [${s.blockType}] ${s.reason}`);
+  }
+  if (r.fontPlan.entries.length > 0) {
+    const unresolved = r.fontPlan.entries.filter((e) => !e.resolution.available);
+    console.log(`  Fonts: ${r.fontPlan.entries.length}${unresolved.length > 0 ? ` (${unresolved.length} UNRESOLVED)` : ""}`);
+  }
+}
 
-  if (aiRewrites > 0) {
-    console.log(`  AI inline-coupon rewrites: ${aiRewrites}`);
-    console.log(
-      `    tokens — input: ${aiUsage.inputTokens}, output: ${aiUsage.outputTokens}, cache read: ${aiUsage.cacheReadTokens}, cache write: ${aiUsage.cacheCreationTokens}`,
+async function main() {
+  const htmlPath = process.argv[2];
+
+  if (!htmlPath) {
+    console.error(
+      "Usage: KLAVIYO_API_KEY=pk_... npx tsx src/export-template.ts <template.html>",
     );
+    process.exit(1);
   }
 
-  if (warnings.length > 0) {
-    console.log(`  Warnings: ${warnings.length}`);
-    for (const w of warnings) console.log(`    - ${w}`);
-  }
+  const apiKey = process.env.KLAVIYO_API_KEY;
+  const skipAi =
+    process.env.SKIP_AI === "1" ||
+    !(process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY);
 
-  if (unsupportedFeatures.length > 0) {
-    console.log(`  Unsupported (blocks template): ${unsupportedFeatures.length}`);
-    for (const u of unsupportedFeatures)
-      console.log(`    - [${u.blockType}] ${u.reason} → ${u.context}`);
-  }
+  if (!apiKey) console.warn("  Warning: KLAVIYO_API_KEY not set. Skipping variable substitution.");
+  if (skipAi) console.warn("  Warning: AI skipped (SKIP_AI=1 or no Anthropic key).");
 
-  if (reviewItems.length > 0) {
-    console.log(`  Review items: ${reviewItems.length}`);
-    for (const r of reviewItems)
-      console.log(`    - [${r.blockType}] ${r.variableName} → ${r.context}`);
-  }
-
-  if (skippedBlocks.length > 0) {
-    console.log(`  Skipped blocks: ${skippedBlocks.length}`);
-    for (const s of skippedBlocks)
-      console.log(`    - [${s.blockType}] ${s.reason}`);
-  }
-
-  if (fontPlan.entries.length > 0) {
-    console.log(`  Fonts: ${fontPlan.entries.length}${fontPlan.hasUnresolved ? " (unresolved present — importer will block)" : ""}`);
-    for (const e of fontPlan.entries) {
-      const status = e.resolution.available
-        ? `${e.resolution.files.length} files`
-        : `UNRESOLVED: ${e.resolution.reason}`;
-      console.log(`    - ${e.family} [${e.usedBy.join(", ")}] → ${status}`);
+  let account = null;
+  if (apiKey) {
+    try {
+      account = await fetchAccount(apiKey);
+    } catch (e: any) {
+      console.warn(`  Warning: fetchAccount failed (${e.message}). Skipping substitution.`);
     }
   }
 
-  console.log(`\n  Section breakdown:`);
+  const result = await exportTemplate(htmlPath, { account, skipAi });
+  console.log(`Exported: ${result.outPath}`);
+  printResult(result, true);
+
   const typeCounts: Record<string, number> = {};
-  for (const s of emailTemplate.sections) {
+  // section types aren't on ExportResult directly — re-read the json
+  const written = JSON.parse(readFileSync(result.outPath, "utf-8"));
+  for (const s of written.sections ?? []) {
     typeCounts[s.type] = (typeCounts[s.type] || 0) + 1;
   }
+  console.log("\n  Section breakdown:");
   for (const [type, count] of Object.entries(typeCounts)) {
     console.log(`    ${type}: ${count}`);
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// Only run CLI when invoked directly, not when imported as a module
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
