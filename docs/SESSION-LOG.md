@@ -1,5 +1,51 @@
 # Session Log
 
+## 2026-04-15 — End-to-end import fixes + Package F + E1 variable substitution
+
+**Done**
+- **Three import validation bugs fixed:** ObjectId blockIds (nested columns too), schemaType `marketing-email` → `marketing_email`, stale line block missing horizontalPadding/verticalPadding (already fixed in parser, just needed re-export).
+- **Image/button placeholder support:** parser now emits empty ImageBlock (no src) and ButtonBlock (no `<a>`, reads `<p>` text) instead of silently dropping. Unblocks column-zipper for placeholder-heavy templates.
+- **Stacked-column bail-out:** multi-col rows where each col has >1 block emit flat with a warning instead of zippering into stacked ColumnBlocks (breaks mobile reflow).
+- **Package F (parser polish):** renamed `parseHeaderBlock` → `parseHeaderLogoAsImage`, aligned `ProductLayoutType` (`"grid"` → `"columns"`) and `ProductSelectionType` (`"manual"` → `"static"`) with prod enums. Confirmed F2 (line innerPadding), F4 (parsePadding cascade), F5 (MjmlSection padding audit) were already done.
+- **E1: Footer variable substitution** via Klaviyo Accounts API. New `src/fetch-account.ts` + `src/transform.ts`. Post-parse pass substitutes `{% unsubscribe %}` → `{{ unsubscribe_link }}`, `{{ organization.name/full_address/url }}` → literal values from Accounts API. `export-template.ts` now async, accepts `KLAVIYO_API_KEY`.
+- **merchant-3 extracted:** 388 templates from Klaviyo account `pk_8b9997b013419c24160c5a676da59f2c19` (QuikCamo).
+- **Three templates imported end-to-end** into local redoapp team `Mime` (`69dff28302f64f42e6012a4d`): Newsletter #8 (Snack), Newsletter #4 (Story Boxes) x2 (before/after substitution). All pass Redo schema validation.
+- **Confirmed deep-dive terminals had no unmerged work** — all on main, clean. TODO-SHARED files are the spec; per-element code changes were never implemented (only shared refactors A-D landed). Terminals safe to close.
+
+**Files created/changed**
+- `src/parser/helpers.ts` — ObjectId blockIds
+- `src/parser/blocks/header.ts` — rename → parseHeaderLogoAsImage
+- `src/parser/blocks/image.ts` — placeholder support
+- `src/parser/blocks/button.ts` — placeholder support (no `<a>` fallback)
+- `src/parser/blocks/column.ts` — stacked-col bail-out
+- `src/parser/blocks/product.ts` — layoutType fix
+- `src/parser/blocks/menu.ts` — doc comment update
+- `src/parser/index.ts` — header rename ref
+- `src/renderer/types.ts` — ProductLayoutType + ProductSelectionType aligned
+- `src/export-template.ts` — async, schemaType fix, variable substitution wiring
+- `src/fetch-account.ts` (new) — Klaviyo Accounts API client
+- `src/transform.ts` (new) — post-parse variable substitution
+
+**Decisions**
+- Stacked multi-col → emit flat (not zipper). Mobile reflow breaks with stacked ColumnBlocks.
+- Image/button placeholders: emit empty blocks (imageUrl="" / buttonLink="") with warnings, not drop silently.
+- Variable substitution lives in transform.ts (post-parse), not in parser. Parser stays deterministic.
+
+**State at session end**
+- Parser: 416 templates, 0 failures, 341 warnings
+- Packages complete: A, B, C, D, F, E1, G (import executor)
+- Branch: `claude/trusting-carson` (3 commits ahead of main)
+- Local redoapp running, team Mime has 4+ test templates
+
+**Next steps**
+1. E2: Coupon → Redo discount objects + AI text rewrite
+2. E3: Font provisioning (Google Fonts → S3 → brand kit)
+3. E4: REVIEW list aggregation (interactive variable classification)
+4. E5: Drop-shadow CDN upload
+5. Merge trusting-carson to main
+
+---
+
 ## 2026-04-14 — Integration session: parser split, parallel element work, import path design
 
 **Done**
