@@ -8,3 +8,4 @@ samples/
 .DS_Store
 *.log
 .viewer/
+url-mappings-pending.json
