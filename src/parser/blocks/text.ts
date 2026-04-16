@@ -194,6 +194,16 @@ export function parseTextBlock(
   const textAlign = divStyle["text-align"];
   const lineHeight = divStyle["line-height"];
 
+  // Bake alignment + line-height into <p> tags since Redo's TextBlock schema
+  // has no textAlign/lineHeight fields — they'd be stripped on import.
+  if (textAlign || lineHeight) {
+    const inlineStyle = [
+      textAlign ? `text-align:${textAlign}` : "",
+      lineHeight ? `line-height:${lineHeight}` : "",
+    ].filter(Boolean).join(";");
+    textHtml = textHtml.replace(/<p(?=[\s>])/g, `<p style="${inlineStyle}"`);
+  }
+
   return {
     type: EmailBlockType.TEXT,
     blockId: nextId(),
