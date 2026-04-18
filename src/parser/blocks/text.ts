@@ -11,7 +11,7 @@ import {
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
-import { weightedFamilyName } from "../../fonts.js";
+import { normalizeFontFamilyName, weightedFamilyName } from "../../fonts.js";
 import type * as cheerio from "cheerio";
 
 const BLOCK_ELEMENT_RE = /<(h[1-6]|div|table|ul|ol|blockquote|hr|pre)[\s>]/i;
@@ -136,7 +136,9 @@ export function extractDominantCustomFont(html: string): string | null {
   let match: RegExpExecArray | null;
   while ((match = FONT_FAMILY_RE.exec(decoded)) !== null) {
     for (const raw of parseFontList(match[1]!)) {
-      const normalized = raw.replace(/-Klaviyo-Hosted$/i, "").trim();
+      const normalized = normalizeFontFamilyName(
+        raw.replace(/-Klaviyo-Hosted$/i, "").trim(),
+      );
       if (!normalized) continue;
       if (WEB_SAFE_FONTS.has(normalized.toLowerCase())) continue;
       counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
@@ -177,7 +179,11 @@ function rewriteWeightedCustomFontSpans(html: string): string {
     const families = parseFontList(fontFamilyMatch[1]!);
     const rawPrimary = families[0];
     if (!rawPrimary) return full;
-    const primary = rawPrimary.replace(/-Klaviyo-Hosted$/i, "").trim();
+    // Strip Klaviyo's self-hosting suffix and normalize CamelCase so the
+    // inline span's font name matches what we register in the brand kit.
+    const primary = normalizeFontFamilyName(
+      rawPrimary.replace(/-Klaviyo-Hosted$/i, "").trim(),
+    );
     if (!primary || WEB_SAFE_FONTS.has(primary.toLowerCase())) return full;
 
     // Resolve weight: default to 400 if not specified on this span.
@@ -326,7 +332,29 @@ export function parseTextBlock(
   textHtml = rewriteWeightedCustomFontSpans(textHtml);
   textHtml = wrapText(textHtml);
 
-  const textAlign = divStyle["text-align"];
+  // Klaviyo often sets the outer div to text-align:left (its default)
+  // but puts an explicit override on every inner content div (e.g.
+  // text-align: center on each paragraph). The visual result is whatever
+  // the inner divs say — reading only the outer emits the wrong block
+  // alignment.
+  //
+  // Strategy: if inner block-level elements (divs / paragraphs / h1-h6
+  // inside the outer div) all share a single text-align value, use that
+  // as the block's effective alignment. Otherwise fall back to outer.
+  const outerAlign = divStyle["text-align"];
+  const innerAligns = $div
+    .children()
+    .toArray()
+    .map((el) => parseInlineStyles($(el).attr("style"))["text-align"])
+    .filter((a) => a && a !== "")
+    .map((a) => a!.toLowerCase());
+  const uniqueInner = [...new Set(innerAligns)];
+  const textAlign =
+    innerAligns.length > 0 &&
+    uniqueInner.length === 1 &&
+    uniqueInner[0] !== outerAlign
+      ? uniqueInner[0]
+      : outerAlign;
   const lineHeight = divStyle["line-height"];
 
   // Bake alignment + line-height into the HTML since Redo's TextBlock schema

@@ -72,8 +72,14 @@ export async function exportTemplate(
   let aiRewrites = 0;
   let aiUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
 
-  if (opts.account) {
-    const result = await transformSections(rawSections, opts.account, { skipAi: opts.skipAi });
+  // transformSections handles: organization variable substitution (needs
+  // account), inline-coupon detection → DiscountBlock insertion (runs
+  // regardless of account), and button-link substitutions. Always run it
+  // so coupons get handled even when the Klaviyo account fetch failed.
+  {
+    const result = await transformSections(rawSections, opts.account, {
+      skipAi: opts.skipAi,
+    });
     sections = result.sections;
     substitutions = result.substitutions;
     aiRewrites = result.aiRewrites;

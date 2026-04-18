@@ -96,11 +96,10 @@ export function collectFonts(sections: Section[]): FontUsage[] {
   const map = new Map<string, Set<string>>();
   const add = (family: string | undefined, where: string): void => {
     if (!family) return;
-    // Strip any weight suffix ("SemiBold", "Light", etc.) before testing
-    // against web-safe / asking Google Fonts. Per Redo brand-kit convention
-    // the block-level fontFamily encodes the weight (e.g. "Poppins SemiBold"),
-    // but Google Fonts only indexes the base family ("Poppins").
-    const base = stripWeightSuffix(family.trim());
+    // Normalize CamelCase → spaced (CenturyGothic → Century Gothic) so
+    // duplicate spellings of the same family collapse to one entry.
+    // Strip weight suffix before Google Fonts lookup (base family only).
+    const base = stripWeightSuffix(normalizeFontFamilyName(family));
     if (!isCustomFont(base)) return;
     const set = map.get(base) ?? new Set<string>();
     set.add(where);
@@ -205,6 +204,33 @@ export function stripWeightSuffix(family: string): string {
     if (re.test(family)) return family.replace(re, "");
   }
   return family;
+}
+
+/**
+ * Klaviyo source templates routinely contain inline font stacks where
+ * the same family appears in two spellings, e.g.
+ *   "brandon-grotesque, 'Century Gothic', CenturyGothic, AppleGothic"
+ * The CamelCase variant is how CSS normally names PostScript fonts; the
+ * spaced version is how Google Fonts indexes them. Without normalization
+ * we emit "CenturyGothic" as a distinct family that Google Fonts can't
+ * resolve, skip it at upload time, and lose the brand font. Normalize
+ * CamelCase into spaced form so both spellings collapse to one family.
+ *
+ * Split on lowercase→uppercase boundaries, preserving already-spaced
+ * names ("Century Gothic" stays as-is).
+ */
+export function normalizeFontFamilyName(family: string): string {
+  const trimmed = family.trim().replace(/^['"]|['"]$/g, "");
+  // If the name already contains a space or a hyphen, assume it's
+  // properly-formatted (e.g. "Century Gothic", "brandon-grotesque").
+  if (/\s|-/.test(trimmed)) return trimmed;
+  // Split CamelCase into words: "CenturyGothic" → "Century Gothic",
+  // "OpenSans" → "Open Sans", "DMSans" → "DM Sans".
+  // Handle sequences of capitals followed by lowercase (DMSans → DM Sans)
+  // and lowercase followed by uppercase (CenturyG → Century G).
+  return trimmed
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
 }
 
 // ─── Fallback font resolver ──────────────────────────────────────

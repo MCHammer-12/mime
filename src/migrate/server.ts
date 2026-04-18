@@ -137,11 +137,30 @@ async function handleFlows(req: IncomingMessage, res: ServerResponse) {
       }>;
     }> = [];
 
+    // Diagnostics — surface what the walker actually saw so the UI can
+    // show something useful when "0 flow emails" is returned.
+    const debug = {
+      totalFlows: flows.length,
+      flowsWithActions: 0,
+      flowsWithNoActions: 0,
+      actionTypeCounts: {} as Record<string, number>,
+      messagesSeen: 0,
+      messagesWithTemplate: 0,
+      messagesWithoutTemplate: 0,
+      failedActionFetches: 0,
+      failedMessageFetches: 0,
+      sampleFlowNames: [] as string[],
+      sampleMessageFetchErrors: [] as string[],
+    };
+
     let idx = 0;
     async function worker() {
       while (idx < flows.length) {
         const i = idx++;
         const f = flows[i]!;
+        if (debug.sampleFlowNames.length < 10) {
+          debug.sampleFlowNames.push(f.attributes.name);
+        }
         try {
           const actionsBody: any = await klaviyo(
             `/flows/${f.id}/flow-actions/`,
@@ -153,17 +172,64 @@ async function handleFlows(req: IncomingMessage, res: ServerResponse) {
             actionId: string;
             name: string | null;
           }> = [];
-          const emailActions = (actionsBody.data ?? []).filter(
-            (a: any) => a.attributes?.definition?.type === "send-email",
-          );
-          for (const a of emailActions) {
+
+          const allActions = actionsBody.data ?? [];
+          if (allActions.length > 0) debug.flowsWithActions++;
+          else debug.flowsWithNoActions++;
+
+          for (const a of allActions) {
+            const type = (a.attributes?.definition?.type ?? "").toLowerCase();
+            debug.actionTypeCounts[type] =
+              (debug.actionTypeCounts[type] ?? 0) + 1;
+          }
+
+          // Fetch flow-messages for each action. Klaviyo only returns
+          // messages for send-* actions (not time-delay / split / etc.);
+          // non-email actions return empty data or 404/400, so we ignore
+          // errors per-action. We probe both known endpoint shapes since
+          // Klaviyo's API has shifted between them and we've seen both
+          // in the wild:
+          //   1. /flow-actions/{id}/flow-messages/  (original)
+          //   2. /flow-messages/?filter=equals(flow-action.id,"<id>")
+          // Try #1 first, fall back to #2 on any failure.
+          for (const a of allActions) {
+            let msgs: any = null;
             try {
-              const msgs: any = await klaviyo(
+              msgs = await klaviyo(
                 `/flow-actions/${a.id}/flow-messages/`,
                 key,
               );
-              for (const m of msgs.data ?? []) {
-                let tplId: string | null = null;
+            } catch (e: any) {
+              if (debug.sampleMessageFetchErrors.length < 3) {
+                debug.sampleMessageFetchErrors.push(
+                  `direct: ${e.message?.slice(0, 120) ?? String(e).slice(0, 120)}`,
+                );
+              }
+              // Fall back to the filter endpoint.
+              try {
+                msgs = await klaviyo(
+                  `/flow-messages/?filter=${encodeURIComponent(
+                    `equals(flow-action.id,"${a.id}")`,
+                  )}`,
+                  key,
+                );
+              } catch (e2: any) {
+                debug.failedMessageFetches++;
+                if (debug.sampleMessageFetchErrors.length < 6) {
+                  debug.sampleMessageFetchErrors.push(
+                    `filter: ${e2.message?.slice(0, 120) ?? String(e2).slice(0, 120)}`,
+                  );
+                }
+                continue;
+              }
+            }
+            for (const m of msgs?.data ?? []) {
+              debug.messagesSeen++;
+              // Try inline relationship first; fall back to the dedicated
+              // relationships endpoint if needed.
+              let tplId: string | null =
+                m.relationships?.template?.data?.id ?? null;
+              if (!tplId) {
                 try {
                   const rel: any = await klaviyo(
                     `/flow-messages/${m.id}/relationships/template/`,
@@ -171,17 +237,17 @@ async function handleFlows(req: IncomingMessage, res: ServerResponse) {
                   );
                   tplId = rel?.data?.id ?? null;
                 } catch (e) {
-                  // some messages may not have a template (e.g. smart-send)
+                  // no template attached; leave null
                 }
-                emails.push({
-                  templateId: tplId,
-                  messageId: m.id,
-                  actionId: a.id,
-                  name: m.attributes?.name ?? null,
-                });
               }
-            } catch (e) {
-              // skip silently; flow may have been partially deleted
+              if (tplId) debug.messagesWithTemplate++;
+              else debug.messagesWithoutTemplate++;
+              emails.push({
+                templateId: tplId,
+                messageId: m.id,
+                actionId: a.id,
+                name: m.attributes?.name ?? null,
+              });
             }
           }
           if (emails.length > 0) {
@@ -194,6 +260,7 @@ async function handleFlows(req: IncomingMessage, res: ServerResponse) {
             });
           }
         } catch (e) {
+          debug.failedActionFetches++;
           // skip bad flow
         }
       }
@@ -210,7 +277,7 @@ async function handleFlows(req: IncomingMessage, res: ServerResponse) {
       );
     });
 
-    json(res, 200, { flows: out });
+    json(res, 200, { flows: out, debug });
   } catch (e: any) {
     json(res, 500, { error: e.message ?? String(e) });
   }
@@ -610,7 +677,34 @@ const HTML = /* html */ `<!doctype html>
           el('accountInfo').textContent = \`\${flows.length} flows · \${emailCount} flow emails\`;
           el('totalCount').textContent = emailCount;
           el('listHeader').textContent = '2. Select flow emails';
+          // Stash debug info for inspection via console; also log it.
+          window._mimeDebug = body.debug;
+          if (body.debug) console.log('[flows debug]', body.debug);
           renderFlowsList();
+          // If we got nothing, surface the diagnostic summary inline.
+          if (flows.length === 0 && body.debug) {
+            const d = body.debug;
+            const topTypes = Object.entries(d.actionTypeCounts)
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 8)
+              .map(([t, n]) => t + ' (' + n + ')')
+              .join(', ');
+            el('templateList').innerHTML =
+              '<div style="padding:16px;color:#8b949e;font-family:SF Mono,monospace;font-size:12px;line-height:1.8">' +
+              'No flow emails found.<br><br>' +
+              'Walked <b>' + d.totalFlows + '</b> flows.<br>' +
+              '<b>' + d.flowsWithActions + '</b> had actions, <b>' + d.flowsWithNoActions + '</b> had none.<br>' +
+              '<b>' + d.messagesSeen + '</b> messages across all actions.<br>' +
+              '<b>' + d.messagesWithTemplate + '</b> with template, <b>' + d.messagesWithoutTemplate + '</b> without.<br>' +
+              'Failed action fetches: <b>' + d.failedActionFetches + '</b>, failed message fetches: <b>' + d.failedMessageFetches + '</b>.<br>' +
+              'Action types seen: ' + (topTypes || '(none)') + '<br>' +
+              'Sample flows: ' + (d.sampleFlowNames.slice(0, 5).join(', ') || '(none)') + '<br>' +
+              ((d.sampleMessageFetchErrors || []).length > 0
+                ? '<br><b>Errors:</b><br>' +
+                  d.sampleMessageFetchErrors.map(e => '&nbsp;&nbsp;' + escapeHtml(e)).join('<br>')
+                : '') +
+              '</div>';
+          }
         }
         el('templatesCard').style.display = 'block';
         el('runCard').style.display = 'block';
@@ -642,9 +736,10 @@ const HTML = /* html */ `<!doctype html>
       const list = el('templateList');
       list.innerHTML = '';
       for (const flow of flows) {
-        // Filter: match on flow name or any email name
+        // Filter: match on flow name or any email name. Keep emails with
+        // no templateId in the list (rendered disabled) so the user can
+        // see what exists in the flow — better than silently dropping.
         const matchEmails = flow.emails.filter(e => {
-          if (!e.templateId) return false;
           if (!filter) return true;
           return flow.flowName.toLowerCase().includes(filter) ||
                  (e.name || '').toLowerCase().includes(filter);
@@ -656,7 +751,9 @@ const HTML = /* html */ `<!doctype html>
 
         const header = document.createElement('div');
         header.className = 'flow-header';
-        const allSelected = matchEmails.every(e => selected.has(e.templateId));
+        const selectableEmails = matchEmails.filter(e => !!e.templateId);
+        const allSelected = selectableEmails.length > 0 &&
+          selectableEmails.every(e => selected.has(e.templateId));
         header.innerHTML = \`
           <input type="checkbox" \${allSelected ? 'checked' : ''} />
           <div><span class="chevron">▼</span> <span class="flow-name">\${escapeHtml(flow.flowName)}</span></div>
@@ -668,7 +765,11 @@ const HTML = /* html */ `<!doctype html>
         emailsContainer.className = 'flow-emails';
         for (const e of matchEmails) {
           const emailName = e.name || \`Email (msg \${e.messageId})\`;
-          emailsContainer.appendChild(buildTemplateRow(e.templateId, emailName, 'draggable', ''));
+          if (e.templateId) {
+            emailsContainer.appendChild(buildTemplateRow(e.templateId, emailName, 'draggable', ''));
+          } else {
+            emailsContainer.appendChild(buildDisabledRow(emailName, e.messageId));
+          }
         }
         group.appendChild(header);
         group.appendChild(emailsContainer);
@@ -678,6 +779,7 @@ const HTML = /* html */ `<!doctype html>
           ev.stopPropagation();
           const check = groupCb.checked;
           for (const e of matchEmails) {
+            if (!e.templateId) continue; // skip no-template rows
             if (check) selected.add(e.templateId);
             else selected.delete(e.templateId);
           }
@@ -718,6 +820,25 @@ const HTML = /* html */ `<!doctype html>
           cb.dispatchEvent(new Event('change'));
         }
       });
+      return row;
+    }
+
+    // Rendered when a flow email has no attached template ID (Klaviyo
+    // flow message with no template, draft, or SMS-rendered-as-email).
+    // Visible but not selectable.
+    function buildDisabledRow(name, messageId) {
+      const row = document.createElement('div');
+      row.className = 'template-row';
+      row.style.opacity = '0.5';
+      row.style.cursor = 'not-allowed';
+      row.innerHTML = \`
+        <input type="checkbox" disabled />
+        <div class="name">\${escapeHtml(name)}</div>
+        <span class="tag" style="background:#3a2a1a;color:#d29922">no template</span>
+        <span class="date"></span>
+        <span class="id">msg \${messageId}</span>
+      \`;
+      row.title = 'No template attached to this flow message — check in Klaviyo';
       return row;
     }
 

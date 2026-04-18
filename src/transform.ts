@@ -41,13 +41,17 @@ export interface TransformOptions {
 
 export async function transformSections(
   sections: Section[],
-  account: KlaviyoAccount,
+  account: KlaviyoAccount | null,
   opts: TransformOptions = {},
 ): Promise<TransformResult> {
   const subs: string[] = [];
-  const orgName = account.organizationName;
-  const orgAddress = formatAddress(account);
-  const orgUrl = account.websiteUrl;
+  // When account fetch failed (bad/dummy Klaviyo key, network error) we
+  // skip organization-variable substitution but STILL run coupon
+  // detection and other section-level transforms — otherwise an export
+  // with no key misses discount blocks entirely.
+  const orgName = account?.organizationName ?? "";
+  const orgAddress = account ? formatAddress(account) : "";
+  const orgUrl = account?.websiteUrl ?? "";
   const usage = {
     inputTokens: 0,
     outputTokens: 0,
@@ -94,15 +98,35 @@ async function transformBlock(
     const tb = block as TextBlock;
     const withSubs = { ...tb, text: substituteTextVars(tb.text, ctx) };
 
-    if (!ctx.skipAi && hasInlineCoupon(withSubs.text)) {
-      const { text: rewritten, usage } = await rewriteInlineCoupon(withSubs.text);
-      ctx.usage.inputTokens += usage.inputTokens;
-      ctx.usage.outputTokens += usage.outputTokens;
-      ctx.usage.cacheReadTokens += usage.cacheReadTokens;
-      ctx.usage.cacheCreationTokens += usage.cacheCreationTokens;
-      ctx.onRewrite();
-      const rewrittenBlock = { ...withSubs, text: rewritten };
-      return [rewrittenBlock, buildDiscountFromTextBlock(rewrittenBlock)];
+    if (hasInlineCoupon(withSubs.text)) {
+      if (!ctx.skipAi) {
+        const { text: rewritten, usage } = await rewriteInlineCoupon(
+          withSubs.text,
+        );
+        ctx.usage.inputTokens += usage.inputTokens;
+        ctx.usage.outputTokens += usage.outputTokens;
+        ctx.usage.cacheReadTokens += usage.cacheReadTokens;
+        ctx.usage.cacheCreationTokens += usage.cacheCreationTokens;
+        ctx.onRewrite();
+        const rewrittenBlock = { ...withSubs, text: rewritten };
+        return [rewrittenBlock, buildDiscountFromTextBlock(rewrittenBlock)];
+      }
+      // AI-less fallback. Covers the common Klaviyo pattern:
+      //   "USE CODE {% coupon_code 'X' %} FOR N% OFF ..."
+      // which we can split deterministically into [stripped text,
+      // discount block]. If the pattern doesn't match we still insert a
+      // discount block after the text and leave the Jinja tag in place
+      // (merchant can delete manually) — better than dropping the
+      // coupon entirely.
+      const stripped = ruleBasedStripInlineCoupon(withSubs.text);
+      const textForRender = stripped ?? withSubs.text;
+      ctx.subs.push(
+        stripped
+          ? "inline coupon stripped + discount block inserted (AI off)"
+          : "inline coupon kept in text + discount block appended (AI off)",
+      );
+      const textBlock = { ...withSubs, text: textForRender };
+      return [textBlock, buildDiscountFromTextBlock(textBlock)];
     }
     return [withSubs];
   }
@@ -149,6 +173,37 @@ async function transformBlock(
   return [block];
 }
 
+// ─── Rule-based inline-coupon stripper (no AI) ───────────────────
+//
+// Handles the most common Klaviyo inline-coupon pattern:
+//   "USE CODE {% coupon_code 'WELCOME15' %} FOR 15% OFF FIRST ORDER"
+// Split into:
+//   - standalone DiscountBlock (carries the code + discount visually)
+//   - remaining text (everything that wasn't part of the coupon phrase)
+//
+// Returns the text with the coupon phrase removed, or null if the
+// pattern didn't match cleanly. Aggressive HTML-aware regex handles
+// wrapping <span>s that Klaviyo commonly inserts.
+
+const INLINE_COUPON_PHRASE_RE =
+  /(?:USE\s+(?:CODE|PROMO\s+CODE|DISCOUNT\s+CODE))?\s*(?:<[^>]+>\s*)*\{%\s*coupon_code\s*'[^']*'?\s*%\}(?:\s*<[^>]+>)*\s*(?:FOR\s+)?(?:\d+%?\s*(?:OFF|DISCOUNT)[\w\s]*?)?/i;
+
+function ruleBasedStripInlineCoupon(html: string): string | null {
+  // Build a regex that matches the coupon + its surrounding Klaviyo
+  // spans + neighbouring upsell phrasing. If it matches, delete that
+  // entire chunk from the html.
+  const match = INLINE_COUPON_PHRASE_RE.exec(html);
+  if (!match) return null;
+  // Collapse consecutive whitespace / empty tags the removal leaves behind.
+  let result = html.replace(INLINE_COUPON_PHRASE_RE, "");
+  result = result
+    .replace(/(<span[^>]*>)(\s|&nbsp;)*(<\/span>)/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/>\s+</g, "><")
+    .trim();
+  return result;
+}
+
 // ─── Placeholder discount block (styled from text block) ────────────
 
 function buildDiscountFromTextBlock(tb: TextBlock): DiscountBlock {
@@ -193,11 +248,11 @@ function substituteTextVars(html: string, ctx: Ctx): string {
     ctx.subs.push("{% unsubscribe %} (bare) → {{ unsubscribe_link }}");
   }
 
-  if (/\{\{\s*organization\.name\s*\}\}/.test(result)) {
+  if (ctx.orgName && /\{\{\s*organization\.name\s*\}\}/.test(result)) {
     result = result.replace(/\{\{\s*organization\.name\s*\}\}/g, ctx.orgName);
     ctx.subs.push(`{{ organization.name }} → ${ctx.orgName}`);
   }
-  if (/\{\{\s*organization\.full_address\s*\}\}/.test(result)) {
+  if (ctx.orgAddress && /\{\{\s*organization\.full_address\s*\}\}/.test(result)) {
     result = result.replace(
       /\{\{\s*organization\.full_address\s*\}\}/g,
       ctx.orgAddress,
@@ -210,6 +265,7 @@ function substituteTextVars(html: string, ctx: Ctx): string {
 }
 
 function substituteOrgUrlInHtml(html: string, ctx: Ctx): string {
+  if (!ctx.orgUrl) return html;
   const pattern = /href="(\{\{\s*organization\.url\s*\}\})"/gi;
   if (pattern.test(html)) {
     ctx.subs.push(`{{ organization.url }} (in href) → ${ctx.orgUrl}`);
