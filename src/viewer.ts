@@ -28,11 +28,17 @@ if (args.length === 0) {
 const outDir = join(import.meta.dirname, "..", ".viewer");
 mkdirSync(outDir, { recursive: true });
 
-function resolveFile(filePath: string): string {
+interface Resolved {
+  html: string;
+  /** Raw JSON source (pretty-printed) when the input was a .json file. */
+  json?: string;
+}
+
+function resolveFile(filePath: string): Resolved {
   const raw = readFileSync(filePath, "utf-8");
 
   if (filePath.endsWith(".html")) {
-    return raw;
+    return { html: raw };
   }
 
   if (filePath.endsWith(".json")) {
@@ -46,7 +52,10 @@ function resolveFile(filePath: string): string {
       );
     }
     const bodyBackgroundColor = parsed.bodyBackgroundColor;
-    return renderSections(sections, { bodyBackgroundColor });
+    return {
+      html: renderSections(sections, { bodyBackgroundColor }),
+      json: JSON.stringify(parsed, null, 2),
+    };
   }
 
   throw new Error(`Unsupported file type: ${filePath}`);
@@ -66,6 +75,7 @@ function buildComparisonPage(
   htmlB: string,
   labelA: string,
   labelB: string,
+  jsonB?: string,
 ): string {
   return `<!DOCTYPE html>
 <html>
@@ -147,6 +157,59 @@ function buildComparisonPage(
 
     /* Diff overlay when hovering */
     .pane:hover .email-frame { box-shadow: 0 4px 24px rgba(0,0,0,0.4), 0 0 0 2px #388bfd; }
+
+    /* JSON drawer */
+    .json-drawer {
+      position: fixed; top: 52px; right: 0; bottom: 0;
+      width: 560px; max-width: 80vw;
+      background: #0d1117; border-left: 1px solid #30363d;
+      display: flex; flex-direction: column;
+      transform: translateX(100%); transition: transform 0.2s ease;
+      z-index: 900;
+    }
+    .json-drawer.open { transform: translateX(0); }
+    .json-drawer-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 16px; background: #161b22; border-bottom: 1px solid #30363d;
+      flex-shrink: 0;
+    }
+    .json-drawer-header h2 { font-size: 13px; font-weight: 600; color: #e6edf3; }
+    .json-drawer-header .close {
+      background: none; border: none; color: #8b949e; font-size: 18px;
+      cursor: pointer; padding: 0 8px;
+    }
+    .json-drawer-header .close:hover { color: #e6edf3; }
+    .block-index {
+      padding: 8px 12px; background: #161b22; border-bottom: 1px solid #30363d;
+      display: flex; flex-wrap: wrap; gap: 4px; flex-shrink: 0;
+      max-height: 120px; overflow-y: auto;
+    }
+    .block-chip {
+      padding: 3px 8px; border-radius: 10px; font-size: 11px;
+      background: #21262d; border: 1px solid #30363d;
+      color: #8b949e; cursor: pointer; font-family: 'SF Mono', monospace;
+    }
+    .block-chip:hover { background: #30363d; color: #e6edf3; }
+    .block-chip.highlighted { background: #1a3a2a; color: #3fb950; border-color: #2ea043; }
+    .json-pre {
+      flex: 1; overflow: auto; padding: 12px 16px;
+      font-family: 'SF Mono', Menlo, monospace; font-size: 11px;
+      line-height: 1.5; color: #e6edf3;
+      white-space: pre; tab-size: 2;
+    }
+    /* Very light JSON syntax colors */
+    .json-pre .k { color: #79c0ff; }  /* keys */
+    .json-pre .s { color: #a5d6ff; }  /* strings */
+    .json-pre .n { color: #ffa657; }  /* numbers */
+    .json-pre .b { color: #ff7b72; }  /* booleans/null */
+    .json-pre mark { background: #3fb95033; color: inherit; border-radius: 2px; }
+
+    .toolbar-btn {
+      padding: 6px 12px; border: 1px solid #30363d; background: #21262d;
+      color: #8b949e; font-size: 12px; cursor: pointer; border-radius: 6px;
+    }
+    .toolbar-btn:hover { background: #30363d; color: #e6edf3; }
+    .toolbar-btn.active { background: #388bfd; color: #fff; border-color: #388bfd; }
   </style>
 </head>
 <body>
@@ -159,8 +222,20 @@ function buildComparisonPage(
       <button class="viewport-btn active" onclick="setViewport('desktop')">Desktop</button>
       <button class="viewport-btn" onclick="setViewport('mobile')">Mobile</button>
     </div>
-    <div style="width: 100px"></div>
+    <div style="width: 100px; display: flex; justify-content: flex-end;">
+      ${jsonB ? `<button class="toolbar-btn" id="jsonBtn" onclick="toggleJson()">JSON</button>` : ""}
+    </div>
   </div>
+
+  ${jsonB ? `
+  <div class="json-drawer" id="jsonDrawer">
+    <div class="json-drawer-header">
+      <h2>Redo template JSON</h2>
+      <button class="close" onclick="toggleJson()">✕</button>
+    </div>
+    <div class="block-index" id="blockIndex"></div>
+    <pre class="json-pre" id="jsonPre"></pre>
+  </div>` : ""}
 
   <div class="container">
     <div class="pane">
@@ -246,6 +321,82 @@ function buildComparisonPage(
       btn.textContent = 'Scroll sync: ' + (syncEnabled ? 'ON' : 'OFF');
       btn.classList.toggle('active', syncEnabled);
     }
+
+    // ── JSON drawer ───────────────────────────────────────────────
+    const JSON_SRC = ${JSON.stringify(jsonB ?? "")};
+
+    function highlightJson(src) {
+      // Escape HTML, then add syntax spans for keys, strings, numbers, literals.
+      let s = src
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      // Keys: "foo":
+      s = s.replace(/("[^"\\\\]*(?:\\\\.[^"\\\\]*)*")(\\s*:)/g, '<span class="k">$1</span>$2');
+      // Strings (non-key): : "foo"
+      s = s.replace(/(:\\s*)("[^"\\\\]*(?:\\\\.[^"\\\\]*)*")/g, '$1<span class="s">$2</span>');
+      // Numbers
+      s = s.replace(/(:\\s*)(-?\\d+(?:\\.\\d+)?)/g, '$1<span class="n">$2</span>');
+      // true / false / null
+      s = s.replace(/(:\\s*)(true|false|null)\\b/g, '$1<span class="b">$2</span>');
+      return s;
+    }
+
+    function initJsonPanel() {
+      if (!JSON_SRC) return;
+      const pre = document.getElementById('jsonPre');
+      pre.innerHTML = highlightJson(JSON_SRC);
+
+      // Build block index from parsed JSON
+      const parsed = JSON.parse(JSON_SRC);
+      const sections = Array.isArray(parsed) ? parsed : (parsed.sections || []);
+      const index = document.getElementById('blockIndex');
+      sections.forEach((s, i) => {
+        const chip = document.createElement('span');
+        chip.className = 'block-chip';
+        const id = (s.blockId || '').slice(0, 8);
+        chip.textContent = (i + 1) + '. ' + s.type + (id ? ' · ' + id : '');
+        chip.onclick = () => jumpToBlock(s.blockId, chip);
+        index.appendChild(chip);
+      });
+    }
+
+    function jumpToBlock(blockId, chipEl) {
+      if (!blockId) return;
+      const pre = document.getElementById('jsonPre');
+      // Clear previous highlights / chips
+      pre.innerHTML = highlightJson(JSON_SRC);
+      document.querySelectorAll('.block-chip').forEach(c => c.classList.remove('highlighted'));
+      chipEl && chipEl.classList.add('highlighted');
+
+      // Wrap the blockId match in <mark> and scroll into view
+      const needle = '"blockId": "' + blockId + '"';
+      const html = pre.innerHTML;
+      const idx = html.indexOf(needle);
+      if (idx === -1) return;
+      pre.innerHTML = html.slice(0, idx) +
+        '<mark id="__jump">' + needle + '</mark>' +
+        html.slice(idx + needle.length);
+      const mark = document.getElementById('__jump');
+      if (mark) mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function toggleJson() {
+      const drawer = document.getElementById('jsonDrawer');
+      const btn = document.getElementById('jsonBtn');
+      if (!drawer) return;
+      const open = drawer.classList.toggle('open');
+      btn && btn.classList.toggle('active', open);
+    }
+
+    initJsonPanel();
+
+    // Keyboard shortcut: J to toggle
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'j' && !e.metaKey && !e.ctrlKey && document.activeElement === document.body) {
+        toggleJson();
+      }
+    });
   </script>
 </body>
 </html>`;
@@ -287,16 +438,22 @@ if (args[0] === "--compare") {
     process.exit(1);
   }
 
-  const htmlA = resolveFile(args[1]);
-  const htmlB = resolveFile(args[2]);
+  const a = resolveFile(args[1]);
+  const b = resolveFile(args[2]);
   const label = templateName(args[1]);
 
-  const page = buildComparisonPage(htmlA, htmlB, label, templateName(args[2]));
+  const page = buildComparisonPage(
+    a.html,
+    b.html,
+    label,
+    templateName(args[2]),
+    b.json,
+  );
   const outPath = join(outDir, "compare.html");
   writeFileSync(outPath, page);
   openInBrowser(outPath);
 } else {
-  const html = resolveFile(args[0]);
+  const { html } = resolveFile(args[0]);
   const label = templateName(args[0]);
   const page = buildSinglePreview(html, label);
   const outPath = join(outDir, "view.html");

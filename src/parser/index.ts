@@ -24,7 +24,7 @@ import { parseLineBlock } from "./blocks/line.js";
 import { parseSpacerBlock } from "./blocks/spacer.js";
 import { parseSocialsBlock } from "./blocks/socials.js";
 import { parseColumnRow, parseSplitBlock } from "./blocks/column.js";
-import { parseProductBlock } from "./blocks/product.js";
+import { parseProductBlock, parseLineItemsUcbBlock } from "./blocks/product.js";
 import { tryParseDiscountFromText } from "./blocks/discount.js";
 import { tryParseKlaviyoSpecific } from "./blocks/klaviyo-specific.js";
 
@@ -185,21 +185,44 @@ function parseColumnContent(
       return;
     }
 
-    // Social icons
+    // Social icons — match either Klaviyo-hosted stock icons OR wrappers
+    // where ≥2 <a href> targets point to known social-network domains
+    // (brands often upload custom-designed icons).
     const $socialImgs = $wrapper.find(
       "img[src*='d3k81ch9hvuctc.cloudfront.net/assets/email/buttons']",
     );
-    if ($socialImgs.length > 0) {
+    const socialHrefCount = $wrapper
+      .find("a[href]")
+      .filter(
+        (_, a) =>
+          /(?:facebook|instagram|tiktok|twitter|x\.com|youtube|pinterest|linkedin|snapchat|threads|whatsapp)\.(?:com|net)/i.test(
+            $(a).attr("href") || "",
+          ),
+      ).length;
+    if ($socialImgs.length > 0 || socialHrefCount >= 2) {
       const block = parseSocialsBlock($, $wrapper, ctx);
       if (block) blocks.push(block);
       return;
     }
 
-    // Product grid
+    // Product grid — Klaviyo sometimes ships multiple `kl-product` divs
+    // inside a single component-wrapper (e.g. two product rows stacked).
+    // Process each one separately so we don't silently drop later ones.
+    // Static product blocks emit multiple sections (image row + title row).
     const $productGrid = findCls($wrapper, "kl-product");
     if ($productGrid.length > 0) {
-      const block = parseProductBlock($, $productGrid.first(), ctx);
-      if (block) blocks.push(block);
+      $productGrid.each((_, p) => {
+        blocks.push(...parseProductBlock($, $(p), ctx));
+      });
+      return;
+    }
+
+    // Klaviyo universal content block: cart line_items loop. Must come
+    // before the spacer fallback (wrapper has content, just not in a
+    // shape any of the above parsers recognize).
+    const lineItemsBlock = parseLineItemsUcbBlock($, $wrapper, ctx);
+    if (lineItemsBlock) {
+      blocks.push(lineItemsBlock);
       return;
     }
 

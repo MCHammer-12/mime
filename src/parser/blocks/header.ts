@@ -37,14 +37,18 @@ export function parseHeaderLogoAsImage(
 
     const logoWidth = parsePx($logoImg.attr("width")?.toString()) ?? 200;
 
-    // Klaviyo renders the logo at its intrinsic width (e.g. 300px), centered
-    // within the ~600px email. Redo's Image block is always full-width, so we
-    // add horizontal inner padding to shrink the rendered image to match.
-    const availableWidth = EMAIL_MAX_WIDTH_PX - sectionPadding.left - sectionPadding.right;
-    const horizontalInnerPadding =
-      logoWidth < availableWidth
-        ? Math.floor((availableWidth - logoWidth) / 2)
-        : 0;
+    // Klaviyo renders the logo at its intrinsic width (e.g. 126px), centered
+    // within the ~600px email. Redo's Image block always sizes to
+    // `EMAIL_MAX_WIDTH_PX - sectionPadding.left - sectionPadding.right`, so to
+    // shrink the logo we widen `sectionPadding` (NOT the inner `padding`,
+    // which doesn't affect image width in the renderer).
+    const availableWidth =
+      EMAIL_MAX_WIDTH_PX - sectionPadding.left - sectionPadding.right;
+    if (logoWidth < availableWidth) {
+      const hPad = Math.floor((EMAIL_MAX_WIDTH_PX - logoWidth) / 2);
+      sectionPadding.left = hPad;
+      sectionPadding.right = hPad;
+    }
 
     // Preserve any vertical padding on the logo TD (e.g. padding-bottom:10px).
     const logoTdStyle = parseInlineStyles($logo.attr("style"));
@@ -61,9 +65,9 @@ export function parseHeaderLogoAsImage(
       imageUrl: logoSrc,
       padding: {
         top: logoTdPadding.top,
-        right: horizontalInnerPadding,
+        right: 0,
         bottom: logoTdPadding.bottom,
-        left: horizontalInnerPadding,
+        left: 0,
       },
       altText: $logoImg.attr("alt") || undefined,
       clickthroughUrl: logoHref,

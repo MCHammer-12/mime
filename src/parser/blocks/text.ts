@@ -1,14 +1,17 @@
 import type { TextBlock } from "../../renderer/types.js";
 import { EmailBlockType } from "../../renderer/types.js";
 import {
+  findAncestorBackgroundColor,
   parseColor,
   parseFontFamily,
   parseFontSize,
   parseInlineStyles,
   parsePadding,
+  sumAncestorPadding,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
+import { weightedFamilyName } from "../../fonts.js";
 import type * as cheerio from "cheerio";
 
 const BLOCK_ELEMENT_RE = /<(h[1-6]|div|table|ul|ol|blockquote|hr|pre)[\s>]/i;
@@ -29,6 +32,40 @@ function wrapText(html: string): string {
 /** Strip empty <table> elements that are template noise. */
 function stripEmptyTables(html: string): string {
   return html.replace(/<table[^>]*>\s*<\/table>/gi, "").trim();
+}
+
+/**
+ * Redo's email builder uses Quill with the `quill-magic-url` plugin, which
+ * auto-links any plain-text URL ("www.foo.com" → `<a href="http://www.foo.com">`)
+ * when HTML is loaded. Klaviyo's source often has URL-looking text as unlinked
+ * plain text (e.g. the footer website line) — preserving that on import means
+ * suppressing magic-url.
+ *
+ * We insert a zero-width space after `www` / after the `//` of a scheme so the
+ * magic-url regex can no longer match. The URL remains visually identical and
+ * copy-pastes the same in most contexts; Quill never auto-wraps it in <a>.
+ * Already-linked text (content inside an <a> tag) is left alone.
+ */
+const URL_LIKE_RE =
+  /\b(https?:\/\/|www\.)[a-zA-Z0-9][-a-zA-Z0-9._/?=&#%+~]*\.[a-zA-Z]{2,}/g;
+
+function suppressUrlAutolink(html: string): string {
+  // Split on <a>...</a> so we only touch text outside of real links.
+  const parts = html.split(/(<a\b[^>]*>[\s\S]*?<\/a>)/gi);
+  return parts
+    .map((part, i) => {
+      if (i % 2 === 1) return part; // already-linked segment
+      return part.replace(URL_LIKE_RE, (match) => {
+        if (match.startsWith("http")) {
+          // insert ZWSP right after "//"
+          const cut = match.indexOf("//") + 2;
+          return match.slice(0, cut) + "\u200B" + match.slice(cut);
+        }
+        // starts with "www." — insert ZWSP between "www" and "."
+        return "www\u200B" + match.slice(3);
+      });
+    })
+    .join("");
 }
 
 // ─── Font detection ──────────────────────────────────────────────
@@ -77,6 +114,102 @@ function parseFontList(raw: string): string[] {
     .split(",")
     .map((f) => f.trim().replace(/^['"]|['"]$/g, ""))
     .filter(Boolean);
+}
+
+/**
+ * Walk every `font-family:` declaration in the text HTML and pick the
+ * custom (non-web-safe) font that appears most often as the primary
+ * (first non-web-safe) entry of each stack. Returns null if nothing
+ * non-web-safe was used inline.
+ *
+ * Klaviyo wraps headline spans with stacks like
+ *   "Poppins, 'Helvetica Neue', Helvetica, Arial, sans-serif"
+ * The brand font always leads; everything after is a fallback.
+ *
+ * Used to hoist the inline font to the block level so Redo's Quill
+ * editor whitelists it (else Quill strips the inline font-family).
+ */
+export function extractDominantCustomFont(html: string): string | null {
+  const decoded = decodeHtmlEntities(html);
+  const counts = new Map<string, number>();
+  FONT_FAMILY_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = FONT_FAMILY_RE.exec(decoded)) !== null) {
+    for (const raw of parseFontList(match[1]!)) {
+      const normalized = raw.replace(/-Klaviyo-Hosted$/i, "").trim();
+      if (!normalized) continue;
+      if (WEB_SAFE_FONTS.has(normalized.toLowerCase())) continue;
+      counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+      break; // only count the first (primary) non-web-safe font per stack
+    }
+  }
+  if (counts.size === 0) return null;
+  let best: string | null = null;
+  let bestCount = -1;
+  for (const [family, count] of counts) {
+    if (count >= bestCount) {
+      best = family;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+/**
+ * Redo brand-kit convention: each font weight is a separate CustomFontFamily
+ * (e.g. "Poppins SemiBold") rather than multiple styles under one family.
+ * To render Klaviyo's `<span style="font-family: Poppins; font-weight: 600">`
+ * correctly in Redo's Quill editor, rewrite the span to
+ * `<span style="font-family: 'Poppins SemiBold'">` and drop the font-weight
+ * (Quill's bold blot is binary and would strip 600 anyway).
+ *
+ * Only rewrites spans where the primary font is non-web-safe. Web-safe
+ * fonts keep their font-weight so the email client handles bold normally.
+ */
+function rewriteWeightedCustomFontSpans(html: string): string {
+  return html.replace(/style\s*=\s*"([^"]*)"/gi, (full, styleStr) => {
+    const fontFamilyMatch = /font-family:\s*([^;]+)/i.exec(styleStr);
+    const fontWeightMatch = /font-weight:\s*(\d{3}|bold|bolder)\b/i.exec(
+      styleStr,
+    );
+    if (!fontFamilyMatch) return full;
+
+    const families = parseFontList(fontFamilyMatch[1]!);
+    const rawPrimary = families[0];
+    if (!rawPrimary) return full;
+    const primary = rawPrimary.replace(/-Klaviyo-Hosted$/i, "").trim();
+    if (!primary || WEB_SAFE_FONTS.has(primary.toLowerCase())) return full;
+
+    // Resolve weight: default to 400 if not specified on this span.
+    let weight = 400;
+    if (fontWeightMatch) {
+      const w = fontWeightMatch[1]!.toLowerCase();
+      if (w === "bold" || w === "bolder") weight = 700;
+      else weight = parseInt(w, 10);
+    }
+
+    const weightedName = weightedFamilyName(primary, weight);
+    // Always quote: names with spaces ("Poppins SemiBold") require it.
+    const rest = families
+      .slice(1)
+      .map((f) => (/\s/.test(f) || /['"]/.test(f) ? `'${f}'` : f))
+      .join(", ");
+    const newFamilyValue = rest
+      ? `'${weightedName}', ${rest}`
+      : `'${weightedName}'`;
+
+    let newStyle = styleStr.replace(
+      fontFamilyMatch[0],
+      `font-family: ${newFamilyValue}`,
+    );
+    if (fontWeightMatch) {
+      newStyle = newStyle.replace(fontWeightMatch[0], "");
+    }
+    // Clean up double semicolons / trailing semicolon from removed declarations
+    newStyle = newStyle.replace(/;;+/g, ";").replace(/^\s*;\s*/, "").replace(/;\s*$/, "");
+
+    return `style="${newStyle}"`;
+  });
 }
 
 /**
@@ -189,31 +322,59 @@ export function parseTextBlock(
 
   textHtml = stripEmptyTables(textHtml);
   textHtml = stripStandaloneCoupons(textHtml);
+  textHtml = suppressUrlAutolink(textHtml);
+  textHtml = rewriteWeightedCustomFontSpans(textHtml);
   textHtml = wrapText(textHtml);
 
   const textAlign = divStyle["text-align"];
   const lineHeight = divStyle["line-height"];
 
-  // Bake alignment + line-height into <p> tags since Redo's TextBlock schema
+  // Bake alignment + line-height into the HTML since Redo's TextBlock schema
   // has no textAlign/lineHeight fields — they'd be stripped on import.
+  //
+  // Preferred target: <p> tags (normal text paragraphs).
+  // Fallback: content that's wrapped in a non-<p> block element (e.g. <div>
+  // from Klaviyo's short-text UCBs) won't have any <p> to inject into, so
+  // wrap the whole content in a styled <div>.
   if (textAlign || lineHeight) {
     const inlineStyle = [
       textAlign ? `text-align:${textAlign}` : "",
       lineHeight ? `line-height:${lineHeight}` : "",
     ].filter(Boolean).join(";");
-    textHtml = textHtml.replace(/<p(?=[\s>])/g, `<p style="${inlineStyle}"`);
+    if (/<p(?=[\s>])/.test(textHtml)) {
+      textHtml = textHtml.replace(/<p(?=[\s>])/g, `<p style="${inlineStyle}"`);
+    } else {
+      textHtml = `<div style="${inlineStyle}">${textHtml}</div>`;
+    }
   }
+
+  // Redo's Quill editor only whitelists the block-level `fontFamily` as a
+  // valid inline font. If the text has inline <span style="font-family:
+  // Poppins"> but the block-level is Helvetica Neue, Quill strips the span's
+  // font. Hoist the dominant custom font used inline so the inline
+  // declarations survive the round-trip AND the block's font dropdown
+  // reflects the visible brand font.
+  const divFontFamily = parseFontFamily(divStyle["font-family"]);
+  const inlineCustomFont = extractDominantCustomFont(textHtml);
+  const fontFamily = inlineCustomFont ?? divFontFamily;
 
   return {
     type: EmailBlockType.TEXT,
     blockId: nextId(),
-    sectionPadding: parsePadding(tdStyle),
+    // Sum padding across the kl-text td + its wrapping tds. Klaviyo
+    // commonly puts horizontal section padding on the outer wrapper td
+    // while keeping the inner kl-text td at zero — reading the inner
+    // alone drops the outer 18px left/right.
+    sectionPadding: sumAncestorPadding($td),
     sectionColor:
-      tdStyle["background-color"] || tdStyle["background"] || "#ffffff",
+      tdStyle["background-color"] ||
+      tdStyle["background"] ||
+      findAncestorBackgroundColor($td) ||
+      "#ffffff",
     text: textHtml,
     textColor: parseColor(divStyle["color"]),
     fontSize: parseFontSize(divStyle["font-size"]),
-    fontFamily: parseFontFamily(divStyle["font-family"]),
+    fontFamily,
     linkColor: parseColor(linkStyle["color"] || divStyle["color"]),
     ...(textAlign ? { textAlign } : {}),
     ...(lineHeight ? { lineHeight } : {}),

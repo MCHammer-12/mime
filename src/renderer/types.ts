@@ -202,6 +202,15 @@ export interface ImageBlock extends BaseBlock {
   caption?: string;
   altText?: string;
   clickthroughUrl?: string;
+  /**
+   * Redo "ButtonLinkType" enum, reused for image clickthroughs as of
+   * redoapp commit e94856fd (feat: add dynamic-variable clickthrough links
+   * to image block). "web-page" = static URL in `clickthroughUrl`.
+   * "dynamic-variable" = resolve at render time via `clickthroughSchemaFieldName`.
+   * Omit to inherit the legacy "web-page" behavior.
+   */
+  clickthroughLinkType?: "web-page" | "dynamic-variable";
+  clickthroughSchemaFieldName?: string;
   aspectRatio?: number;
   padding: Padding;
   horizontalPadding: Size;
@@ -322,6 +331,8 @@ export interface ProductsBlock extends BaseBlock {
   titleFontSize?: number;
   imageCornerRadius: number;
   checkoutButton: InlineButton;
+  /** Only used on abandonment flows. Defaults to true in Redo. */
+  showCheckoutButton?: boolean;
   lineItemButtons: InlineButton;
   numberOfProducts: number;
   imageSize: ProductImageSize;

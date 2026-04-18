@@ -87,13 +87,20 @@ export async function exportTemplate(
     htmlPath.split("/").pop()?.replace(".html", "") ||
     "Imported Template";
 
+  // If the template references the `checkoutUrl` schema field (via image
+  // clickthrough or button link), it's an abandoned-checkout flow email.
+  // Set schemaType so Redo can resolve the dynamic variable.
+  const schemaType = referencesCheckoutUrl(sections)
+    ? "marketing_checkout_abandonment"
+    : "marketing_email";
+
   const emailTemplate = {
     _id: new ObjectId().toString(),
     name,
     subject: klaviyoMeta.subject || "",
     templateType: "marketing",
     category: "Marketing",
-    schemaType: "marketing_email",
+    schemaType,
     emailPreview: null,
     emailBackgroundColor: bodyBackgroundColor,
     contentBackgroundColor: "#ffffff",
@@ -128,6 +135,32 @@ export async function exportTemplate(
     skippedBlocks,
     fontPlan,
   };
+}
+
+/**
+ * Walk top-level sections (and any nested column cells) to detect whether
+ * any block references Redo's `checkoutUrl` schema field. Used to decide
+ * whether this template should be emitted as `marketing_checkout_abandonment`.
+ */
+function referencesCheckoutUrl(sections: unknown[]): boolean {
+  for (const section of sections) {
+    if (!section || typeof section !== "object") continue;
+    const s = section as {
+      clickthroughSchemaFieldName?: string;
+      schemaFieldName?: string;
+      columns?: unknown[];
+    };
+    if (
+      s.clickthroughSchemaFieldName === "checkoutUrl" ||
+      s.schemaFieldName === "checkoutUrl"
+    ) {
+      return true;
+    }
+    if (Array.isArray(s.columns) && referencesCheckoutUrl(s.columns)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function printResult(r: ExportResult, verbose: boolean) {

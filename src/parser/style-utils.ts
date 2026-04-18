@@ -121,9 +121,74 @@ export function detectSocialPlatform(url: string): string | null {
   return null;
 }
 
+/**
+ * Walk up from a block's content td through ancestor tds looking for
+ * `background-color` / `background`. Klaviyo sometimes puts the section
+ * background on the OUTER wrapper td (e.g. footer `#f2f2f2`) while the
+ * inner content td has no background — reading the inner td alone makes
+ * the imported block white instead of gray. Walks until it either finds
+ * a bg color or runs out of td ancestors.
+ */
+export function findAncestorBackgroundColor(
+  $td: cheerio.Cheerio<any>,
+): string | null {
+  let current = $td;
+  while (current.length > 0) {
+    const style = parseInlineStyles(current.attr("style"));
+    const bg = style["background-color"] || style["background"];
+    if (bg) return bg;
+    const parent = current.parent().closest("td");
+    if (parent.length === 0 || parent[0] === current[0]) break;
+    current = parent;
+  }
+  return null;
+}
+
+/**
+ * Sum the padding of a content td and all its td ancestors within the
+ * same `component-wrapper`. Klaviyo routinely nests tds where the outer
+ * wrapper td carries the section's horizontal padding (e.g. `padding:0
+ * 18px`) while the inner `kl-text` / `kl-button` / etc. td carries its
+ * own vertical padding (or zero). In rendered HTML these paddings STACK;
+ * reading only the inner td produces a misaligned block with no margin.
+ *
+ * Stops at the outer <table> of the component-wrapper (doesn't cross
+ * into the MJML column shell) to avoid double-counting Klaviyo's 600px
+ * stage layout.
+ */
+export function sumAncestorPadding(
+  $td: cheerio.Cheerio<any>,
+): { top: number; right: number; bottom: number; left: number } {
+  const total = { top: 0, right: 0, bottom: 0, left: 0 };
+  let current = $td;
+  let guard = 0;
+  while (current.length > 0 && guard++ < 10) {
+    const p = parsePadding(parseInlineStyles(current.attr("style")));
+    total.top += p.top;
+    total.right += p.right;
+    total.bottom += p.bottom;
+    total.left += p.left;
+    // Stop once we've left the component-wrapper (its outer <table> is
+    // wrapped in a <div class="component-wrapper">, which has no td parent).
+    const parent = current.parent().closest("td");
+    if (parent.length === 0 || parent[0] === current[0]) break;
+    // Also stop if the parent is OUTSIDE a component-wrapper (we've
+    // climbed too far — into the MJML stage).
+    if (parent.closest(".component-wrapper, .gxp-component-wrapper").length === 0) {
+      break;
+    }
+    current = parent;
+  }
+  return total;
+}
+
 export function detectSocialIconColor(imgSrc: string): string {
+  // Order matters: check longer/more-specific paths before their prefixes.
+  // Klaviyo "inverse" icon sets (white-on-dark) must be checked before
+  // "/subtle/" / "/solid/" since the inverse paths contain those words.
+  if (imgSrc.includes("subtleinverse") || imgSrc.includes("solidinverse")) return "white";
+  if (imgSrc.includes("/white/") || imgSrc.includes("/inverse/")) return "white";
   if (imgSrc.includes("/subtle/")) return "gray";
   if (imgSrc.includes("/solid/")) return "black";
-  if (imgSrc.includes("/white/")) return "white";
   return "original";
 }

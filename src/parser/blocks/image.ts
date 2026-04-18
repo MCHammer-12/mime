@@ -24,7 +24,9 @@ export function parseImageBlock(
   }
   const $link = $td.find(sel("kl-img-link")).first();
   const clickthrough = $link.length > 0 ? $link.attr("href") || "" : undefined;
-  if (clickthrough) classifyKlaviyoUrl(clickthrough, EmailBlockType.IMAGE, ctx);
+  const mappedLink = clickthrough
+    ? classifyKlaviyoUrl(clickthrough, EmailBlockType.IMAGE, ctx)
+    : null;
 
   // Inner padding: prefer kl-img-base-auto-width, fall back to direct img container td
   let $paddingTd = $td.find(sel("kl-img-base-auto-width")).first();
@@ -42,15 +44,31 @@ export function parseImageBlock(
   const sectionPadding = parsePadding(outerStyle);
 
   // Detect constrained-width images: if the image container td has an explicit
-  // width smaller than the available area, compute centering padding.
+  // width smaller than the available area, size the outer section so the
+  // image renders at the constrained width (e.g. a 126px logo centered).
+  //
+  // Redo's image renderer sets `<img width=100% />` and uses `sectionPadding`
+  // to size the outer MjmlSection — so shrinking the image means widening
+  // `sectionPadding.left/right`. The inner `padding` field is not applied
+  // to image width, only to inner spacing in the builder UI.
   const containerTdWidth = parsePx(paddingStyle["width"]);
   const availableWidth =
     EMAIL_MAX_WIDTH_PX - sectionPadding.left - sectionPadding.right;
   if (containerTdWidth && containerTdWidth < availableWidth) {
-    const hPad = Math.floor((availableWidth - containerTdWidth) / 2);
-    padding.left = hPad;
-    padding.right = hPad;
+    const hPad = Math.floor((EMAIL_MAX_WIDTH_PX - containerTdWidth) / 2);
+    sectionPadding.left = hPad;
+    sectionPadding.right = hPad;
   }
+
+  const linkFields: Pick<
+    ImageBlock,
+    "clickthroughUrl" | "clickthroughLinkType" | "clickthroughSchemaFieldName"
+  > = mappedLink?.linkType === "dynamic-variable"
+    ? {
+        clickthroughLinkType: "dynamic-variable",
+        clickthroughSchemaFieldName: mappedLink.schemaFieldName,
+      }
+    : { clickthroughUrl: clickthrough };
 
   return {
     type: EmailBlockType.IMAGE,
@@ -62,7 +80,7 @@ export function parseImageBlock(
       "#ffffff",
     imageUrl: src,
     altText: alt || undefined,
-    clickthroughUrl: clickthrough,
+    ...linkFields,
     padding,
     horizontalPadding: Size.CUSTOM,
     verticalPadding: Size.CUSTOM,

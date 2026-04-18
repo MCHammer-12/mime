@@ -95,11 +95,16 @@ export interface FontUsage {
 export function collectFonts(sections: Section[]): FontUsage[] {
   const map = new Map<string, Set<string>>();
   const add = (family: string | undefined, where: string): void => {
-    if (!family || !isCustomFont(family)) return;
-    const key = family.trim();
-    const set = map.get(key) ?? new Set<string>();
+    if (!family) return;
+    // Strip any weight suffix ("SemiBold", "Light", etc.) before testing
+    // against web-safe / asking Google Fonts. Per Redo brand-kit convention
+    // the block-level fontFamily encodes the weight (e.g. "Poppins SemiBold"),
+    // but Google Fonts only indexes the base family ("Poppins").
+    const base = stripWeightSuffix(family.trim());
+    if (!isCustomFont(base)) return;
+    const set = map.get(base) ?? new Set<string>();
     set.add(where);
-    map.set(key, set);
+    map.set(base, set);
   };
 
   const walk = (block: unknown, prefix = ""): void => {
@@ -137,10 +142,185 @@ export function collectFonts(sections: Section[]): FontUsage[] {
 
 // ─── Google Fonts CSS2 resolver ─────────────────────────────────
 
-// Weight axes we request. Covers what Klaviyo templates actually use
-// (regular + bold + italics of each). Google Fonts returns only the
-// weights that exist for the family — others are silently dropped.
-const REQUEST_WEIGHTS = [400, 700];
+// Weight axes we request. Per Redo brand-kit convention, each weight is
+// imported as its OWN CustomFontFamily (e.g. "Poppins SemiBold" = distinct
+// from "Poppins") rather than as multiple styles under one family. This
+// lets Quill switch between weights via the font-family dropdown (Quill's
+// own `bold` blot is binary and can't represent semibold/light/etc.).
+//
+// Skip Bold (700) and ExtraBold (800) per Redo convention — those weights
+// would collide with Quill's built-in bold toggle. Text in a Klaviyo
+// source that used 700/800 gets snapped to the closest available variant
+// at parse time (see weightToFamilySuffix).
+const REQUEST_WEIGHTS = [100, 300, 400, 500, 600, 900];
+
+/**
+ * Redo brand-kit convention: one CustomFontFamily per weight, suffixed
+ * with the weight name. Maps a numeric weight to the suffix used in the
+ * family name. Weight 400 has no suffix (base family).
+ *
+ * Bold (700) and ExtraBold (800) are explicitly NOT imported — those
+ * would conflict with Quill's binary bold. Source spans using those
+ * weights get snapped to the closest available variant.
+ */
+export function weightToFamilySuffix(weight: number): string {
+  if (weight <= 200) return "Thin";
+  if (weight <= 300) return "Light";
+  if (weight === 400) return ""; // base
+  if (weight === 500) return "Medium";
+  if (weight === 600) return "SemiBold";
+  if (weight === 700) return "SemiBold"; // fallback — Bold not imported
+  if (weight === 800) return "Black"; // fallback — ExtraBold not imported
+  return "Black"; // 900+
+}
+
+/** Weights we actually register in the brand kit (skip 700, 800). */
+export function isImportedWeight(weight: number): boolean {
+  return weight !== 700 && weight !== 800;
+}
+
+/** Build the weighted family name: e.g. "Poppins" + 600 → "Poppins SemiBold". */
+export function weightedFamilyName(family: string, weight: number): string {
+  const suffix = weightToFamilySuffix(weight);
+  return suffix ? `${family} ${suffix}` : family;
+}
+
+/**
+ * Strip any trailing weight suffix ("SemiBold", "Medium", etc.) from a family
+ * name. Used when the block-level fontFamily is a weighted name like
+ * "Poppins SemiBold" but Google Fonts only knows the base family "Poppins".
+ */
+const WEIGHT_SUFFIXES = [
+  "Thin",
+  "Light",
+  "Medium",
+  "SemiBold",
+  "Bold",
+  "ExtraBold",
+  "Black",
+];
+export function stripWeightSuffix(family: string): string {
+  for (const suffix of WEIGHT_SUFFIXES) {
+    const re = new RegExp(`\\s+${suffix}$`, "i");
+    if (re.test(family)) return family.replace(re, "");
+  }
+  return family;
+}
+
+// ─── Fallback font resolver ──────────────────────────────────────
+//
+// Custom fonts don't render in most email apps (only Apple Mail); the
+// brand-kit @font-face is a progressive-enhancement layer. Everywhere
+// else the fallback renders. For readability across Gmail / Outlook /
+// webmail we want the fallback to visually approximate the real brand
+// font — same serif/sans category, similar x-height, similar widths.
+//
+// Redo's allowed fallback list (from `FontFamily` enum):
+//   Arial · Courier New · Georgia · Lucida Sans Unicode · Tahoma ·
+//   Times New Roman · Trebuchet MS · Verdana
+//
+// Mapping below covers the Google Fonts that Klaviyo-authored templates
+// actually use. Unknown families fall through to the heuristic below.
+
+export type AllowedFallback =
+  | "Arial"
+  | "Courier New"
+  | "Georgia"
+  | "Lucida Sans Unicode"
+  | "Tahoma"
+  | "Times New Roman"
+  | "Trebuchet MS"
+  | "Verdana";
+
+const FALLBACK_MAP: Record<string, AllowedFallback> = {
+  // Geometric / rounded sans-serifs → Verdana (wide, rounded, readable)
+  poppins: "Verdana",
+  nunito: "Verdana",
+  "nunito sans": "Verdana",
+  "open sans": "Verdana",
+  ubuntu: "Verdana",
+  lato: "Verdana",
+  "pt sans": "Verdana",
+
+  // Neutral / geometric sans-serifs → Arial (closest default)
+  inter: "Arial",
+  roboto: "Arial",
+  montserrat: "Arial",
+  raleway: "Arial",
+  kanit: "Arial",
+  "work sans": "Arial",
+  "league spartan": "Arial",
+  oswald: "Arial",
+  "dm sans": "Arial",
+  "source sans pro": "Arial",
+  "source sans 3": "Arial",
+  barlow: "Arial",
+  mulish: "Arial",
+  rubik: "Arial",
+  karla: "Arial",
+  "libre franklin": "Arial",
+  archivo: "Arial",
+  manrope: "Arial",
+  "bebas neue": "Arial",
+  "archivo black": "Arial",
+
+  // Humanist / tall-x-height sans → Tahoma
+  "space grotesk": "Tahoma",
+  "fira sans": "Tahoma",
+  "helvetica neue": "Arial",
+
+  // Friendly display sans → Trebuchet MS
+  quicksand: "Trebuchet MS",
+  comfortaa: "Trebuchet MS",
+
+  // Serifs → Georgia (screen-optimized serif)
+  "playfair display": "Georgia",
+  merriweather: "Georgia",
+  lora: "Georgia",
+  "source serif pro": "Georgia",
+  "eb garamond": "Georgia",
+  "cormorant garamond": "Georgia",
+  cormorant: "Georgia",
+  "crimson text": "Georgia",
+  "libre caslon text": "Georgia",
+  "abril fatface": "Georgia",
+
+  // Traditional serifs → Times New Roman
+  "pt serif": "Times New Roman",
+  "noto serif": "Times New Roman",
+
+  // Monospace → Courier New
+  "jetbrains mono": "Courier New",
+  "ibm plex mono": "Courier New",
+  "source code pro": "Courier New",
+  "fira code": "Courier New",
+  "roboto mono": "Courier New",
+  "space mono": "Courier New",
+};
+
+/**
+ * Pick the best Redo-allowed fallback for a given custom font family.
+ * Uses an explicit mapping for common Google Fonts, falling back to a
+ * keyword heuristic on the family name.
+ */
+export function resolveFallbackFont(family: string): AllowedFallback {
+  const lower = stripWeightSuffix(family).trim().toLowerCase();
+  if (FALLBACK_MAP[lower]) return FALLBACK_MAP[lower]!;
+
+  // Keyword heuristics for unknown families.
+  if (
+    /\b(serif|text|roman|caslon|garamond|playfair|lora|merriweather)\b/i.test(
+      lower,
+    )
+  ) {
+    return "Georgia";
+  }
+  if (/\b(mono|code|typewriter|courier)\b/i.test(lower)) {
+    return "Courier New";
+  }
+  // Default: generic sans-serif.
+  return "Arial";
+}
 
 export interface FontFileSpec {
   weight: number;
@@ -270,6 +450,11 @@ export interface FontPlanEntry {
   family: string;
   usedBy: string[];
   resolution: GoogleFontResolved;
+  /**
+   * Web-safe Redo-allowed fallback to apply in the brand-kit's
+   * CustomFontFamily.fallbackFont. Visually closest match to the real font.
+   */
+  fallback: AllowedFallback;
 }
 
 export interface FontPlan {
@@ -295,6 +480,7 @@ export async function buildFontPlan(sections: Section[]): Promise<FontPlan> {
     family: u.family,
     usedBy: u.usedBy,
     resolution: resolutions[i]!,
+    fallback: resolveFallbackFont(u.family),
   }));
   return {
     entries,
