@@ -1,0 +1,21 @@
+run = "npm start"
+entrypoint = "src/migrate/server.ts"
+hidden = ["node_modules", ".config", ".git", "migrations", "samples", ".viewer", ".auth", "dist"]
+
+modules = ["nodejs-20"]
+
+[nix]
+channel = "stable-24_05"
+
+[deployment]
+run = ["sh", "-c", "npm start"]
+deploymentTarget = "autoscale"
+build = ["sh", "-c", "npm ci --omit=dev"]
+ignorePorts = false
+
+[[ports]]
+localPort = 8765
+externalPort = 80
+
+[env]
+HOSTED_DEPLOY = "1"

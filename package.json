@@ -7,17 +7,21 @@
     "doc": "docs"
   },
   "scripts": {
+    "start": "tsx src/migrate/server.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "devDependencies": {
     "@types/node": "^25.5.2",
     "@types/react": "^18.3.28",
     "@types/react-dom": "^18.3.7",
-    "tsx": "^4.21.0",
+    "playwright": "^1.59.1",
     "typescript": "^6.0.2"
   },
   "dependencies": {
@@ -28,8 +32,8 @@
     "classnames": "^2.5.1",
     "html-react-parser": "^3.0.16",
     "mjml": "^4.18.0",
-    "playwright": "^1.59.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "tsx": "^4.21.0"
   }
 }

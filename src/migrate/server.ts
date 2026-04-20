@@ -24,7 +24,40 @@ import { klaviyo, paginate, slug } from "../klaviyo.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
 const DEFAULT_REDOAPP_DIR = join(homedir(), "code/redoapp");
-const PORT = parseInt(process.argv[2] ?? "8765", 10);
+const PORT = parseInt(process.env.PORT ?? process.argv[2] ?? "8765", 10);
+const HOST = process.env.HOST ?? "0.0.0.0";
+
+// Detect Replit/managed deploy environments where bazel-backed import isn't available.
+const IS_HOSTED_DEPLOY = Boolean(
+  process.env.REPL_ID || process.env.REPLIT_DEPLOYMENT || process.env.HOSTED_DEPLOY,
+);
+
+// Optional HTTP Basic auth. Gated on BASIC_AUTH_USER + BASIC_AUTH_PASS env vars;
+// if either is unset, auth is skipped entirely (local dev).
+const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER ?? "";
+const BASIC_AUTH_PASS = process.env.BASIC_AUTH_PASS ?? "";
+const BASIC_AUTH_ENABLED = BASIC_AUTH_USER !== "" && BASIC_AUTH_PASS !== "";
+
+function checkBasicAuth(req: IncomingMessage, res: ServerResponse): boolean {
+  if (!BASIC_AUTH_ENABLED) return true;
+  const header = req.headers["authorization"] ?? "";
+  const match = /^Basic (.+)$/.exec(String(header));
+  if (match) {
+    const decoded = Buffer.from(match[1], "base64").toString("utf8");
+    const idx = decoded.indexOf(":");
+    if (idx !== -1) {
+      const user = decoded.slice(0, idx);
+      const pass = decoded.slice(idx + 1);
+      if (user === BASIC_AUTH_USER && pass === BASIC_AUTH_PASS) return true;
+    }
+  }
+  res.writeHead(401, {
+    "www-authenticate": 'Basic realm="mime"',
+    "content-type": "text/plain",
+  });
+  res.end("Authentication required");
+  return false;
+}
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -292,7 +325,8 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
   const merchantSlug = body.merchantSlug as string;
   const templateIds = (body.templateIds ?? []) as string[];
   const skipAi = body.skipAi !== false; // default true for the web UI
-  const runImport = body.runImport !== false;
+  // Hosted deploys (Replit etc.) can't run bazel — force export-only regardless of UI toggle.
+  const runImport = body.runImport !== false && !IS_HOSTED_DEPLOY;
   const anthropicKey = body.anthropicKey as string | undefined;
   const redoappDir =
     (body.redoappDir as string | undefined) || process.env.REDOAPP_DIR || DEFAULT_REDOAPP_DIR;
@@ -616,7 +650,7 @@ const HTML = /* html */ `<!doctype html>
       <h2>3. Run migration</h2>
       <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 12px;">
         <button id="runBtn" class="primary">Export + Import</button>
-        <label style="display: flex; align-items: center; gap: 6px; color: #e6edf3;">
+        <label id="runImportLabel" style="display: flex; align-items: center; gap: 6px; color: #e6edf3;">
           <input type="checkbox" id="runImport" checked />
           <span>Also run bazel import (uncheck to export only)</span>
         </label>
@@ -641,6 +675,18 @@ const HTML = /* html */ `<!doctype html>
     for (const k of SAVED_KEYS) {
       el(k).addEventListener('change', () => localStorage.setItem('mime.' + k, el(k).value));
     }
+
+    // ── Env detection (hosted deploys have no bazel) ────────────────
+    fetch('/api/env').then(r => r.json()).then(env => {
+      if (env.hostedDeploy) {
+        const imp = el('runImport');
+        const lbl = el('runImportLabel');
+        if (imp) imp.checked = false;
+        if (lbl) lbl.style.display = 'none';
+        const btn = el('runBtn');
+        if (btn) btn.textContent = 'Export';
+      }
+    }).catch(() => {});
 
     // ── Load (templates or flows) ───────────────────────────────────
     async function load(which) {
@@ -996,10 +1042,14 @@ const HTML = /* html */ `<!doctype html>
 
 const server = createServer(async (req, res) => {
   try {
+    if (!checkBasicAuth(req, res)) return;
     if (req.method === "GET" && (req.url === "/" || req.url === "/index.html")) {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(HTML);
       return;
+    }
+    if (req.method === "GET" && req.url === "/api/env") {
+      return json(res, 200, { hostedDeploy: IS_HOSTED_DEPLOY });
     }
     if (req.method === "POST" && req.url === "/api/templates") {
       return handleTemplates(req, res);
@@ -1019,7 +1069,10 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Migration UI: http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  const displayHost = HOST === "0.0.0.0" ? "localhost" : HOST;
+  console.log(`Migration UI: http://${displayHost}:${PORT}`);
+  if (IS_HOSTED_DEPLOY) console.log("(hosted deploy — import disabled)");
+  if (BASIC_AUTH_ENABLED) console.log("(basic auth enabled)");
   console.log(`(ctrl-c to stop)`);
 });
