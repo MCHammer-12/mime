@@ -22,7 +22,7 @@ import { exportTemplate } from "../export-template.js";
 import { fetchAccount } from "../fetch-account.js";
 import { klaviyo, paginate, slug } from "../klaviyo.js";
 import type { ImportProgressEvent } from "./import-rpc.js";
-import { importTemplateRpc } from "./import-rpc.js";
+import { importTemplateRpc, uploadFontsForTemplates } from "./import-rpc.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
 const DEFAULT_REDOAPP_DIR = join(homedir(), "code/redoapp");
@@ -435,19 +435,69 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
       return;
     }
 
-    // ─── Import via marketing-rpc (Replit + local) ─────────────────────
+    // ─── Import via marketing-rpc + font upload (Replit + local) ──────
     if (useRpcImport) {
-      emit(res, { kind: "step", label: "Importing into Redo (RPC)…" });
-      const rpcBase = (body.redoRpcBaseUrl as string | undefined)?.trim() || undefined;
+      const serverBase = (body.redoServerBase as string | undefined)?.trim() || undefined;
+      const onFontProgress = (ev: ImportProgressEvent) => {
+        if (ev.kind === "font_uploading") {
+          emit(res, { kind: "log", source: "stdout", text: `uploading font: ${ev.family} (${ev.fileName})` });
+        } else if (ev.kind === "font_registered") {
+          emit(res, { kind: "log", source: "stdout", text: `registered font: ${ev.family}` });
+        } else if (ev.kind === "fonts_done") {
+          emit(res, { kind: "log", source: "stdout", text: `fonts done: ${ev.uploaded} uploaded, ${ev.skipped} skipped` });
+        }
+      };
+
+      // Load the exported template JSON once so we can upload fonts (union
+      // across the batch) before creating templates.
+      const loaded: Array<{ id: string; name: string; path: string; json: any }> = [];
+      for (const exp of exported) {
+        try {
+          const json = JSON.parse(readFileSync(exp.path, "utf8"));
+          loaded.push({ ...exp, json });
+        } catch (e: any) {
+          emit(res, { kind: "fail", id: exp.id, name: exp.name, error: `read export: ${e.message ?? e}` });
+        }
+      }
+
+      // Font upload (once per batch). Unresolved fonts are reported but do
+      // NOT block import — templates render with the fallback in that case
+      // and the merchant can resolve manually afterward.
+      try {
+        emit(res, { kind: "step", label: "Uploading brand fonts…" });
+        const fontResult = await uploadFontsForTemplates(loaded.map((l) => l.json), {
+          jwt: redoJwt!,
+          serverBase,
+          account,
+          onProgress: onFontProgress,
+        });
+        emit(res, {
+          kind: "fonts_done",
+          uploaded: fontResult.uploaded,
+          registeredFamilies: fontResult.registeredFamilies,
+          skipped: fontResult.skipped,
+          unresolved: fontResult.unresolved,
+        });
+        for (const u of fontResult.unresolved) {
+          emit(res, {
+            kind: "warn",
+            text: `unresolved font "${u.family}" (${u.reason}) — used by ${u.usedBy.join(", ")}. Add manually in brand kit.`,
+          });
+        }
+      } catch (e: any) {
+        emit(res, { kind: "warn", text: `font upload failed: ${e.message ?? e}. Continuing with template import.` });
+      }
+
+      // Create templates.
+      emit(res, { kind: "step", label: "Creating templates…" });
       let importOk = 0;
       let importFail = 0;
-      for (const exp of exported) {
-        emit(res, { kind: "step", label: `Importing ${exp.name}…` });
+      for (const l of loaded) {
+        emit(res, { kind: "step", label: `Importing ${l.name}…` });
         try {
-          const templateJson = JSON.parse(readFileSync(exp.path, "utf8"));
-          const result = await importTemplateRpc(templateJson, {
+          const result = await importTemplateRpc(l.json, {
             jwt: redoJwt!,
-            baseUrl: rpcBase,
+            serverBase,
             account,
             onProgress: (ev: ImportProgressEvent) => {
               if (ev.kind === "filter_created") {
@@ -458,11 +508,11 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
             },
           });
           importOk++;
-          emit(res, { kind: "imported", id: exp.id, name: exp.name, templateId: result.templateId });
+          emit(res, { kind: "imported", id: l.id, name: l.name, templateId: result.templateId });
         } catch (e: any) {
           importFail++;
           const msg = e.message ?? String(e);
-          emit(res, { kind: "fail", id: exp.id, name: exp.name, error: `import: ${msg}` });
+          emit(res, { kind: "fail", id: l.id, name: l.name, error: `import: ${msg}` });
         }
       }
       emit(res, { kind: "done", importMethod: "rpc", imported: importOk, importFailed: importFail });
