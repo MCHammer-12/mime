@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 .env.*
+.replit_integration_files/
 migrations/
 samples/
 .auth/

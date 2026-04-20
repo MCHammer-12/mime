@@ -19,3 +19,7 @@ externalPort = 80
 
 [env]
 HOSTED_DEPLOY = "1"
+
+[agent]
+integrations = ["javascript_anthropic_ai_integrations:2.0.0"]
+expertMode = true
