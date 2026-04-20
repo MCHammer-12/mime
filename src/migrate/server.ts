@@ -34,6 +34,14 @@ const IS_HOSTED_DEPLOY = Boolean(
   process.env.REPL_ID || process.env.REPLIT_DEPLOYMENT || process.env.HOSTED_DEPLOY,
 );
 
+// Detect whether AI credentials are available from env (Replit AI Integrations
+// injects AI_INTEGRATIONS_ANTHROPIC_*, local dev sets ANTHROPIC_API_KEY). When
+// true the UI can hide its Anthropic-key field and AI rewrites are enabled by
+// default without the user pasting anything.
+const AI_AVAILABLE = Boolean(
+  process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY,
+);
+
 // Optional HTTP Basic auth. Gated on BASIC_AUTH_USER + BASIC_AUTH_PASS env vars;
 // if either is unset, auth is skipped entirely (local dev).
 const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER ?? "";
@@ -795,12 +803,24 @@ const HTML = /* html */ `<!doctype html>
       h.style.display = h.style.display === 'none' ? 'block' : 'none';
     });
 
-    // ── Env detection — on hosted, import requires a JWT (handled server-side).
-    // We just refresh the label text so the user understands.
+    // ── Env detection — surface what's available server-side.
+    //   hostedDeploy: relabels the import checkbox so it's clear import needs a JWT.
+    //   aiAvailable : server already has an Anthropic key (Replit AI Integrations or
+    //                 ANTHROPIC_API_KEY). When true we hide the manual key field and
+    //                 keep skipAi=false so the user doesn't have to paste anything.
+    let _envAiAvailable = false;
     fetch('/api/env').then(r => r.json()).then(env => {
       if (env.hostedDeploy) {
         const t = el('runImportText');
         if (t) t.textContent = 'Also import (requires auth token; uncheck to export only)';
+      }
+      if (env.aiAvailable) {
+        _envAiAvailable = true;
+        const f = el('anthropicKey');
+        if (f) {
+          const wrapper = f.closest('div');
+          if (wrapper) wrapper.style.display = 'none';
+        }
       }
     }).catch(() => {});
 
@@ -1061,7 +1081,7 @@ const HTML = /* html */ `<!doctype html>
         merchantSlug: el('merchantSlug').value.trim(),
         anthropicKey: el('anthropicKey').value.trim() || undefined,
         redoJwt: el('redoJwt').value.trim() || undefined,
-        skipAi: !el('anthropicKey').value.trim(),
+        skipAi: !_envAiAvailable && !el('anthropicKey').value.trim(),
         runImport: el('runImport').checked,
         templateIds: [...selected],
       };
@@ -1166,7 +1186,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && req.url === "/api/env") {
-      return json(res, 200, { hostedDeploy: IS_HOSTED_DEPLOY });
+      return json(res, 200, { hostedDeploy: IS_HOSTED_DEPLOY, aiAvailable: AI_AVAILABLE });
     }
     if (req.method === "POST" && req.url === "/api/templates") {
       return handleTemplates(req, res);
