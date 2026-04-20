@@ -13,7 +13,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -21,6 +21,8 @@ import { fileURLToPath } from "node:url";
 import { exportTemplate } from "../export-template.js";
 import { fetchAccount } from "../fetch-account.js";
 import { klaviyo, paginate, slug } from "../klaviyo.js";
+import type { ImportProgressEvent } from "./import-rpc.js";
+import { importTemplateRpc } from "./import-rpc.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
 const DEFAULT_REDOAPP_DIR = join(homedir(), "code/redoapp");
@@ -326,8 +328,17 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
   const templateIds = (body.templateIds ?? []) as string[];
   const skipAi = body.skipAi !== false; // default true for the web UI
   // Hosted deploys (Replit etc.) can't run bazel — force export-only regardless of UI toggle.
-  const runImport = body.runImport !== false && !IS_HOSTED_DEPLOY;
   const anthropicKey = body.anthropicKey as string | undefined;
+  const redoJwt = (body.redoJwt as string | undefined)?.trim() || undefined;
+
+  // Import strategy:
+  //   - RPC (marketing-rpc) when a JWT is provided. Works on Replit + locally. Preferred.
+  //   - bazel when running locally AND no JWT provided. Skipped on hosted deploys.
+  //   - export-only otherwise.
+  const wantsImport = body.runImport !== false;
+  const useRpcImport = wantsImport && !!redoJwt;
+  const useBazelImport = wantsImport && !redoJwt && !IS_HOSTED_DEPLOY;
+  const runImport = useRpcImport || useBazelImport;
   const redoappDir =
     (body.redoappDir as string | undefined) || process.env.REDOAPP_DIR || DEFAULT_REDOAPP_DIR;
 
@@ -415,17 +426,52 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
     emit(res, { kind: "summary", exported: exported.length, failed: failures.length });
 
     if (exported.length === 0 || !runImport) {
+      if (IS_HOSTED_DEPLOY && !redoJwt && wantsImport) {
+        emit(res, { kind: "info", text: "Import skipped. Paste a Redo auth token to import via RPC." });
+      }
       const cmd = `cd ${redoappDir} && bazel run //redo/manage:import-klaviyo-templates -- --team ${storeId} --account ${merchantSlug} --mime-dir ${MIME_ROOT}`;
       emit(res, { kind: "done", importSkipped: true, importCommand: cmd });
       res.end();
       return;
     }
 
-    // 4. Hide other account dirs' exports so the import only sees these
-    // (actually: the import reads ALL .redo-template.json in the dir, so the
-    // exports we just wrote are what'll import. Fine.)
+    // ─── Import via marketing-rpc (Replit + local) ─────────────────────
+    if (useRpcImport) {
+      emit(res, { kind: "step", label: "Importing into Redo (RPC)…" });
+      const rpcBase = (body.redoRpcBaseUrl as string | undefined)?.trim() || undefined;
+      let importOk = 0;
+      let importFail = 0;
+      for (const exp of exported) {
+        emit(res, { kind: "step", label: `Importing ${exp.name}…` });
+        try {
+          const templateJson = JSON.parse(readFileSync(exp.path, "utf8"));
+          const result = await importTemplateRpc(templateJson, {
+            jwt: redoJwt!,
+            baseUrl: rpcBase,
+            account,
+            onProgress: (ev: ImportProgressEvent) => {
+              if (ev.kind === "filter_created") {
+                emit(res, { kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
+              } else if (ev.kind === "template_created") {
+                emit(res, { kind: "log", source: "stdout", text: `template created: ${ev.templateId}` });
+              }
+            },
+          });
+          importOk++;
+          emit(res, { kind: "imported", id: exp.id, name: exp.name, templateId: result.templateId });
+        } catch (e: any) {
+          importFail++;
+          const msg = e.message ?? String(e);
+          emit(res, { kind: "fail", id: exp.id, name: exp.name, error: `import: ${msg}` });
+        }
+      }
+      emit(res, { kind: "done", importMethod: "rpc", imported: importOk, importFailed: importFail });
+      return;
+    }
 
-    // 5. Import via bazel
+    // ─── Import via bazel (local only) ─────────────────────────────────
+    // The .redo-template.json files are already on disk in templatesDir.
+    // redo/manage:import-klaviyo-templates reads them all from --mime-dir.
     emit(res, { kind: "step", label: "Importing into Redo (bazel)…" });
 
     const importArgs = [
@@ -499,6 +545,7 @@ const HTML = /* html */ `<!doctype html>
     }
 
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .grid2 .span2 { grid-column: 1 / -1; }
     label { display: block; font-size: 12px; color: #8b949e; margin-bottom: 4px; }
     input[type=text], input[type=password] {
       width: 100%; padding: 8px 10px;
@@ -626,6 +673,21 @@ const HTML = /* html */ `<!doctype html>
           <label>Anthropic key (optional — for coupon rewrites)</label>
           <input type="password" id="anthropicKey" placeholder="sk-ant-... (leave blank to skip AI)" autocomplete="off" />
         </div>
+        <div class="span2">
+          <label>
+            Redo auth token (merchant JWT — required for RPC import)
+            <span style="color:#8b949e;font-weight:normal;">·
+              <a href="#" id="jwtHelpLink" style="color:#58a6ff;">how to find this</a>
+            </span>
+          </label>
+          <input type="password" id="redoJwt" placeholder="eyJhbGc... (leave blank to export only)" autocomplete="off" />
+          <div id="jwtHelp" style="display:none; margin-top:6px; padding:8px; background:#161b22; border-radius:4px; color:#8b949e; font-size:12px; line-height:1.5;">
+            In Chrome, open the Redo admin at <code>app.getredo.com</code> while logged in.
+            Open DevTools → Application → Local Storage → <code>https://app.getredo.com</code>.
+            Copy the value of the key <code>redo.merchant_auth_token.&lt;storeId&gt;</code>
+            (where storeId matches the team you're importing into). Paste it here.
+          </div>
+        </div>
       </div>
       <div style="margin-top: 12px; display: flex; gap: 8px; align-items: center;">
         <button id="loadTemplatesBtn" class="primary">Load templates</button>
@@ -652,7 +714,7 @@ const HTML = /* html */ `<!doctype html>
         <button id="runBtn" class="primary">Export + Import</button>
         <label id="runImportLabel" style="display: flex; align-items: center; gap: 6px; color: #e6edf3;">
           <input type="checkbox" id="runImport" checked />
-          <span>Also run bazel import (uncheck to export only)</span>
+          <span id="runImportText">Also run import (uncheck to export only)</span>
         </label>
       </div>
       <div class="log" id="log"></div>
@@ -667,7 +729,7 @@ const HTML = /* html */ `<!doctype html>
     let selected = new Set(); // template IDs
 
     // Local storage for convenience
-    const SAVED_KEYS = ['klaviyoKey', 'storeId', 'merchantSlug', 'anthropicKey'];
+    const SAVED_KEYS = ['klaviyoKey', 'storeId', 'merchantSlug', 'anthropicKey', 'redoJwt'];
     for (const k of SAVED_KEYS) {
       const saved = localStorage.getItem('mime.' + k);
       if (saved) el(k).value = saved;
@@ -676,15 +738,19 @@ const HTML = /* html */ `<!doctype html>
       el(k).addEventListener('change', () => localStorage.setItem('mime.' + k, el(k).value));
     }
 
-    // ── Env detection (hosted deploys have no bazel) ────────────────
+    // JWT help toggle
+    el('jwtHelpLink').addEventListener('click', (e) => {
+      e.preventDefault();
+      const h = el('jwtHelp');
+      h.style.display = h.style.display === 'none' ? 'block' : 'none';
+    });
+
+    // ── Env detection — on hosted, import requires a JWT (handled server-side).
+    // We just refresh the label text so the user understands.
     fetch('/api/env').then(r => r.json()).then(env => {
       if (env.hostedDeploy) {
-        const imp = el('runImport');
-        const lbl = el('runImportLabel');
-        if (imp) imp.checked = false;
-        if (lbl) lbl.style.display = 'none';
-        const btn = el('runBtn');
-        if (btn) btn.textContent = 'Export';
+        const t = el('runImportText');
+        if (t) t.textContent = 'Also import (requires auth token; uncheck to export only)';
       }
     }).catch(() => {});
 
@@ -944,6 +1010,7 @@ const HTML = /* html */ `<!doctype html>
         storeId: el('storeId').value.trim(),
         merchantSlug: el('merchantSlug').value.trim(),
         anthropicKey: el('anthropicKey').value.trim() || undefined,
+        redoJwt: el('redoJwt').value.trim() || undefined,
         skipAi: !el('anthropicKey').value.trim(),
         runImport: el('runImport').checked,
         templateIds: [...selected],
