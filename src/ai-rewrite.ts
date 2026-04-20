@@ -8,12 +8,18 @@
  * (via ANTHROPIC_API_KEY). No code change between environments.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+// The @anthropic-ai/sdk module is loaded lazily so the pipeline can run
+// without the package installed when AI rewrites aren't needed (SKIP_AI=1).
+type AnthropicCtor = new (opts: { apiKey: string; baseURL?: string }) => {
+  messages: {
+    create: (req: any) => Promise<any>;
+  };
+};
 
 const MODEL = "claude-sonnet-4-6";
 
-let _client: Anthropic | null = null;
-function client(): Anthropic {
+let _client: InstanceType<AnthropicCtor> | null = null;
+async function client(): Promise<InstanceType<AnthropicCtor>> {
   if (_client) return _client;
   const apiKey =
     process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ||
@@ -23,6 +29,10 @@ function client(): Anthropic {
       "No Anthropic API key found. Set AI_INTEGRATIONS_ANTHROPIC_API_KEY (Replit) or ANTHROPIC_API_KEY (local).",
     );
   }
+  // @ts-expect-error — dynamic import of an optional peer. The package is
+  // declared in package.json but may not be installed (e.g. when SKIP_AI=1).
+  const mod = await import("@anthropic-ai/sdk");
+  const Anthropic = (mod.default ?? mod) as unknown as AnthropicCtor;
   _client = new Anthropic({
     baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL,
     apiKey,
@@ -87,7 +97,7 @@ export interface RewriteResult {
 export async function rewriteInlineCoupon(
   textHtml: string,
 ): Promise<RewriteResult> {
-  const response = await client().messages.create({
+  const response = await (await client()).messages.create({
     model: MODEL,
     max_tokens: 4096,
     system: [

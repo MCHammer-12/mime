@@ -1,5 +1,129 @@
 # Session Log
 
+## 2026-04-20 — CODE-template parser (editor_type: CODE) — first pass, paused
+
+**Context**
+Klaviyo's `editor_type: CODE` templates are hand-coded HTML emails that don't
+use the block editor, so the existing `kl-*` / `gxp-kl-*` class-dispatch
+parser returns 0 sections. Otishi (new merchant evaluating Redo) has 368 of
+these out of 464 total templates (80%). Previous session noted this as a
+coverage gap (`project_coverage_gaps`) with no concrete plan.
+
+**Done**
+- **Survey:** pulled Otishi's Klaviyo corpus via `extract-templates.ts`
+  (464 templates total, 368 CODE + 96 SYSTEM_DRAGGABLE). Structural audit
+  showed CODE templates are *not* wildly variable — 367/367 use a
+  `max-width:600px` wrapper, 363/367 use inline styles, 0 use MJML. The
+  dominant pattern is a 600-pixel email table with `<tr>` rows each
+  carrying one visual block (header, text, button, divider, footer, etc.).
+  The original assumption that CODE = "wildly variable hand-coded HTML"
+  was wrong; corrected mid-session after Michael pushed back on the
+  speculation.
+- **Parser built — `src/parser/code-template.ts` (~780 lines).** Two
+  container modes:
+  1. **Table-based (272/368):** find `<table>` with `max-width:600px`
+     or `width="600"`, iterate its direct `<tr>` rows. For each row's
+     `<td>`, walk direct children, accumulate text-like nodes (p, h1-h6),
+     flush on block-breaking elements (img, table, hr).
+  2. **Div-based (96/368):** fallback for Hypermatic/Stripo/MSO-wrapped
+     templates where the wrapper is `<div style="max-width:600px">`
+     instead of a table. A `deepWalkContent` DFS descends through
+     wrapper divs/tables, emits blocks as recognizable shapes are found,
+     skips display:none preheader spans.
+  - Classifier emits BUTTON / IMAGE / TEXT / LINE / COLUMN / SPACER
+    from structural shape (nested `<table>` with `<td style="background-color;
+    border-radius;">` + `<a>` = button; `<a><img></a>` with no other
+    content = image with clickthrough; `<td style="border-top">` alone =
+    line; multi-td `<tr>` = column).
+  - Multi-block column cells bail to flat emission (matches the existing
+    Klaviyo parser convention — stacked ColumnBlocks break mobile reflow).
+  - Wired into `src/export-template.ts`: routes `editor_type: CODE`
+    (or heuristically, templates with zero `kl-*` classes) through the
+    new parser; block-editor templates keep the existing path.
+- **Test harnesses** (`src/parser/code-template-{smoke,warnings,debug,emit}.ts`)
+  for batch regression, warning categorization, quality-stat dumps, and
+  Section[] JSON emission for the side-by-side viewer.
+- **Anthropic SDK dynamic import:** `src/ai-rewrite.ts` switched from
+  static `import Anthropic from "@anthropic-ai/sdk"` to dynamic
+  `await import(...)` inside the client factory. Unblocks running the
+  pipeline without the package installed (e.g. `SKIP_AI=1`). Had to add
+  a `@ts-expect-error` on the dynamic import because the type is
+  optional-peer.
+- **End-to-end push validated:** exported `T4NcCW-46-gym-vs-home-gym`
+  through the mime pipeline and imported into local Mime team
+  (`69dff28302f64f42e6012a4d`) via
+  `bazel run //redo/manage:import-klaviyo-templates`. Template ID
+  `69e6b4fcd97242a7998d7e71`. 0 errors.
+- **Batch metrics across 368 Otishi CODE templates:**
+  - 0 parse failures, 0 empty outputs
+  - 4,211 sections total (text: 1660, image: 1251, button: 712,
+    line: 467, column: 66, spacer: 55)
+  - 141 warnings, breakdown:
+    - 96 "couldn't find 600px container; deep-walking body" (fallback
+      path used; 80 of those produced usable output, 16 produced ≤2
+      sections and are genuinely broken — CSS-class-based div templates
+      that need `<style>` block resolution)
+    - 45 "multi-block column cell; bailing to flat section emission"
+      (side-by-side product-card rows)
+
+**Decision: pin the project**
+Spot-checked the imported template in the local Redo builder and in
+the side-by-side viewer. Block detection is right (images, buttons,
+headings all mapped correctly), but visual fidelity is poor enough that
+Michael doesn't want to ship it. Known issues seen in the builder:
+- **Image widths don't survive.** Mime emits ImageBlock with aspectRatio
+  but Redo uses `horizontalPadding: small|medium|large` (size buckets,
+  not pixels), so a 160px logo renders full-width.
+- **Column gap rendering differs.** Original used `border-radius:6px 0 0
+  6px` / `0` / `0 6px 6px 0` to visually join three cells; Redo's
+  ColumnBlock adds a gap regardless of `gap: 0`.
+- **Generic text-block styling** (fontFamily, fontSize, color) is read
+  from the first child's inline style, which misses per-span overrides
+  inside a `<td>` that has multiple differently-styled `<p>`s stacked.
+
+This is solvable but amounts to a separate project — probably weeks of
+iteration against the Otishi corpus. Parking until then. Work-in-progress
+merge is safe to commit because it's gated behind `editor_type: CODE` /
+no-kl-class heuristic; existing block-editor migrations are unaffected.
+
+**Files created/changed**
+- `src/parser/code-template.ts` (new, 780 LoC) — CODE template parser
+- `src/parser/code-template-smoke.ts` (new) — batch smoke test
+- `src/parser/code-template-warnings.ts` (new) — warning tally
+- `src/parser/code-template-debug.ts` (new) — per-template quality stats
+- `src/parser/code-template-emit.ts` (new) — emit Section[] JSON for viewer
+- `src/ai-rewrite.ts` (modified) — dynamic Anthropic import
+- `src/export-template.ts` (modified) — route CODE templates to new parser
+
+**State at session end**
+- Parser: 368 Otishi CODE templates + 416 test-account templates, 0 regressions
+- CODE parser working but visual fidelity insufficient → paused
+- `src/migrate/import-rpc.ts` referenced in git status at session start
+  was missing by the time I looked — appears to have been deleted between
+  session start and my first check (untracked file, so no git history)
+- Branch: `main`, clean apart from commits being made at wrap-up
+
+**Next steps (when this picks back up)**
+1. Image width preservation — investigate whether ImageBlock has any
+   pixel-level sizing or whether we need to pre-compute a
+   `horizontalPadding` bucket from the image's explicit width and the
+   600px email width (small/medium/large maps to some padding table).
+2. Column gap rendering — read Redo's ColumnBlock rendering to see
+   whether `gap: 0` is respected and what controls the visual gap.
+3. Text fragment per-span styling — instead of reading the first child's
+   style, descend into spans when a `<td>` has a single homogeneous
+   styled block; emit the full styled HTML and let Redo's Quill strip it
+   appropriately.
+4. CSS-class-based templates (16 templates, ~4%) — parse `<style>`
+   block, resolve class selectors to inline properties before walking.
+   Alternatively skip with warning since it's a small slice.
+5. Multi-block column cells — consider side-by-side product-card
+   emission strategies (separate image block row + text block row,
+   or a real ColumnBlock with image only, or waiting for Redo to support
+   nested columns).
+
+---
+
 ## 2026-04-15 — End-to-end import fixes + Package F + E1 variable substitution
 
 **Done**

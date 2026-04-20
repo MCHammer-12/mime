@@ -6,6 +6,8 @@ Automation project for manual processes Michael does at Redo. Primary target: Kl
 ## Status
 End-to-end import pipeline working: parse → transform → export → import to local redoapp → render in builder. Three templates imported successfully (Newsletter #8, Newsletter #4, merchant-2 + merchant-3 accounts). Packages A-D + F (parser polish) + E1 (variable substitution) complete. 416 templates parse with 0 failures. Import executor in redoapp (uncommitted) handles product filter creation. Next: E2 (coupon → discount objects + AI rewrite), E3 (font provisioning), E4 (REVIEW list aggregation).
 
+**CODE-template parser (2026-04-20):** First-pass parser for `editor_type: CODE` templates landed at `src/parser/code-template.ts` (table-based + div-based dialects). 368/368 Otishi CODE templates parse with 0 failures. Block detection works; visual fidelity in the Redo builder is insufficient to ship (image widths, column gaps, per-span text styling). Paused until CODE migration becomes a blocker. Gated behind `editor_type: CODE` / no-kl-class heuristic — inert for existing block-editor migrations. See `project_code_template_parser` memory for state and next-step queue.
+
 ## Two tracks
 - **current/** — deterministic Klaviyo HTML → Redo Section[] parser (no LLM). Uses cheerio to walk kl-*/gxp-kl-* classes. Production renderer cloned from redoapp for local verification.
 - **future/** — flow automation duplicator (Klaviyo flow topology already extracted). Also: arbitrary HTML forwarder improvement (separate from Klaviyo-specific parser).
@@ -19,7 +21,9 @@ End-to-end import pipeline working: parse → transform → export → import to
 - Mermaid for flow visualization
 
 ## Key files — parser + renderer + viewer
-- `src/parser/index.ts` — **dispatcher**: walks rows, delegates to per-block parsers
+- `src/parser/index.ts` — **dispatcher**: walks rows, delegates to per-block parsers (block-editor path)
+- `src/parser/code-template.ts` — **CODE-template parser**: inline-styled email-table HTML (paused, see status)
+- `src/parser/code-template-{smoke,warnings,debug,emit}.ts` — batch harnesses for the CODE parser
 - `src/parser/blocks/<type>.ts` — per-element parsers (12 files: text, image, button, header, menu, line, spacer, socials, column, discount, product, klaviyo-specific)
 - `src/parser/blocks/TODO-SHARED-*.md` — follow-up notes per element
 - `src/parser/helpers.ts` — dispatcher helpers (sel, hasClass, findCls, nextId)

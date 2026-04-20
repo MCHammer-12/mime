@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ObjectId } from "bson";
 import { parseKlaviyoHtml } from "./parser/index.js";
+import { parseCodeTemplateHtml } from "./parser/code-template.js";
 import { fetchAccount, type KlaviyoAccount } from "./fetch-account.js";
 import { transformSections } from "./transform.js";
 import { buildFontPlan } from "./fonts.js";
@@ -46,6 +47,33 @@ export async function exportTemplate(
   opts: { account: KlaviyoAccount | null; skipAi: boolean },
 ): Promise<ExportResult> {
   const html = readFileSync(htmlPath, "utf-8");
+
+  // Infer metadata from a sibling .json file if present. We read this
+  // BEFORE parsing so we can branch on editor_type.
+  const jsonPath = htmlPath.replace(/\.html$/, ".json");
+  let klaviyoMeta: {
+    name?: string;
+    subject?: string;
+    created?: string;
+    editorType?: string;
+  } = {};
+  if (existsSync(jsonPath)) {
+    const raw = JSON.parse(readFileSync(jsonPath, "utf-8"));
+    klaviyoMeta = {
+      name: raw.attributes?.name || raw.name,
+      subject: raw.attributes?.name || raw.name,
+      created: raw.attributes?.created,
+      editorType: raw.attributes?.editor_type,
+    };
+  }
+
+  // Route to the appropriate parser. CODE templates are hand-coded email
+  // HTML without the kl-*/gxp-kl-* class markers the default parser relies
+  // on. If editor_type isn't known (no sibling .json), fall back to a
+  // heuristic: if the HTML has zero kl-* classes, use the CODE parser.
+  const useCodeParser =
+    klaviyoMeta.editorType === "CODE" ||
+    (!klaviyoMeta.editorType && !/class="[^"]*(?:kl-|gxp-kl-)/.test(html));
   const {
     sections: rawSections,
     warnings,
@@ -53,19 +81,7 @@ export async function exportTemplate(
     reviewItems,
     skippedBlocks,
     bodyBackgroundColor,
-  } = parseKlaviyoHtml(html);
-
-  // Infer metadata from a sibling .json file if present
-  const jsonPath = htmlPath.replace(/\.html$/, ".json");
-  let klaviyoMeta: { name?: string; subject?: string; created?: string } = {};
-  if (existsSync(jsonPath)) {
-    const raw = JSON.parse(readFileSync(jsonPath, "utf-8"));
-    klaviyoMeta = {
-      name: raw.attributes?.name || raw.name,
-      subject: raw.attributes?.name || raw.name,
-      created: raw.attributes?.created,
-    };
-  }
+  } = useCodeParser ? parseCodeTemplateHtml(html) : parseKlaviyoHtml(html);
 
   let sections = rawSections;
   let substitutions: string[] = [];

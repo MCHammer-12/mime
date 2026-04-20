@@ -1,5 +1,26 @@
 # Decisions
 
+## 2026-04-20 — CODE-template parser: built, paused at insufficient visual fidelity
+Klaviyo `editor_type: CODE` templates (hand-coded HTML, no `kl-*` classes)
+were a known coverage gap — Otishi has 368 of 464 templates in CODE mode.
+Built a deterministic parser (`src/parser/code-template.ts`) covering two
+structural dialects: table-based (600px table wrapper, `<tr>` rows as
+sections) and div-based (Hypermatic/Stripo/MSO-wrapped, DFS deep-walk).
+Batch run: 368/368 parse, 0 failures, 0 empty, 4211 sections.
+Block detection (images, buttons, text, lines, columns) works; a real
+end-to-end push to local Mime team succeeded and renders the right
+structure. **But** visual fidelity in the Redo builder is insufficient
+to ship — logo widths collapse to full-width (ImageBlock has no px field,
+only `horizontalPadding: small|medium|large` buckets), column gaps
+diverge from originals that rely on `border-radius` corner-joining
+tricks, and per-span text styling inside a `<td>` is flattened. Each
+issue is solvable but requires its own investigation against the Otishi
+corpus. Decision: park the feature. Code is committed behind the
+`editor_type: CODE` / no-kl-class heuristic so it's inert for existing
+block-editor migrations. Picked back up when CODE migrations become a
+blocker (likely Otishi onboarding). See `project_code_template_parser`
+memory for the detailed state, warnings breakdown, and next-step queue.
+
 ## 2026-04-15 — Teammate access: local-only for now, Replit + proper OAuth deferred
 The mime pipeline runs locally (`npx tsx`) against local redoapp for dev/test. Long-term plan is to deploy on Replit (AI ops team preference; paid plan available) with proper "Login with Redo" OAuth so teammates can import directly to prod via `https://app-server.getredo.com/marketing-rpc/createEmailTemplate`. Researched Redo's marketing-rpc endpoints — they require a merchant JWT signed by Redo's server-auth keys; no API key/PAT scheme. Three access options were weighed (A: ZIP download, B: paste JWT from localStorage, C: proper OAuth). Decision: Option C (proper OAuth) is the eventual target; do nothing for now. Teammates who need to migrate can either set up local redoapp themselves (see `reference_local_setup_gotchas`) or hand off extracted templates to Michael for local import. Full plan captured in `project_replit_deploy_plan` memory so the work can be picked up cold in a future session.
 
