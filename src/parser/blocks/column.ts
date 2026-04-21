@@ -7,7 +7,12 @@ import type {
   Section,
   TextBlock,
 } from "../../renderer/types.js";
-import { EmailBlockType, Size, VerticalAlignment } from "../../renderer/types.js";
+import {
+  Alignment,
+  EmailBlockType,
+  Size,
+  VerticalAlignment,
+} from "../../renderer/types.js";
 import {
   parseColor,
   parseFontFamily,
@@ -26,6 +31,51 @@ const NESTABLE_TYPES = new Set<EmailBlockType>([
   EmailBlockType.DISCOUNT,
 ]);
 
+// Klaviyo columns frequently carry decorative "filler" blocks alongside the
+// real content (a divider between a pair of images, a spacer between an image
+// and a CTA). These aren't nestable in a Redo ColumnBlock but dropping them
+// preserves the column layout the merchant designed — the alternative was a
+// full-row flatten, which loses the grid entirely. Kept blocks are handled
+// normally; truly incompatible content (HEADER/MENU/SOCIALS/PRODUCT/COLUMN)
+// still triggers the bail-out below.
+// ──────────────────────────────────────────────────────────────────
+// DO NOT add HEADER/MENU/SOCIALS/PRODUCT to this set without first
+// confirming those blocks really are decoratively-safe to drop. The
+// whole point of keeping them in the bail path is that losing them
+// silently is worse than losing the grid (they carry real content —
+// logos, navigation, social links). SPACER and LINE are the only
+// block types that are purely visual padding/separators.
+const DROPPABLE_NON_NESTABLE: Set<EmailBlockType> = new Set<EmailBlockType>([
+  EmailBlockType.SPACER,
+  EmailBlockType.LINE,
+]);
+
+// Alignment-carrying block types — when we hoist one of these out of a
+// column cell via the bail-out paths below, we force alignment to CENTER.
+// ──────────────────────────────────────────────────────────────────
+// DO NOT drop this override. When a block (e.g. socials, a menu, a
+// narrow button) was designed to sit inside a column cell, its source
+// alignment refers to the cell's local frame — "left" meant left
+// within the cell, "right" meant right within the cell. Hoisting to
+// a full-width section without re-centering makes those blocks
+// visually stick to the email edge (symptom: footer socials jammed
+// to the right margin after an image + socials row bail-out).
+// CENTER is the safe default because the original content was
+// narrower than the email width.
+const ALIGNMENT_BEARING_TYPES: Set<EmailBlockType> = new Set<EmailBlockType>([
+  EmailBlockType.BUTTON,
+  EmailBlockType.MENU,
+  EmailBlockType.SOCIALS,
+  EmailBlockType.DISCOUNT,
+]);
+
+function recenterHoisted<S extends Section>(block: S): S {
+  if (ALIGNMENT_BEARING_TYPES.has(block.type)) {
+    return { ...block, alignment: Alignment.CENTER };
+  }
+  return block;
+}
+
 /**
  * Parse a multi-column row (multiple kl-column children).
  * Called from the dispatcher for rows with >1 column.
@@ -41,8 +91,10 @@ const NESTABLE_TYPES = new Set<EmailBlockType>([
  *   ColumnBlock) → bail on the multi-column layout and emit every inner block
  *   as a standalone top-level section. Product blocks have their own internal
  *   columns and can't be nested.
- * - Any column containing a non-nestable block (HEADER/LINE/SPACER/MENU/
- *   SOCIALS) → same bail-out behavior.
+ * - SPACER and LINE blocks inside a column are dropped (decorative filler);
+ *   the layout is preserved.
+ * - HEADER/MENU/SOCIALS still trigger a full-row flatten since they carry
+ *   real content and losing them silently would be worse than losing the grid.
  */
 export function parseColumnRow(
   $: $,
@@ -68,32 +120,57 @@ export function parseColumnRow(
     perColumnBlocks.push(parseColumnContent($, $col, ctx));
   });
 
-  // Bail condition: any column contains a non-nestable block (product,
-  // header, line, spacer, menu, socials, or nested column). Emit everything
-  // flat, preserving document order within each column.
-  const hasNonNestable = perColumnBlocks.some((arr) =>
+  // Drop decorative non-nestable filler (spacers, dividers) that would
+  // otherwise trigger a flatten. We track how many got dropped per column so
+  // we can surface a warning when the layout actually loses content.
+  let droppedCount = 0;
+  const cleanedPerColumnBlocks: Section[][] = perColumnBlocks.map((arr) => {
+    const kept: Section[] = [];
+    for (const b of arr) {
+      if (
+        !NESTABLE_TYPES.has(b.type) &&
+        DROPPABLE_NON_NESTABLE.has(b.type)
+      ) {
+        droppedCount++;
+        continue;
+      }
+      kept.push(b);
+    }
+    return kept;
+  });
+  if (droppedCount > 0) {
+    ctx.warnings.push(
+      `Dropped ${droppedCount} decorative block(s) (spacers/dividers) inside a ${$columns.length}-column row to preserve column structure.`,
+    );
+  }
+
+  // Bail condition: any column still contains a block that can't live in a
+  // Redo column (product, header, menu, socials, or a nested column row). We
+  // emit everything flat so nothing gets silently lost.
+  const hasNonNestable = cleanedPerColumnBlocks.some((arr) =>
     arr.some((b) => !NESTABLE_TYPES.has(b.type)),
   );
   if (hasNonNestable) {
     ctx.warnings.push(
       `Column row contains a non-nestable block (product or complex layout) — emitting contents as standalone sections.`,
     );
-    return perColumnBlocks.flat();
+    return cleanedPerColumnBlocks.flat().map(recenterHoisted);
   }
 
   // Bail when zippering would produce >1 stacked ColumnBlock. Redo's
   // ColumnBlock stacks each row as its own full-width section on mobile,
   // which breaks the per-column reading order Klaviyo gives you. Emit the
   // contents flat with a warning so the importer can review post-import.
-  const nestablePerColumn: NonRecursiveBlock[][] = perColumnBlocks.map((arr) =>
-    arr.filter((b): b is NonRecursiveBlock => NESTABLE_TYPES.has(b.type)),
+  const nestablePerColumn: NonRecursiveBlock[][] = cleanedPerColumnBlocks.map(
+    (arr) =>
+      arr.filter((b): b is NonRecursiveBlock => NESTABLE_TYPES.has(b.type)),
   );
   const wouldStack = nestablePerColumn.some((a) => a.length > 1);
   if (wouldStack) {
     ctx.warnings.push(
       `Multi-column row has stacked content per column — emitting contents flat (mobile reflow won't preserve column-by-column order). Review post-import.`,
     );
-    return perColumnBlocks.flat();
+    return cleanedPerColumnBlocks.flat().map(recenterHoisted);
   }
 
   const $row = $columns.first().parent();
@@ -109,15 +186,28 @@ export function parseColumnRow(
     const cols = nestablePerColumn.map((arr) => {
       const block = arr[r];
       if (!block) return null;
-      // Clamp padding so stacked column sections touch:
-      // non-first rows zero top; non-last rows zero bottom.
+      // ───────────────────────────────────────────────────────────────
+      // DO NOT pass through `sectionPadding.left` / `right` here.
+      // ───────────────────────────────────────────────────────────────
+      // A nested block sits inside a ColumnBlock slot; horizontal
+      // position is owned by the column's `columnWidths`. Standalone
+      // block parsers (see `parseImageBlock` at `blocks/image.ts` —
+      // "constrained-width images" / `containerTdWidth` branch) inflate
+      // their own `sectionPadding.l/r` to center narrow content in a
+      // full-width email — which is correct for a top-level block but
+      // produces a narrow band inside a column slot (symptom: images
+      // rendering ~200px wide with huge side margins inside a 3-col
+      // row). Any future rewrite that preserves L/R padding when
+      // building `cols` must also disable the narrow-image centering in
+      // the child parsers — otherwise that bug reappears. Top/bottom
+      // are clamped to keep zippered stacks touching.
       return {
         ...block,
         sectionPadding: {
           top: isFirstRow ? block.sectionPadding.top : 0,
-          right: block.sectionPadding.right,
+          right: 0,
           bottom: isLastRow ? block.sectionPadding.bottom : 0,
-          left: block.sectionPadding.left,
+          left: 0,
         },
       };
     });

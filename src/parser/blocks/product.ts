@@ -52,7 +52,37 @@ const CART_ITEM_FILTER: ProductFilterDoc = {
 const CART_CONTEXT_LOOP_RE =
   /\{%\s*for\s+\w+\s+in\s+(event\.extra\.line_items|items)\s*%\}/;
 
-const FEEDS_ITEM_RE = /\{%\s*(?:if|with)\s+[^%]*\bfeeds\.?\|index:\d+/;
+// Klaviyo's `feeds.CART` feed is the abandoned-cart feed; other named feeds
+// (e.g. `feeds.BEST_SELLERS`) map to recommendation blocks. We keep this
+// signal separate from the more-general FEEDS_ITEM_RE so a template can be
+// recognized as a cart email even when it doesn't use an explicit
+// `{% for item in items %}` loop (common in Klaviyo's "with item=feeds.CART"
+// pattern).
+// ──────────────────────────────────────────────────────────────────
+// DO NOT fold this into FEEDS_ITEM_RE or remove it without also
+// verifying `detectCartContext` still distinguishes cart from
+// best-sellers — otherwise cart templates get the wrong pending
+// filter (Best Sellers instead of Cart Item) and the interactive-cart
+// block renders with no cart items at send time.
+const FEEDS_CART_RE = /\bfeeds\.CART\b/;
+
+// Matches `{% if feeds|index:N %}` and `{% with ... feeds.NAME|index:N %}`.
+// ──────────────────────────────────────────────────────────────────
+// DO NOT simplify the middle group to `\.?` — that earlier pattern
+// matched `feeds|index:0` and `feeds.|index:0` but not
+// `feeds.CART|index:0`. Klaviyo templates built after ~2023 all use
+// the named-feed form, so the `(?:\.\w+)?` shape is load-bearing.
+const FEEDS_ITEM_RE = /\{%\s*(?:if|with)\s+[^%]*\bfeeds(?:\.\w+)?\|index:\d+/;
+
+// Cart-item dynamic signal: cells reference `{{ item.<field> }}` anywhere.
+// Klaviyo abandoned-cart templates wrap product cells in
+// `{% for item in items %}` (or `event.extra.line_items`) and reference
+// fields like item.url / item.title / item.image directly inside each cell.
+// parseStaticProductBlock would otherwise misclassify these as hand-picked,
+// flipping the block from a native interactive-cart (dynamic) to a frozen
+// image+title grid.
+const CART_ITEM_FIELD_RE =
+  /\{\{\s*item\.(?:url|title|price|image|image_url|product_url|compare_at_price|regular_price|quantity|handle)\b/;
 
 // Cached per-document cart-context detection. parseProductBlock runs once per
 // product block; cart signal lives in other blocks so we only need to scan the
@@ -63,7 +93,7 @@ function detectCartContext($: $): boolean {
   const cached = cartContextCache.get($);
   if (cached !== undefined) return cached;
   const html = $.html();
-  const hit = CART_CONTEXT_LOOP_RE.test(html);
+  const hit = CART_CONTEXT_LOOP_RE.test(html) || FEEDS_CART_RE.test(html);
   cartContextCache.set($, hit);
   return hit;
 }
@@ -86,8 +116,26 @@ export function parseProductBlock(
   if ($cells.length === 0) return [];
 
   const isDynamic = $cells.toArray().some((cell) => {
-    const txt = $(cell).text();
-    return FEEDS_ITEM_RE.test(txt);
+    const $cell = $(cell);
+    // ──────────────────────────────────────────────────────────────
+    // DO NOT drop the html() scans below.
+    // ──────────────────────────────────────────────────────────────
+    // text() walks only visible content (e.g. a `{{ item.title }}`
+    // mid-paragraph); it does NOT read attribute values. Klaviyo
+    // abandoned-cart templates commonly carry the cart signal
+    // exclusively in attributes — `href="{{ item.url }}"`,
+    // `src="{{ item.image_full_url }}"` — with no visible `{{ item.X }}`
+    // in the cell text. Scanning text() alone misclassifies those as
+    // static product grids (symptom: flat image+title column split
+    // instead of a native interactive-cart block). Keep BOTH scans.
+    const txt = $cell.text();
+    const outer = $cell.html() ?? "";
+    return (
+      FEEDS_ITEM_RE.test(txt) ||
+      FEEDS_ITEM_RE.test(outer) ||
+      CART_ITEM_FIELD_RE.test(txt) ||
+      CART_ITEM_FIELD_RE.test(outer)
+    );
   });
 
   if (isDynamic) {
@@ -114,7 +162,19 @@ function parseDynamicProductBlock(
   const columns =
     cellWidth > 0 ? Math.max(1, Math.round(100 / cellWidth)) : $cells.length;
 
-  const numberOfProducts = $cells.length;
+  // Klaviyo templates often repeat cart-item cells across multiple rows
+  // (e.g. 6 cells at `feeds.CART|index:0..5` laid out as 2 rows × 3 cols) to
+  // cover the case where the cart has more items than one row can show. For
+  // Redo's interactive-cart block we emit a single row — same visual width,
+  // same per-cell styling, one product per column. The builder supports
+  // multi-row layouts natively via its own pagination.
+  // ────────────────────────────────────────────────────────────────
+  // DO NOT revert to `$cells.length` without a different cap — a
+  // Klaviyo template can declare up to ~12 `feeds.CART|index:N` cells
+  // as overflow slots; emitting all of them makes the Redo builder
+  // render an over-tall placeholder grid at design time and ignores
+  // the merchant's column-width intent.
+  const numberOfProducts = Math.min($cells.length, columns);
 
   // Which display pieces does the cell reference?
   const showTitle = /\{\{\s*(?:item\.title|Title)\b/.test(cellText);

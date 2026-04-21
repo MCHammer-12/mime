@@ -43,14 +43,27 @@ export function parseImageBlock(
   const wrapperStyle = parseInlineStyles($wrapper.attr("style"));
   const sectionPadding = parsePadding(outerStyle);
 
-  // Detect constrained-width images: if the image container td has an explicit
-  // width smaller than the available area, size the outer section so the
-  // image renders at the constrained width (e.g. a 126px logo centered).
+  // Detect constrained-width images: if the image container td has an
+  // explicit width smaller than the available area, size the outer section so
+  // the image renders at the constrained width (e.g. a 126px logo centered).
   //
   // Redo's image renderer sets `<img width=100% />` and uses `sectionPadding`
   // to size the outer MjmlSection — so shrinking the image means widening
   // `sectionPadding.left/right`. The inner `padding` field is not applied
   // to image width, only to inner spacing in the builder UI.
+  //
+  // ──────────────────────────────────────────────────────────────────
+  // INTERACTION NOTE (keep in sync with `blocks/column.ts`)
+  // ──────────────────────────────────────────────────────────────────
+  // This branch assumes the emitted block is TOP-LEVEL. When the caller
+  // nests this block inside a ColumnBlock slot (see `parseColumnRow` in
+  // `blocks/column.ts`), the column owns horizontal layout, and
+  // `parseColumnRow` intentionally zeros L/R `sectionPadding` on each
+  // nested block to undo the centering below. If you ever refactor
+  // this function to accept a `nested: boolean` context flag, skip the
+  // centering when nested — and keep column.ts's zero-out as a
+  // belt-and-braces guard unless you've also stopped calling this
+  // parser for nested images.
   const containerTdWidth = parsePx(paddingStyle["width"]);
   const availableWidth =
     EMAIL_MAX_WIDTH_PX - sectionPadding.left - sectionPadding.right;

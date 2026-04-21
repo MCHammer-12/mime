@@ -208,6 +208,49 @@ MjmlSection defaults to `padding: 20px 0`. Spacer fixed this explicitly. Every o
 
 ---
 
+## Work Package I — Flow import (mime + redoapp)
+
+**Root cause:** No path to get Klaviyo flows into Redo. Templates are covered by Package G; flows are a separate, larger build — they reference templates by `_id`, so they need template import to land first AND an ID-rewrite step during flow insert.
+
+**What's there today:**
+- No `flows/` output in `mime/migrations/<account>/` (only `templates/`)
+- No `import-klaviyo-flows.ts` manage script in redoapp
+- No open HTTP endpoint in redoapp — merchant RPC `createAdvancedFlow` is `userPermissionedRpc` (session required); no admin RPC exists for flow creation
+- Existing `copy-team-marketing-resources.ts` copies flows team-to-team via `createDefaultFlows` + `AdvancedFlowsRepo` — useful reference, not a direct surface
+
+**Scope (mime side):**
+1. Parse Klaviyo flow export → emit `.redo-flow.json` per flow, shaped like `NewAdvancedFlow` from `@redotech/redo-model/advanced-flow/advanced-flow-db-parser`
+2. Map Klaviyo triggers → Redo `TriggerStep`; Klaviyo actions → Redo step types (`Send Email`, `Wait`, conditions, etc.)
+3. In each `Send Email` step, reference the mime template `_id` (the one emitted by `.redo-template.json`) — importer will rewrite it
+
+**Scope (redoapp side):**
+1. New manage script `redo/manage/src/import-klaviyo-flows.ts` modeled on `import-klaviyo-templates.ts`
+2. Args: `--team`, `--account`, `--mime-dir`, `--readonly`
+3. Look up templates already imported on the team, build `mimeTemplateId → redoTemplateId` map (likely by matching on `name` + some mime-origin marker stored at template create time)
+4. Walk each flow's `Send Email` steps, rewrite template refs using the map
+5. Call `AdvancedFlowsRepo.createAdvancedFlow` for each flow
+6. Confirmation prompt + `--readonly` per `redo/manage` conventions
+
+**Ordering constraint:** **Local-only until it works well.** No pushing to `main` until:
+- End-to-end local run imports at least one multi-step flow into the `Mime` test team (`69dff28302f64f42e6012a4d`)
+- Flow renders correctly in the Redo automation builder
+- Send Email steps resolve to the correct (mime-imported) templates
+
+Only then promote to prod, same pattern as Package G (`bazel run //redo/manage:import-klaviyo-flows -- --team <prod-team> ...`).
+
+**Affects:** new files in both repos.
+
+**Estimated effort:** large — new mime output pipeline + new redoapp script + cross-repo ID coordination.
+
+**Blockers:**
+- Package G proven in prod (template import must be solid — flows depend on real template IDs)
+- Mime needs to export flow data (not just templates) — new parsing pipeline on the mime side
+- Need a way to correlate mime template origin → Redo template (either store a mime source ID on create, or match on `name`)
+
+**Do after first prod template import is proven (end of Phase 3).**
+
+---
+
 ## Work Package H — Polish / low-priority cleanup
 
 Small items from across multiple TODOs. Batch into a single cleanup session:
@@ -247,6 +290,9 @@ Small items from across multiple TODOs. Batch into a single cleanup session:
 
 ### Phase 5 — Migration pipeline (Phase 2 project)
 9. **Package E** — AI transforms + text substitution + font provisioning + discount objects. Large, separate project. Don't start until prod import is proven.
+
+### Phase 6 — Flow import
+10. **Package I** — flow import (mime output + redoapp manage script). Local-only until end-to-end works on the `Mime` test team; only then promote to prod. Depends on template import being solid.
 
 ### Not prioritized / skipped
 - Package F2 (Klaviyo CDN rehost) — only if merchants complain
