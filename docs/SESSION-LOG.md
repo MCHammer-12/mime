@@ -1,5 +1,40 @@
 # Session Log
 
+## 2026-04-21 — Package D: parsePadding bug fix + renderer padding audit
+
+**Context**
+Work Package D from `plans/consolidated-todos.md`. Two tasks: D1 upstream the
+`parsePaddingWithOverrides` bug fix into `style-utils.ts`, D2 audit every
+renderer for MjmlSection default padding inflation.
+
+**Done**
+- **D1 (committed `6d76162`):** Replaced `parsePadding` in
+  `src/parser/style-utils.ts` with the CSS-cascade-correct version that was
+  living as `parsePaddingWithOverrides` in `text.ts`. The old version returned
+  early on shorthand `padding`, silently ignoring individual `padding-*`
+  overrides (common in Klaviyo: `padding: 0px; padding-top: 18px`). Deleted
+  the local workaround in `text.ts`, switched its call to the shared
+  `parsePadding`. All callers across image, button, column, header, line,
+  menu, socials, product, klaviyo-specific now get the fix for free.
+- **D2 (no changes needed):** Audited every `src/renderer/blocks/*.tsx`
+  (excluding text.tsx and line.tsx per Track 1 ownership). Every in-scope
+  MjmlSection already explicitly sets `paddingTop/Bottom/Left/Right` from
+  `sectionPadding` props. Verified via MJML output inspection that individual
+  padding attributes come after the default shorthand (`padding:20px 0`) and
+  win via CSS cascade. Spacer uses `padding="0"` shorthand which suppresses
+  the default entirely; other blocks use individual attributes which override
+  it — both approaches are correct.
+
+**Batch-test:** 416 total, 0 failures (confirmed after both D1 and D2).
+
+**State at session end**
+- Branch: `main`, 1 commit ahead of origin.
+- Uncommitted changes in working tree from concurrent Track 1 work (Package A
+  warnings refactor + `sumAncestorPadding`/`findAncestorBackgroundColor` added
+  to style-utils.ts). Those are not part of this session's scope.
+
+---
+
 ## 2026-04-21 — Import script review (brief)
 
 **Context**
