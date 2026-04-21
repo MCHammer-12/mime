@@ -1,5 +1,52 @@
 # Session Log
 
+## 2026-04-15 — Klaviyo-specific blocks wired into dispatcher (video / preview quote / drop shadow)
+
+**Context**
+`src/parser/blocks/klaviyo-specific.ts` existed as a standalone module from the
+2026-04-14 parallel deep-dives but was never dispatched. Wrapped up by wiring
+`tryParseKlaviyoSpecific` into `parseColumnContent` so the three Klaviyo-only
+block types stop falling through to the "Unknown block type" warning.
+
+**Done**
+- **Dispatcher wiring:** `tryParseKlaviyoSpecific` now runs first inside
+  `parseColumnContent` (before `kl-image` matching, so drop-shadow imgs don't
+  get misrouted to the image parser). `bodyBackgroundColor` threaded via a
+  bound closure so `column.ts`'s callback signature stays frozen per the
+  per-element plan.
+- **Detectors:** `kl-video` class → video; `kl-review-gutter` inside wrapper
+  OR wrapper class matches `kl-review-*` → preview quote;
+  `img[src*=bottom_shadow_]` → drop shadow. Drop shadow additionally requires
+  a white body background (`#fff / #ffffff / white / rgb(255,255,255) /
+  rgba(255,255,255,1)`).
+- **ParseContext integration:** all three paths push structured entries onto
+  `ctx.skippedBlocks` with `blockType` + `reason` (follow-on to the
+  ParseContext refactor — no more `SKIPPED:` / `REVIEW:` prefix strings).
+- **Drop-shadow asset path:** `imageUrl` reads from `DROP_SHADOW_URL` env var
+  with a PLACEHOLDER Replit URL fallback, so local dev still produces valid
+  JSON and Replit can override via Secrets post-deploy.
+- **TODO-SHARED-klaviyo-specific.md:** documents the CDN upload flow, the
+  env-var override mechanism, and an early guard we should add so a
+  misconfigured deploy fails loud.
+
+**Smoke test**
+On `migrations/merchant-2/templates/H76ZS6-newsletter-4-story-boxes.html`
+(contains all three patterns): video → skipped, preview quote → skipped,
+two drop shadows → skipped with REVIEW reason (body bg `#f7f7f7`, not white) —
+correct branch.
+
+**Files changed**
+- `src/parser/blocks/klaviyo-specific.ts` (new module, then ctx refactor + URL placeholder)
+- `src/parser/blocks/TODO-SHARED-klaviyo-specific.md` (new)
+- `src/parser/index.ts` — dispatcher wiring + bound closure for `bodyBackgroundColor`
+
+**State at session end**
+- Branch: `main`, clean (code committed in `a349dcd`, `9375c37`, `caf90ad`, `6c22a75`).
+- `DROP_SHADOW_URL` still `PLACEHOLDER` — blocks prod imports until the Replit
+  static deploy is up and the env var is set (tracked in TODO-SHARED Priority 0).
+
+---
+
 ## 2026-04-15 — Column element deep-dive (parser + renderer)
 
 **Context**
