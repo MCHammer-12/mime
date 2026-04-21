@@ -1,5 +1,20 @@
 # Session Log
 
+## 2026-04-21 — Import script review (brief)
+
+**Context**
+Quick revisit to check on import-klaviyo-templates.ts status and history.
+
+**Done**
+- Confirmed import script last touched 2026-04-17 (commit `252b2582fd7`), which added brand-kit font syncing (`syncFontPlansToBrandKit`), `_fontPlan` handling, filter dedup, and `TeamRepo` + `CustomFontFamily` imports.
+- Script now significantly larger than the 2026-04-14 scaffold: font plan interfaces, weight-to-family-suffix convention, brand-kit merge logic, excluded weights (700/800).
+
+**State at session end**
+- No code changes this session — review only.
+- Branch: `main`, clean.
+
+---
+
 ## 2026-04-20 — CODE-template parser (editor_type: CODE) — first pass, paused
 
 **Context**
