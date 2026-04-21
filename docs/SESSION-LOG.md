@@ -1,5 +1,24 @@
 # Session Log
 
+## 2026-04-15 — Menu block re-visit: bold/italic/underline + HLB split verification
+
+**Done**
+- Confirmed HLB split works as designed: `parseHeaderBlock` emits an `ImageBlock` for the logo, `parseMenuFromHeader` emits a `MenuBlock` for the nav links. Verified against `YjRTWe-deal-template` (3 items: Shop Now / Blog / Reviews) and `X57xAh-100-main-template` (3 items, PT Sans). In the 388-template test-account dataset only these two templates have true multi-item HLB menus; the rest are single-CTA "SHOP NOW" style HLBs.
+- Added text-style extraction to `parseMenuFromHeader`. `MenuBlock` has no `fontWeight`/`fontStyle`/`textDecoration` fields, so weight/italic/underline are encoded into the label HTML as `<strong>` / `<em>` / `<u>` wrappers (Quill-compatible — the renderer runs `processQuillHtml` over the label).
+  - Bold detected when `font-weight` is `bold`, `bolder`, or a numeric value ≥ 600.
+  - Example: `YjRTWe` has `font-weight:700` on each link → `<strong>Shop Now</strong>` in the label. `H76ZS6` has `font-weight:400` → unchanged.
+
+**Files changed**
+- `src/parser/blocks/menu.ts`
+
+**Decisions**
+- Encode bold/italic/underline in label HTML rather than adding new `MenuBlock` fields — simpler, matches Quill conventions the renderer already processes.
+
+**Next steps**
+1. Per-item font styling divergence (different weight across items in the same menu) is currently collapsed — first link's style is used for block-level `fontFamily`/`fontSize`/`linkColor`; per-item tags only vary weight/italic/underline. If a real template ships mixed per-item styling this can become visible.
+
+---
+
 ## 2026-04-15 — Status check only
 
 **Done**
