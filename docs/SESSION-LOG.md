@@ -1,5 +1,73 @@
 # Session Log
 
+## 2026-04-21 — Button element deep-dive
+
+**Done**
+- Pixel-correct button parsing across transactional (Shopify), abandoned cart, modern campaigns, discount giveaway, newsletter, gift card, and password reset templates
+- **sectionPadding fix**: was reading from `kl-button` td (always 0); now navigates up to outer wrapper td via `$td.closest("table").parent("td")`
+- **Stroke extraction**: new `parseBorderStroke` only emits uniform stroke when all four border sides match. Klaviyo's shadow pattern (`border:none; border-bottom:solid 2px ...`) correctly drops to transparent/0 instead of painting a 4-sided border
+- **Fill color fallbacks**: added `background-color` / `background` from both bgTd style and `<a>` style
+- **Full-width detection**: checks `width:100%` on inner table or `<a>` tag
+- **Three-state link classification** for Klaviyo `{{ }}` variables in button hrefs:
+  - Known-mapped (via `mapKlaviyoLink`) → dynamic-variable (e.g. `event.URL` → `checkoutUrl`)
+  - Explicitly unsupported (`UNSUPPORTED_VARIABLES`) → `UNSUPPORTED:` warning → template routes to manual migration
+  - Unknown/new variable → `REVIEW:` warning → surfaces on review list for user to classify later
+- Explicitly unsupported variables: `gift_card.*`, `customer.reset_password_url`, `customer.account_activation_url`, `fulfillment.tracking_urls*`, `tracking_url`
+- Created `src/parser/blocks/TODO-SHARED-button.md` with prioritized followups
+
+**Templates tested**
+- `Hda2jD-shopify-customer-account-activation` — standard Shopify transactional, shadow border
+- `KT5Xxh-shopify-shipping-confirmation` — 2 buttons, tracking URLs
+- `Kc2UBC-newsletter-7-snack` — organization.url (REVIEW)
+- `RQiCcF-discount-giveaway` — full-width, custom font (Alegreya Sans Bold), cornerRadius 9
+- `QFmzAC-shopify-gift-card-notification` — gift_card.url (UNSUPPORTED)
+- `QP9hma-grid-pixel-campaign-dec-22-2025-last-chance-for-epic-gifts` — gxp-kl-button variant, pill shape (cornerRadius 40)
+- `Ly82ir-shopify-customer-password-reset` — reset_password_url (UNSUPPORTED)
+- `VGQunZ-ac-template` — abandoned cart, event.URL mapped to checkoutUrl
+- `S3stYS-grid-pixel-campaign-2-no-discount-new-arrivals-v2-modern` — ghost/outlined button (white fill, black 1px 4-sided border), full-width
+
+**Known limitations (documented in TODO-SHARED-button.md)**
+- Full-width button horizontal padding: Klaviyo zeroes it in HTML during MJML compile, original value unrecoverable
+- Custom fonts (Alegreya Sans, Inter, etc.) extracted verbatim — need normalization layer (cross-cutting)
+- font-weight, letter-spacing, text-transform silently dropped (no Redo schema fields)
+- UNSUPPORTED/REVIEW prefix convention on warnings needs proper `ParseResult` fields once dispatcher is unfrozen
+
+**Files changed**
+- `src/parser/blocks/button.ts` — rewrote parser (sectionPadding, stroke, fill, full-width, link classification)
+- `src/parser/blocks/TODO-SHARED-button.md` — created, prioritized followups
+- `plans/element-deep-dive.md` — added followup pointer under Button section
+
+**Note:** After this session, a separate integration session hoisted `classifyKlaviyoUrl` into `url-mapping.ts`, updated button.ts to use `ParseContext`, and aligned renderer types with prod Zod schemas (commits `3bea718`, `caf90ad`, `b650051`).
+
+---
+
+## 2026-04-21 — Package E5: drop-shadow asset URL placeholder + Replit hosting decision
+
+**Done**
+- Replaced `DROP_SHADOW_LOCAL_PATH = "pics/drop-shadow.png"` in `src/parser/blocks/klaviyo-specific.ts` with `DROP_SHADOW_URL = process.env.DROP_SHADOW_URL ?? "https://PLACEHOLDER.replit.app/drop-shadow.png"`. Env-var override is the intended Replit override mechanism (set in Secrets after deploy, no code change).
+- Researched two paths: (a) Redo CDN via `@redotech/s3` `uploadFile` from a `redo/manage` script (modeled on `support/upload-shopper-ai-wrapped-images.ts`), or (b) Replit Static Deployment serving the bundled PNG. Picked (b): mime ships to Replit anyway, free for tiny bandwidth, no need to touch Redo's prod S3 buckets, stable URL across redeploys.
+- Updated `TODO-SHARED-klaviyo-specific.md` Priority 0 to "Set DROP_SHADOW_URL env var on Replit" with steps for deploy + env-var setup + a still-unimplemented runtime guard that fails loud if URL is still PLACEHOLDER.
+- Memory: new `project_drop_shadow_asset_hosting` entry indexed in MEMORY.md.
+
+**Files changed**
+- `src/parser/blocks/klaviyo-specific.ts` — env-var override pattern
+- `src/parser/blocks/TODO-SHARED-klaviyo-specific.md` — Priority 0 retitled and rewritten
+
+**Branch / commit**
+- Worktree: `.claude/worktrees/trusting-carson` on `claude/trusting-carson`
+- Commit: `6c22a75 fix(klaviyo-specific): drop-shadow URL placeholder for Replit deploy` — pushed to origin
+- Concurrent uncommitted work in the worktree (E3's `_fontPlan` integration in `export-template.ts`, `src/fonts.ts`, `src/migrate/`, etc.) deliberately left untouched; staged by explicit path
+
+**Decisions (see DECISIONS.md)**
+- Drop-shadow asset hosted from mime's Replit static deployment, NOT Redo's S3 / `assets.getredo.com`. Env-var override (`DROP_SHADOW_URL`) is the deploy-time switch.
+
+**Next steps**
+1. When mime is deployed to Replit, set `DROP_SHADOW_URL` in Replit Secrets to the real URL. No code change needed.
+2. Add the runtime guard from TODO-SHARED-klaviyo-specific.md step 3 (throw if `DROP_SHADOW_URL` still resolves to PLACEHOLDER) before any prod migration runs.
+3. Sanity-check by sending a parsed template with a drop-shadow block to a Gmail inbox after deploy.
+
+---
+
 ## 2026-04-15 — Klaviyo-specific blocks wired into dispatcher (video / preview quote / drop shadow)
 
 **Context**

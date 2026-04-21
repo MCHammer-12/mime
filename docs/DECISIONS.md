@@ -1,5 +1,8 @@
 # Decisions
 
+## 2026-04-21 — Drop-shadow asset hosted from Replit, not Redo CDN
+The Klaviyo `bottom_shadow_*.png` → Redo Image block conversion in `klaviyo-specific.ts` needs a public URL the asset gets served from. Two options weighed: (a) upload to Redo's prod S3 / `assets.getredo.com` via the `@redotech/s3` `uploadFile` flow used by existing `redo/manage/src/support/upload-shopper-ai-wrapped-images.ts` scripts, or (b) bundle `pics/drop-shadow.png` into mime's Replit deploy and serve it from there. Picked (b): mime is deploying to Replit anyway (per `project_deployment_target_replit`), Replit Static Deployments give a stable `https://<subdomain>.replit.app/<path>` URL with no cold-start, free for tiny bandwidth, and avoid the friction of writing to Redo's prod buckets from outside redoapp. Implemented as `DROP_SHADOW_URL = process.env.DROP_SHADOW_URL ?? "https://PLACEHOLDER.replit.app/drop-shadow.png"` so the deploy-time switch is a single Replit Secret with no code change. Runtime guard (throw if still PLACEHOLDER) is open work — see TODO-SHARED-klaviyo-specific.md Priority 0.
+
 ## 2026-04-20 — CODE-template parser: built, paused at insufficient visual fidelity
 Klaviyo `editor_type: CODE` templates (hand-coded HTML, no `kl-*` classes)
 were a known coverage gap — Otishi has 368 of 464 templates in CODE mode.
