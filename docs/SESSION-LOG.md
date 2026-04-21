@@ -1,5 +1,91 @@
 # Session Log
 
+## 2026-04-15 — Column element deep-dive (parser + renderer)
+
+**Context**
+Column element from `plans/element-deep-dive.md`. Scope restricted to
+`src/parser/blocks/column.ts` and `src/renderer/blocks/column.tsx`. Test
+templates: H76ZS6 (4 story boxes), KgEaX2 (icons + headlines via kl-split),
+Lgdf7J (3-column images), plus QPETZp (product inside multi-col row) for the
+bail path.
+
+**Done**
+- **Parser (`column.ts`)**
+  - `stackOnMobile` now read from parent `kl-row.colstack` class (was hardcoded `true`).
+  - `alignment` extracted from `kl-column`'s `vertical-align` style (was hardcoded TOP).
+  - `sectionColor` walks up parent chain looking for bg-color (was matching the wrong element and defaulting to white).
+  - Multi-column row now returns `Section[]` (not `ColumnBlock | null`). Stacked wrappers zippered across columns into K stacked ColumnBlocks; padding clamped so non-first rows zero the nested block's top padding and non-last rows zero its bottom padding — stacked sections visually touch.
+  - Bail-out on non-nestable content: if any column contains a block outside {TEXT, IMAGE, BUTTON, DISCOUNT} (e.g. a product block that comes through as a nested ColumnBlock from `parseProductBlock`), flatten every inner block into standalone top-level sections. Products render as standalone Redo product blocks; sibling column content becomes standalone sections. Matches user rule: "if products are in columns, just use the product block."
+  - `parseSplitBlock`: sectionColor walks parent chain; alignment from vertical-align.
+  - `parseSplitSubblock`: handles buttons (kl-button) → images (with src) → text fallback; preserves subblock padding from `td.spacer`; returns a single `NonRecursiveBlock | null`.
+- **Renderer (`column.tsx`)**
+  - Fixed React "missing key" warning by wrapping each mapped column in `<Fragment key={index}>`.
+  - Gap spacer column only rendered when `gap > 0` (avoids 0%-width MJML columns).
+- **Dispatcher (`src/parser/index.ts`)** — one-line change: `sections.push(...rowSections)` in the multi-column branch, to accommodate `parseColumnRow` returning an array. (Touched with explicit permission from the user; otherwise in-scope for column work.)
+
+**Verified**
+- 4 templates via `src/element-viewer.ts column …`: 12 column blocks render cleanly, no React warnings.
+- H76ZS6: 2 stacked column sections (was 1) — both text content preserved in zipper.
+- QPETZp (product in multi-col row): bail path fires, product emits standalone.
+- KgEaX2 (5 kl-splits) + Lgdf7J (1 single-row 3-col): unchanged.
+
+**Known gaps**
+- Zipper untested with real image content — test templates had src-less placeholder `<img>` tags, so the image+text zipper only exercised text blocks. Spot-check against a real story-box campaign when one surfaces.
+- `parseSplitSubblock` still picks one block per subblock (button > image > text priority). If a kl-split subblock ever contains stacked content, extras get dropped. Low-priority — kl-split is designed as single-content-per-side.
+
+**Memory saved**
+`project_column_architecture.md` — zipper + bail-on-product rationale, nestable set, dispatcher contract.
+
+**State at session end**
+- Branch: `main`, clean vs origin. Column source changes landed upstream under `parser: cart-template fixes + defensive regression anchors` (commit `623d5e1`), which also refactored parser signatures to use `ParseContext` — so the function signatures documented in the memory are slightly outdated (now take `ctx: ParseContext` instead of `warnings: string[]`) but the architecture stands.
+
+---
+
+## 2026-04-15 — Line block deep-dive
+
+**Context**
+Parallel element-deep-dive track for the LINE block. Files in scope:
+`src/parser/blocks/line.ts`, `src/renderer/blocks/line.tsx`. Test templates:
+H76ZS6-newsletter-4-story-boxes, Hda2jD-shopify-customer-account-activation,
+K4ca2Z-shopify-refund-notification.
+
+**Done**
+- Ran `npx tsx src/element-viewer.ts line …` against the 3 test templates.
+  All three use the same Klaviyo structure: outer TD `padding:0 14px 0 14px`
+  with `background:#fff`, inner TD `padding:0`, `<p>` with
+  `border-top:solid 4px #3d3935`.
+- Parser was already extracting sectionPadding, sectionColor, and color
+  correctly. Gaps: inner TD padding wasn't parsed (MjmlDivider's default
+  `10px 25px` was bleeding through) and thickness was dropped (renderer
+  hardcoded 2px — source is 4px).
+- Parser now reads the inner TD style and returns `innerPadding`; renderer
+  passes it to MjmlDivider's padding props to suppress the MJML default.
+- Added `thickness` as a parser-only extra (via type intersection, since
+  types.ts is frozen during parallel work) so the renderer could draw 4px.
+  Verified all 3 templates now render `border-top:solid 4px #3d3935`.
+
+**Decision: accept Redo's line-schema gap**
+Redo's `LineBlock` Zod schema has no `thickness` or `borderStyle` field —
+all lines are fixed-thickness solid. Our `thickness` extra worked locally
+but gets stripped on API round-trip. Decided not to build a rasterization
+fallback (render >3px or non-solid lines as ImageBlock) until a real
+migration surfaces a template where it matters. Captured as
+`project_line_schema_gap` memory.
+
+**Post-session note**
+Track 1's types-alignment refactor (commit `caf90ad`) landed after this
+session, adding `Size.CUSTOM` / `horizontalPadding` / `verticalPadding` to
+`LineBlock` and dropping the local `thickness` extra. Renderer reverted to
+`borderWidth={2}` — consistent with the accepted schema gap. `innerPadding`
+survived as the canonical `padding` field.
+
+**State at session end**
+- Branch: `main`, clean.
+- Line parser/renderer now match Klaviyo on color, sectionColor,
+  sectionPadding, and inner padding; thickness snaps to Redo's default.
+
+---
+
 ## 2026-04-21 — Header block status check (no-op)
 
 Quick check-in on header element work. `git diff --stat main` clean — working tree has nothing uncommitted. Confirmed via git log that `parseHeaderLogoAsImage` rename (Package F) and prod Zod alignment (`caf90ad`) have landed on main. Header block work is confirmed complete; the earlier 2026-04-14 entry covers the substantive design decision.
