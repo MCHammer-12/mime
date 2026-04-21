@@ -4,7 +4,7 @@
 Automation project for manual processes Michael does at Redo. Primary target: Klaviyo → Redo email migration workflow, and improving Redo's existing HTML → JSON email parser.
 
 ## Status
-End-to-end import pipeline working: parse → transform → export → import to local redoapp → render in builder. Three templates imported successfully (Newsletter #8, Newsletter #4, merchant-2 + merchant-3 accounts). Packages A-D + F (parser polish) + E1 (variable substitution) complete. 416 templates parse with 0 failures. Import executor in redoapp (uncommitted) handles product filter creation. Next: E2 (coupon → discount objects + AI rewrite), E3 (font provisioning), E4 (REVIEW list aggregation).
+End-to-end import pipeline working: parse → transform → export → import to local redoapp → render in builder. Three templates imported successfully (Newsletter #8, Newsletter #4, merchant-2 + merchant-3 accounts). Packages A-D + F (parser polish) + E1 (variable substitution) + E4 (REVIEW aggregator) complete. 804 templates parse across 3 corpora with 0 failures. Import executor in redoapp (uncommitted) handles product filter creation. Next: E2 (coupon → discount objects + AI rewrite), E3 (font provisioning, partially landed), E5 (drop-shadow CDN upload).
 
 **CODE-template parser (2026-04-20):** First-pass parser for `editor_type: CODE` templates landed at `src/parser/code-template.ts` (table-based + div-based dialects). 368/368 Otishi CODE templates parse with 0 failures. Block detection works; visual fidelity in the Redo builder is insufficient to ship (image widths, column gaps, per-span text styling). Paused until CODE migration becomes a blocker. Gated behind `editor_type: CODE` / no-kl-class heuristic — inert for existing block-editor migrations. See `project_code_template_parser` memory for state and next-step queue.
 
@@ -36,6 +36,7 @@ End-to-end import pipeline working: parse → transform → export → import to
 - `src/element-viewer.ts` — per-element isolated preview (3+ blocks of one type)
 - `src/viewer.ts` — full side-by-side comparison viewer (Klaviyo vs Redo)
 - `src/export-template.ts` — full EmailTemplate JSON exporter (production MongoDB shape)
+- `src/migrate/review-variables.ts` — interactive CLI: aggregate `reviewItems` across a migration, classify unknown Klaviyo variables as mapped / unsupported / skip. Writes `url-mappings-pending.json` for engineer to fold into `src/parser/url-mapping.ts`.
 - `src/screenshot.ts` / `src/screenshot-batch.ts` — Playwright visual comparison
 
 ## Plans
