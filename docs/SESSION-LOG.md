@@ -1,5 +1,16 @@
 # Session Log
 
+## 2026-04-15 — Status check only
+
+**Done**
+- Session-start status check (branch clean, last commits from 2026-04-14 integration session).
+- Out-of-repo: seeded `~/.claude/TODO.md` global backlog with https://github.com/forrestchang/andrej-karpathy-skills and added a read-trigger in `~/.claude/docs/session-protocol.md` so TODOs surface at every session start.
+
+**Files changed (this repo)**
+- None.
+
+---
+
 ## 2026-04-21 — Button element deep-dive
 
 **Done**
