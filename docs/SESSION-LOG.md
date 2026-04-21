@@ -1,5 +1,13 @@
 # Session Log
 
+## 2026-04-21 — Header block status check (no-op)
+
+Quick check-in on header element work. `git diff --stat main` clean — working tree has nothing uncommitted. Confirmed via git log that `parseHeaderLogoAsImage` rename (Package F) and prod Zod alignment (`caf90ad`) have landed on main. Header block work is confirmed complete; the earlier 2026-04-14 entry covers the substantive design decision.
+
+No code changes this session.
+
+---
+
 ## 2026-04-21 — Package D: parsePadding bug fix + renderer padding audit
 
 **Context**
