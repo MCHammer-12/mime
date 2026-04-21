@@ -4,7 +4,7 @@
 Automation project for manual processes Michael does at Redo. Primary target: Klaviyo → Redo email migration workflow, and improving Redo's existing HTML → JSON email parser.
 
 ## Status
-End-to-end import pipeline working: parse → transform → export → import to local redoapp → render in builder. Three templates imported successfully (Newsletter #8, Newsletter #4, merchant-2 + merchant-3 accounts). Packages A-D + F (parser polish) + E1 (variable substitution) complete. 416 templates parse with 0 failures. Import executor in redoapp (uncommitted) handles product filter creation. Next: E2 (coupon → discount objects + AI rewrite), E3 (font provisioning), E4 (REVIEW list aggregation).
+End-to-end import pipeline working: parse → transform → export → import to local redoapp → render in builder. Three templates imported successfully (Newsletter #8, Newsletter #4, merchant-2 + merchant-3 accounts). Packages A-D + F (parser polish) + E1 (variable substitution) + E4 (REVIEW aggregator) complete. 804 templates parse across 3 corpora with 0 failures. Import executor in redoapp (uncommitted) handles product filter creation. Next: E2 (coupon → discount objects + AI rewrite), E3 (font provisioning, partially landed), E5 (drop-shadow CDN upload).
 
 ## Two tracks
 - **current/** — deterministic Klaviyo HTML → Redo Section[] parser (no LLM). Uses cheerio to walk kl-*/gxp-kl-* classes. Production renderer cloned from redoapp for local verification.
@@ -32,6 +32,7 @@ End-to-end import pipeline working: parse → transform → export → import to
 - `src/element-viewer.ts` — per-element isolated preview (3+ blocks of one type)
 - `src/viewer.ts` — full side-by-side comparison viewer (Klaviyo vs Redo)
 - `src/export-template.ts` — full EmailTemplate JSON exporter (production MongoDB shape)
+- `src/migrate/review-variables.ts` — interactive CLI: aggregate `reviewItems` across a migration, classify unknown Klaviyo variables as mapped / unsupported / skip. Writes `url-mappings-pending.json` for engineer to fold into `src/parser/url-mapping.ts`.
 - `src/screenshot.ts` / `src/screenshot-batch.ts` — Playwright visual comparison
 
 ## Plans

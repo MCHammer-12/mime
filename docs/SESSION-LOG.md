@@ -1,5 +1,47 @@
 # Session Log
 
+## 2026-04-21 — Package E4: REVIEW list aggregator + two url-mapping gap fixes
+
+**Done**
+- **E4 aggregator** `src/migrate/review-variables.ts` (new): walks a templates dir, parses each, dedupes `ParseContext.reviewItems` by `variableName`, sorts by template count, runs an interactive `[M]apped / [U]nsupported / [S]kip / [Q]uit` loop. Persists decisions after each choice to `url-mappings-pending.json` (crash-safe). Idempotent — already-classified variables skip on re-run. `[M]` prompts for `schemaFieldName` with auto-suggested camelCase default.
+- **readline note:** `readline/promises` + callback `rl.question()` both hang after the first prompt when stdin is piped (readline closes on stream end before buffered lines are consumed). Replaced with a line-queue prompter using `rl.on("line")` + queued waiters; returns `null` on EOF so the loop can bail cleanly. Relevant when writing any future interactive CLI in this repo.
+- **Two real classifier gaps** surfaced by the aggregator and fixed in `src/parser/url-mapping.ts`:
+  1. `CHECKOUT_URL_PATTERNS[0]` + `[1]` now allow optional Liquid filter suffix (`\|[^}]*`), matching `{{ event.URL|default:'' }}` → `checkoutUrl`. Previously only `event.extra.checkout_url` allowed filters.
+  2. `UNSUPPORTED_VARIABLES` pattern `fulfillment.tracking_urls` → `tracking_urls?` so Shopify's singular `fulfillment.tracking_url` (single-shipment orders) also blocks.
+- **`.gitignore`:** added `url-mappings-pending.json` (ephemeral; engineer folds entries into source).
+
+**Verified**
+- merchant-2 (27 templates): `event.URL` drops off review list.
+- test-account (388 templates): `fulfillment.tracking_url` drops off; `email` (3 templates) + `order_status_url` (1 template) + `organization.url` (2 templates) remain as genuine unknowns needing a human decision.
+- Batch regression across test-account + merchant-2 + merchant-3 (804 templates): 0 failures, 14 total reviewItems, 12 total unsupportedFeatures.
+
+**Files changed**
+- `src/migrate/review-variables.ts` (new, 313 lines)
+- `src/parser/url-mapping.ts` (+6 -5)
+- `.gitignore` (+1)
+
+**Commits on `claude/trusting-carson`** (both pushed)
+- `a540e5d` fix(url-mapping): allow Liquid filters in checkout patterns + singular tracking_url
+- `d4ded27` feat(migrate): E4 REVIEW list aggregator
+
+**Decisions**
+- **No auto-mutation of `url-mapping.ts`** — aggregator writes to `url-mappings-pending.json`; engineer hand-folds entries into source as a follow-up edit. Matches `project_migration_human_input_ux` intent.
+- **Pending file at repo root** (not per-migration), gitignored.
+- **Surgical commits** — url-mapping.ts fix shipped ahead of the E4 script so parallel sessions (E2 ai-rewrite, E3 fonts) rebase cheaply.
+
+**State at session end**
+- Branch: `claude/trusting-carson`, pushed to origin.
+- Packages complete: A, B, C, D, F, E1, G, **E4**.
+- Parser: 804 templates parsed across 3 corpora, 0 failures.
+- Concurrent in-flight (other sessions, uncommitted when I finished): E2 `src/ai-rewrite.ts`, E3 `src/fonts.ts` + export-template wiring.
+
+**Next steps**
+1. On a real migration, run `npx tsx src/migrate/review-variables.ts migrations/<account>/templates`, answer M/U prompts, then fold `url-mappings-pending.json` entries into `mapKlaviyoUrlToSchemaField` + `UNSUPPORTED_VARIABLES` as a follow-up PR.
+2. Continue E2 (coupon → discount objects + AI rewrite), E3 (font provisioning), E5 (drop-shadow CDN upload).
+3. Once E2/E3/E5 land: prod import test, then merge `claude/trusting-carson` to main.
+
+---
+
 ## 2026-04-15 — End-to-end import fixes + Package F + E1 variable substitution
 
 **Done**
