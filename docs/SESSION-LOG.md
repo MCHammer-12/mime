@@ -687,6 +687,39 @@ no-kl-class heuristic; existing block-editor migrations are unaffected.
    nested columns).
 ---
 
+## 2026-04-21 — Package E3: font provisioning pipeline (mime side)
+
+**Done**
+- **`src/fonts.ts` (new):** `collectFonts(sections)` walks all block types — text + text.inline spans, button, discount, menu, header, products (incl. nested `checkoutButton` / `lineItemButtons` InlineButton), ColumnBlock recursion — returning deduped `FontUsage[]` with per-site usage. `resolveGoogleFont(family)` probes Google Fonts CSS2 API (no API key, modern UA for WOFF2). Literal-first casing with title-case fallback so "PT Sans" (brand mixed-case) and "OSWALD" (all-caps) both resolve. `buildFontPlan(sections)` combines collect + resolve into `{ entries, hasUnresolved }`.
+- **`src/export-template.ts`:** attaches `_fontPlan` to the exported EmailTemplate (same non-prod convention as `_pendingFilter` on products). Prints per-font status in the export summary.
+- **Corpus audit (804 templates):** 15 unique custom fonts. 7 resolve on Google Fonts (Alegreya Sans — 695 uses / 348 templates — Inter, Oswald, PT Sans, Pontano Sans, Bodoni Moda, Questrial). 8 don't (typos: "Alegrey extra", "potano sans", "TimesNewRoman"; weight-as-family aliases: "Alegreya sans bold"; Apple system fonts: "New York", "Baskerville").
+- **Memory update (contradicted doc):** `reference_brand_kit_font_upload.md` previously said "migration script does NOT programmatically upload fonts". Reversed today — new path is auto-upload for Google-Fonts-resolvable, block-with-per-font-error for unresolvable. Rewrote the reference with explicit history, updated `project_migration_human_input_ux.md` touchpoint #6, updated `MEMORY.md` index entries.
+- **Commit hygiene:** stashed E2's in-progress `transform.ts`/`ai-rewrite.ts` and E4's files before committing so `16c5378` contains only `src/fonts.ts` + `src/export-template.ts`. Restored stashed work after push.
+
+**Files changed**
+- `src/fonts.ts` (new, 272 lines)
+- `src/export-template.ts` (import + `buildFontPlan` call + `_fontPlan` field + console output, +20 lines)
+- Memory: `reference_brand_kit_font_upload.md` rewritten, `project_migration_human_input_ux.md` touchpoint #6 updated, `MEMORY.md` index entries updated
+
+**Commits on `claude/trusting-carson`** (pushed)
+- `16c5378` feat(fonts): E3 — Google Fonts resolver + `_fontPlan` emission
+
+**Decisions**
+- **Auto-upload with preflight-block fallback** (reverses 2026-04-14 preflight-only). Rationale: Google Fonts is the canonical source with OFL licensing — no ambiguity about what gets uploaded. If a font isn't on Google Fonts, importer still blocks with a clear per-font error. Best of both paths.
+- **`_fontPlan` embedded per-template** (not aggregated at migration level). Importer aggregates across templates when it runs. Matches `_pendingFilter` convention.
+- **Literal-first casing with title-case fallback** in the resolver — preserves brand casing like "PT Sans" while still recovering inconsistent casing like "OSWALD" → "Oswald". Brute-force normalization would break brand names.
+
+**State at session end**
+- Branch: `claude/trusting-carson`, pushed.
+- Packages complete: A, B, C, D, F, E1, E2, **E3**, E4, G.
+
+**Next steps**
+1. **Redoapp-side E3** (new session): `~/code/redoapp/redo/manage/src/import-klaviyo-templates.ts` consumes `template._fontPlan` before `EmailTemplateRepo.createTemplate`: auto-upload resolved fonts via `uploadFile → processFontFiles → TeamRepo.updateBrandKit`, hard-fail per-font on unresolved, strip `_fontPlan` before saving. Mirrors existing `_pendingFilter → recommendedProductFilterId` swap pattern.
+2. E5: drop-shadow CDN upload (or move `drop-shadow.png` to mime Replit deploy per `project_drop_shadow_asset_hosting` memory).
+3. Merge `claude/trusting-carson` to main.
+
+---
+
 ## 2026-04-21 — Package E2: inline coupon → AI text rewrite + placeholder discount block
 
 **Done**
