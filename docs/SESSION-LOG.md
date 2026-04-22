@@ -1,5 +1,36 @@
 # Session Log
 
+## 2026-04-15 — Footer block deep-dive (reversed — keep as Text)
+
+**Done**
+- Prototyped FooterBlock end-to-end: parser (`src/parser/blocks/footer.ts`) detecting `kl-text` tds with `{% unsubscribe %}`, renderer (`src/renderer/blocks/footer.tsx`) as MJML analogue of prod `EmailFooter`, dispatcher wire-in, `componentMap` registration, `element-viewer.ts` typeMap entry.
+- Verified extraction on 3 templates (QZCq6B, YchdbL, Sz3XHM): font/color/padding round-trip, inner `<div class="textbody">` font overrides (Pontano Sans 12px) picked up.
+- **Reversed the plan after reviewing rendered footer alongside Klaviyo source.** Redo's FooterBlock forces its own fixed copy/order ("business name / legal address / city-state-zip / country / Unsubscribe") and destroys Klaviyo's preamble text ("No longer want to receive these emails?") plus any merchant customization.
+- Confirmed in redoapp: Redo accepts `{{ unsubscribe_link }}` directly inside Text `text` fields (validated by `hasUnsubscribeLink` in `redo/web/.../unsubscribe-link-warning-modal.tsx` — counts as a legal unsubscribe for compliance). Text blocks preserve original copy/order verbatim.
+- Deleted footer parser/renderer/TODO; reverted dispatcher, componentMap, element-viewer typeMap. No new block type added to `types.ts`.
+- Rewrote `TODO-SHARED-text.md` PRIORITY 0: inline variable substitution in the export pipeline — `{% unsubscribe %}` → `<a href="{{ unsubscribe_link }}">unsubscribe</a>`, `{{ organization.name }}` and `{{ organization.full_address }}` → merchant-provided values from Klaviyo Accounts API (fallback: user prompt). Placeholders unacceptable.
+
+**Files changed**
+- `src/parser/blocks/TODO-SHARED-text.md` — PRIORITY 0 rewritten with inline-substitution plan
+
+**Files created then deleted**
+- `src/parser/blocks/footer.ts`
+- `src/renderer/blocks/footer.tsx`
+- `src/parser/blocks/TODO-SHARED-footer.md`
+
+**Decisions (see DECISIONS.md)**
+- Footer-style text blocks stay as TextBlock. No FooterBlock in types.ts. Variable substitution is export-pipeline work, not parser work.
+
+**Memory updated**
+- `project_klaviyo_footer_variables.md` + MEMORY.md hook — rewrote from "convert to FooterBlock" to "inline substitution in Text block"
+
+**Next steps**
+1. Implement the substitution in the export pipeline (Package E / migration pipeline work).
+2. Pull org name + address: try Klaviyo Accounts API first, fall back to user prompt at migration start; store under `manifest.json` `account` key.
+3. Audit non-`{% unsubscribe %}` footer patterns (`<kl:unsubscribe-link>`, raw unsubscribe URLs) across the full template corpus.
+
+---
+
 ## 2026-04-15 — Socials element deep-dive
 
 **Done**
