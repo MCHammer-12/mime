@@ -29,6 +29,13 @@ import type { FontPlan, FontPlanEntry, FontFileSpec } from "../fonts.js";
 
 export const DEFAULT_SERVER_BASE = "https://app-server.getredo.com";
 
+/** Normalize a server base URL — trim trailing slashes so callers can't
+ *  accidentally produce `//team` by pasting a URL with a trailing slash. */
+function resolveServerBase(serverBase: string | undefined | null): string {
+  const raw = (serverBase ?? DEFAULT_SERVER_BASE).trim();
+  return raw.replace(/\/+$/, "") || DEFAULT_SERVER_BASE;
+}
+
 export type ImportProgressEvent =
   | { kind: "filter_created"; templateName: string; productFilterId: string }
   | { kind: "template_created"; templateName: string; templateId: string }
@@ -299,7 +306,7 @@ async function uploadAttachment(
   fileName: string,
   options: ImportOptions,
 ): Promise<string> {
-  const base = options.serverBase ?? DEFAULT_SERVER_BASE;
+  const base = resolveServerBase(options.serverBase);
   const form = new FormData();
   form.append("attachment", new Blob([bytes as BlobPart]), fileName);
   const res = await fetch(`${base}/team/upload-attachment`, {
@@ -326,7 +333,7 @@ async function uploadAttachment(
 }
 
 async function getTeam(options: ImportOptions): Promise<any> {
-  const base = options.serverBase ?? DEFAULT_SERVER_BASE;
+  const base = resolveServerBase(options.serverBase);
   const res = await fetch(`${base}/team`, {
     method: "GET",
     headers: { authorization: options.jwt },
@@ -365,7 +372,7 @@ async function postAtPath(
   input: unknown,
   options: ImportOptions,
 ): Promise<any> {
-  const base = options.serverBase ?? DEFAULT_SERVER_BASE;
+  const base = resolveServerBase(options.serverBase);
   const url = `${base.replace(/\/$/, "")}${path}`;
   const res = await fetch(url, {
     method: "POST",
