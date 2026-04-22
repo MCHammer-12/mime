@@ -289,6 +289,76 @@ Quick revisit to check on import-klaviyo-templates.ts status and history.
 
 ---
 
+## 2026-04-21 — Packages A + B + C: shared-file refactor (warnings → URL classifier → types.ts)
+
+**Context**
+Three sequential packages from `plans/consolidated-todos.md`, done in order so
+later work could build on earlier changes. Track 1 ownership; did not touch
+`style-utils.ts` or renderers outside `line.tsx` / `text.tsx` / `index.tsx`.
+
+**Done**
+- **Package A — warnings system refactor (`9375c37`).** Replaced the
+  `UNSUPPORTED:` / `REVIEW:` / `SKIPPED:` prefix convention on
+  `warnings: string[]` with structured arrays on `ParseResult`:
+  `unsupportedFeatures: UnsupportedFeature[]`, `reviewItems: ReviewItem[]`,
+  `skippedBlocks: SkippedBlock[]`. Introduced `ParseContext` (warnings + the
+  three structured arrays) and threaded it through every block parser
+  signature (`warnings: string[]` → `ctx: ParseContext`). `button.ts` and
+  `klaviyo-specific.ts` push to the new arrays; other blocks still use
+  `ctx.warnings` for general info. `export-template.ts` prints each category
+  separately.
+- **Package B — URL classifier hoist (`3bea718`).** Moved `classifyVariable`
+  / `extractVariableName` / `UNSUPPORTED_VARIABLES` out of `button.ts` and
+  into `url-mapping.ts`. New `classifyKlaviyoUrl(url, blockType, ctx)` helper
+  returns the `MappedLink` and simultaneously pushes unsupported/review
+  entries. Called from button, image clickthrough, menu item hrefs, social
+  URLs, and header logo clickthrough — so any URL-carrying block surfaces
+  unknown Klaviyo variables on the same review list.
+- **Package C — types.ts expansion (`caf90ad`).** Aligned `renderer/types.ts`
+  with prod Zod schemas:
+  - `EmailBlockType.PRODUCTS = "interactive-cart"` (was a `Record<string,...>`
+    shim in `renderer/index.tsx`; now `Record<EmailBlockType,...>`).
+  - `Size` enum + required `horizontalPadding`/`verticalPadding` on Image and
+    Line; parser emits `Size.CUSTOM` everywhere.
+  - `ImageType` enum + optional `imageSourceType` on Image.
+  - `showCaption` promoted from optional to required.
+  - `lineHeight?` / `textAlign?` added to TextBlock; parser emits them as
+    structured fields, renderer reads from props instead of HTML-embedded
+    `<div style="line-height: …">` / `<p style="text-align: …">` workarounds.
+  - Lifted `ProductsBlock`, `InlineButton`, `ProductFilterDoc`,
+    `ProductImageSize`, `ProductLayoutType`, `ProductSelectionType`,
+    `ManuallySelectedProduct` from `parser/blocks/product.ts` local shims into
+    `renderer/types.ts`. `ProductsBlock` now extends `BaseBlock` and
+    participates in the `Section` union; `product.ts` no longer needs the
+    `as unknown as Section` cast.
+  - Dropped `ParsedLineBlock` shim: `innerPadding` collapses into
+    `LineBlock.padding`, `thickness` is hardcoded to 2 in `line.tsx`.
+  - Dropped `SocialIconColor.ORIGINAL` (prod only has black/white/gray); the
+    "original" Klaviyo colorful icon set already mapped to BLACK at parse
+    time, so behavior unchanged.
+  - Added `[EmailBlockType.PRODUCTS]: undefined` to `nested-email-blocks.tsx`.
+
+**Batch test**
+`npx tsx src/parser/batch-test.ts` after each package:
+- Baseline: 416 total, 94 clean, 322 warned, 0 failed
+- After A: 416 / 104 / 312 / 0 (clean count up because SKIPPED/REVIEW/UNSUPPORTED entries no longer land in `warnings[]`)
+- After B: 416 / 104 / 312 / 0
+- After C: 416 / 104 / 312 / 0
+
+**Typecheck**
+`npx tsc --noEmit` shows only the same pre-existing errors (cheerio `AnyNode`,
+`amp-img` JSX, missing `mjml` types). No new errors introduced by any of the
+three packages.
+
+**State at session end**
+- Branch: `main`, 3 commits ahead of origin (A + B + C).
+- No uncommitted code changes.
+- Packages D and F1 already landed in earlier sessions. Package G (import
+  executor) can now read the structured `unsupportedFeatures`, `reviewItems`,
+  and `skippedBlocks` arrays directly instead of string-prefix grepping.
+
+---
+
 ## 2026-04-20 — CODE-template parser (editor_type: CODE) — first pass, paused
 
 **Context**
