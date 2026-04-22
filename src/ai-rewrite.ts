@@ -4,8 +4,10 @@
  * One LLM call per text block (not batched — see feedback memory).
  * System prompt is cached across calls so only the user text is billed at full rate.
  *
- * Portable client: works on Replit (via AI Integrations env vars) and locally
- * (via ANTHROPIC_API_KEY). No code change between environments.
+ * Uses Replit's native AI Integrations for Anthropic access. No user-supplied
+ * API key required: the AI_INTEGRATIONS_ANTHROPIC_BASE_URL and
+ * AI_INTEGRATIONS_ANTHROPIC_API_KEY environment variables are injected
+ * automatically by the Replit AI Integrations blueprint.
  */
 
 // The @anthropic-ai/sdk module is loaded lazily so the pipeline can run
@@ -21,22 +23,18 @@ const MODEL = "claude-sonnet-4-6";
 let _client: InstanceType<AnthropicCtor> | null = null;
 async function client(): Promise<InstanceType<AnthropicCtor>> {
   if (_client) return _client;
-  const apiKey =
-    process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ||
-    process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  const apiKey = process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY;
+  const baseURL = process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL;
+  if (!apiKey || !baseURL) {
     throw new Error(
-      "No Anthropic API key found. Set AI_INTEGRATIONS_ANTHROPIC_API_KEY (Replit) or ANTHROPIC_API_KEY (local).",
+      "Replit AI Integrations env vars missing. Expected AI_INTEGRATIONS_ANTHROPIC_API_KEY and AI_INTEGRATIONS_ANTHROPIC_BASE_URL — these are auto-set by the Replit Anthropic integration.",
     );
   }
-  // @ts-expect-error — dynamic import of an optional peer. The package is
-  // declared in package.json but may not be installed (e.g. when SKIP_AI=1).
+  // Dynamic import of an optional peer. The package is declared in
+  // package.json but may not be installed (e.g. when SKIP_AI=1).
   const mod = await import("@anthropic-ai/sdk");
   const Anthropic = (mod.default ?? mod) as unknown as AnthropicCtor;
-  _client = new Anthropic({
-    baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL,
-    apiKey,
-  });
+  _client = new Anthropic({ apiKey, baseURL });
   return _client;
 }
 
