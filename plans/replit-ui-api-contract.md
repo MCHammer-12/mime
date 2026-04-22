@@ -84,7 +84,127 @@ Usage in UI:
 
 ---
 
-## 4. `POST /api/run` — execute the import (streams NDJSON)
+## 4. `POST /api/jobs` — create an async import job
+
+**Request** (same shape as `/api/run` with one addition):
+```json
+{
+  "klaviyoKey": "pk_...",
+  "storeId": "69dff28302f64f42e6012a4d",
+  "storeName": "Alexander Jane",       // NEW — user-friendly display name
+  "merchantSlug": "alexanderjane",
+  "templateIds": ["H76ZS6"],
+  "flowIds": ["VeffyL"],
+  "redoJwt": "eyJ...",
+  "redoServerBase": "https://app-server.getredo.com",
+  "skipAi": true,
+  "runImport": true
+}
+```
+
+**Response (202 Accepted):**
+```json
+{ "jobId": "550e8400-e29b-41d4-a716-446655440000", "status": "queued" }
+```
+
+The job kicks off in the background immediately. Client streams events via `GET /api/jobs/:id/stream` and (optionally) answers prompts via `POST /api/jobs/:id/inputs`.
+
+## 5. `GET /api/jobs` — list jobs (multi-store dashboard)
+
+Optional `?storeId=<id>` filter.
+
+**Response:**
+```json
+{
+  "jobs": [
+    {
+      "id": "uuid",
+      "storeId": "...",
+      "storeName": "Alexander Jane",
+      "merchantSlug": "alexanderjane",
+      "status": "running",       // queued|running|awaiting_input|completed|failed|cancelled
+      "createdAt": "2026-04-22T14:35:00Z",
+      "startedAt": "2026-04-22T14:35:01Z",
+      "completedAt": null,
+      "templateIds": ["H76ZS6"],
+      "flowIds": ["VeffyL", "YkSGTf"],
+      "eventCount": 42,
+      "summary": null,           // populated when status is terminal
+      "error": null,
+      "lastEvent": { "seq": 42, "at": "...", "kind": "step", "severity": "info", "payload": {...} },
+      "pendingInput": null       // set when status === "awaiting_input" (see §7)
+    }
+  ]
+}
+```
+
+Ordered newest-first. This is what powers the dashboard cards.
+
+## 6. `GET /api/jobs/:id/stream` — NDJSON stream
+
+Replays historical events, then streams new ones until job reaches a terminal state OR the client disconnects.
+
+Optional `?since=N` — only emit events with `seq > N` (useful for resume after reconnect).
+
+Same event shapes as §4 but wrapped in a unified envelope:
+```json
+{ "seq": 12, "at": "2026-04-22T14:35:03Z", "kind": "imported", "severity": "success", "payload": { "id": "...", "name": "...", "templateId": "..." } }
+```
+
+**Severity** is auto-derived from kind:
+- `exported`, `imported`, `flow_imported`, `fonts_done`, `done` → `success`
+- `warn` → `warn`
+- `error`, `fail` → `error`
+- `needs_input`, `step`, `info`, `log` → `info`
+
+## 7. `POST /api/jobs/:id/inputs` — answer a needs_input prompt
+
+When the pipeline needs user input, it emits a `needs_input` event and pauses the job (`status` transitions to `awaiting_input`). The event payload looks like:
+
+```json
+{
+  "seq": 17,
+  "kind": "needs_input",
+  "severity": "info",
+  "payload": {
+    "input": {
+      "id": "5a94...",                 // submit this back to resolve
+      "questionKey": "transactional-routing",  // same key = reuse answer across items
+      "question": "Flow 'Key Fulfillment' has a send-email step marked transactional. Route it through Redo's transactional send path?",
+      "context": "Transactional emails bypass merchant unsubscribe state…",
+      "type": "boolean",              // "text" | "choice" | "boolean"
+      "options": null,                // present when type === "choice"
+      "default": "false",
+      "itemId": "KEYfL9",
+      "itemLabel": "Key Fulfillment"
+    }
+  }
+}
+```
+
+**Client POSTs the answer:**
+```json
+POST /api/jobs/:id/inputs
+{ "inputId": "5a94...", "answer": "true" }
+```
+
+Response: `{ "ok": true }` (200) or `{ "ok": false, "error": "..." }` (400).
+
+Job resumes. If another item in the same job triggers the same `questionKey`, the answer is reused automatically (ask-once-per-key).
+
+## 8. `DELETE /api/jobs/:id` — remove a job
+
+Removes a completed/failed job from the list. Response: `{ "ok": true }`.
+
+## 9. `POST /api/run` — LEGACY streaming endpoint
+
+Unchanged from the previous version of this doc. Kept for backward compat with the existing inline HTML UI. New Replit dashboard should use `/api/jobs` + `/api/jobs/:id/stream`.
+
+---
+
+# (below: original /api/run NDJSON description, now legacy)
+
+## LEGACY: `POST /api/run` — execute the import (streams NDJSON)
 
 **Request:**
 ```json

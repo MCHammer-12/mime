@@ -31,6 +31,20 @@ import {
   importTemplateRpc,
   uploadFontsForTemplates,
 } from "./import-rpc.js";
+import {
+  createJob,
+  deleteJob,
+  getJob,
+  jobController,
+  listJobs,
+  resolveInput,
+  setStatus,
+  subscribe,
+  type JobSummary,
+  type PendingInput,
+  type RunController,
+  type Severity,
+} from "./jobs.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
 const DEFAULT_REDOAPP_DIR = join(homedir(), "code/redoapp");
@@ -109,6 +123,29 @@ function ndjsonStart(res: ServerResponse) {
 
 function emit(res: ServerResponse, event: Record<string, unknown>) {
   res.write(JSON.stringify(event) + "\n");
+}
+
+/**
+ * Build a RunController bound to a ServerResponse (streaming path). Used by
+ * the legacy `POST /api/run` endpoint. `prompt()` is a no-op in this path —
+ * returns the default immediately, since NDJSON streams can't round-trip
+ * user input. The job-based path gets a real `prompt()` via jobController().
+ */
+function resController(res: ServerResponse, job?: { id: string }): RunController {
+  return {
+    emit(event) {
+      res.write(JSON.stringify(event) + "\n");
+      // Also fan out to the job log so /api/jobs/:id/stream sees the same
+      // events if the caller also created a job. Legacy /api/run doesn't
+      // create a job, so `job` is undefined and this is a no-op there.
+      if (job) jobController(job.id).emit(event);
+    },
+    async prompt(input) {
+      // Legacy stream can't prompt — fall back to default (if any) or
+      // return an empty string so callers can degrade gracefully.
+      return input.default ?? "";
+    },
+  };
 }
 
 // ─── API: /api/templates ───────────────────────────────────────────────────
@@ -334,71 +371,124 @@ async function handleFlows(req: IncomingMessage, res: ServerResponse) {
   }
 }
 
-// ─── API: /api/run (NDJSON stream) ─────────────────────────────────────────
+// ─── Run parameters + core pipeline ────────────────────────────────────────
 
-async function handleRun(req: IncomingMessage, res: ServerResponse) {
-  const body = await readJsonBody(req);
+interface RunParams {
+  klaviyoKey: string;
+  storeId: string;
+  merchantSlug: string;
+  templateIds: string[];
+  flowIds: string[];
+  skipAi: boolean;
+  anthropicKey?: string;
+  redoJwt?: string;
+  redoServerBase?: string;
+  wantsImport: boolean;
+  useRpcImport: boolean;
+  useBazelImport: boolean;
+  redoappDir: string;
+}
+
+function parseRunBody(body: any): RunParams | { error: string } {
   const klaviyoKey = body.klaviyoKey as string;
   const storeId = body.storeId as string;
   const merchantSlug = body.merchantSlug as string;
   const templateIds = (body.templateIds ?? []) as string[];
   const flowIds = (body.flowIds ?? []) as string[];
-  const skipAi = body.skipAi !== false; // default true for the web UI
-  // Hosted deploys (Replit etc.) can't run bazel — force export-only regardless of UI toggle.
-  const anthropicKey = body.anthropicKey as string | undefined;
-  const redoJwt = (body.redoJwt as string | undefined)?.trim() || undefined;
-
-  // Import strategy:
-  //   - RPC (marketing-rpc) when a JWT is provided. Works on Replit + locally. Preferred.
-  //   - bazel when running locally AND no JWT provided. Skipped on hosted deploys.
-  //   - export-only otherwise.
-  const wantsImport = body.runImport !== false;
-  const useRpcImport = wantsImport && !!redoJwt;
-  const useBazelImport = wantsImport && !redoJwt && !IS_HOSTED_DEPLOY;
-  const runImport = useRpcImport || useBazelImport;
-  const redoappDir =
-    (body.redoappDir as string | undefined) || process.env.REDOAPP_DIR || DEFAULT_REDOAPP_DIR;
-
   if (
     !klaviyoKey ||
     !storeId ||
     !merchantSlug ||
     (templateIds.length === 0 && flowIds.length === 0)
   ) {
-    return json(res, 400, {
+    return {
       error:
         "klaviyoKey, storeId, merchantSlug, and at least one of templateIds/flowIds required",
-    });
+    };
+  }
+  const redoJwt = (body.redoJwt as string | undefined)?.trim() || undefined;
+  const wantsImport = body.runImport !== false;
+  return {
+    klaviyoKey,
+    storeId,
+    merchantSlug,
+    templateIds,
+    flowIds,
+    skipAi: body.skipAi !== false,
+    anthropicKey: body.anthropicKey as string | undefined,
+    redoJwt,
+    redoServerBase: (body.redoServerBase as string | undefined)?.trim() || undefined,
+    wantsImport,
+    useRpcImport: wantsImport && !!redoJwt,
+    useBazelImport: wantsImport && !redoJwt && !IS_HOSTED_DEPLOY,
+    redoappDir:
+      (body.redoappDir as string | undefined) ||
+      process.env.REDOAPP_DIR ||
+      DEFAULT_REDOAPP_DIR,
+  };
+}
+
+/**
+ * Full migration pipeline. All event output goes through `ctrl` (which can
+ * be res-backed for legacy streaming OR job-backed for the async dashboard).
+ * User-input prompts go through `ctrl.prompt()` — resolves to a default for
+ * res-backed controllers, awaits a real answer for job-backed ones.
+ */
+async function runImport(
+  params: RunParams,
+  ctrl: RunController,
+): Promise<JobSummary> {
+  const {
+    klaviyoKey,
+    storeId,
+    merchantSlug,
+    templateIds,
+    flowIds,
+    skipAi,
+    anthropicKey,
+    redoJwt,
+    redoServerBase: bodyRedoServerBase,
+    wantsImport,
+    useRpcImport,
+    useBazelImport,
+    redoappDir,
+  } = params;
+  const shouldImport = useRpcImport || useBazelImport;
+  const summary: JobSummary = {
+    templatesImported: 0,
+    templatesFailed: 0,
+    flowsImported: 0,
+    flowsFailed: 0,
+  };
+
+  const emit = (event: { kind: string; severity?: Severity; [k: string]: unknown }) =>
+    ctrl.emit(event);
+
+  if (anthropicKey && !process.env.ANTHROPIC_API_KEY) {
+    process.env.ANTHROPIC_API_KEY = anthropicKey;
   }
 
-  ndjsonStart(res);
-
-  try {
-    if (anthropicKey && !process.env.ANTHROPIC_API_KEY) {
-      process.env.ANTHROPIC_API_KEY = anthropicKey;
-    }
-
     // 1. Fetch account
-    emit(res, { kind: "step", label: "Fetching Klaviyo account…" });
+    emit({ kind: "step", label: "Fetching Klaviyo account…" });
     let account = null;
     try {
       account = await fetchAccount(klaviyoKey);
-      emit(res, { kind: "info", text: `Account: ${account.organizationName}` });
+      emit({ kind: "info", text: `Account: ${account.organizationName}` });
     } catch (e: any) {
-      emit(res, { kind: "warn", text: `Could not fetch account (${e.message}). Variable substitution skipped.` });
+      emit({ kind: "warn", text: `Could not fetch account (${e.message}). Variable substitution skipped.` });
     }
 
     // 2. Prepare output dir
     const templatesDir = join(MIME_ROOT, "migrations", merchantSlug, "templates");
     mkdirSync(templatesDir, { recursive: true });
-    emit(res, { kind: "info", text: `Output: ${templatesDir}` });
+    emit({ kind: "info", text: `Output: ${templatesDir}` });
 
     // 3. Download + export each template
     const exported: { id: string; name: string; path: string }[] = [];
     const failures: { id: string; name: string; error: string }[] = [];
 
     for (const tid of templateIds) {
-      emit(res, { kind: "step", label: `Downloading ${tid}…` });
+      emit({ kind: "step", label: `Downloading ${tid}…` });
       try {
         const full: any = await klaviyo(`/templates/${tid}/`, klaviyoKey);
         const name = full.data?.attributes?.name ?? tid;
@@ -409,7 +499,7 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
             name,
             error: "template has no HTML (editor_type may not be supported)",
           });
-          emit(res, { kind: "fail", id: tid, name, error: "no HTML" });
+          emit({ kind: "fail", id: tid, name, error: "no HTML" });
           continue;
         }
         const base = `${tid}-${slug(name, tid)}`;
@@ -421,11 +511,11 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
           "utf8",
         );
 
-        emit(res, { kind: "step", label: `Exporting ${name}…` });
+        emit({ kind: "step", label: `Exporting ${name}…` });
         const result = await exportTemplate(htmlPath, { account, skipAi });
 
         exported.push({ id: tid, name, path: result.outPath });
-        emit(res, {
+        emit({
           kind: "exported",
           id: tid,
           name,
@@ -442,31 +532,30 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
       } catch (e: any) {
         const msg = e.message ?? String(e);
         failures.push({ id: tid, name: tid, error: msg });
-        emit(res, { kind: "fail", id: tid, name: tid, error: msg });
+        emit({ kind: "fail", id: tid, name: tid, error: msg });
       }
     }
 
     if (templateIds.length > 0) {
-      emit(res, { kind: "summary", exported: exported.length, failed: failures.length });
+      emit({ kind: "summary", exported: exported.length, failed: failures.length });
     }
 
     const hasTemplatesToImport = exported.length > 0;
     const hasFlowsToImport = flowIds.length > 0;
 
-    if (!runImport || (!hasTemplatesToImport && !hasFlowsToImport)) {
+    if (!shouldImport || (!hasTemplatesToImport && !hasFlowsToImport)) {
       if (IS_HOSTED_DEPLOY && !redoJwt && wantsImport) {
-        emit(res, { kind: "info", text: "Import skipped. Paste a Redo auth token to import via RPC." });
+        emit({ kind: "info", text: "Import skipped. Paste a Redo auth token to import via RPC." });
       }
       const cmd = `cd ${redoappDir} && bazel run //redo/manage:import-klaviyo-templates -- --team ${storeId} --account ${merchantSlug} --mime-dir ${MIME_ROOT}`;
-      emit(res, { kind: "done", importSkipped: true, importCommand: cmd });
-      res.end();
-      return;
+      emit({ kind: "done", importSkipped: true, importCommand: cmd });
+      return summary;
     }
 
     // Flow import requires RPC (merchant JWT) — bazel path for flows isn't
     // wired through the server yet. If user requested flows but no JWT, warn.
     if (hasFlowsToImport && !useRpcImport) {
-      emit(res, {
+      emit({
         kind: "warn",
         text: `Flow import requires a Redo auth token (JWT). Skipping ${flowIds.length} flow(s). Templates below will still import via bazel.`,
       });
@@ -474,14 +563,14 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
 
     // ─── Import via marketing-rpc + font upload (Replit + local) ──────
     if (useRpcImport) {
-      const serverBase = (body.redoServerBase as string | undefined)?.trim() || undefined;
+      const serverBase = bodyRedoServerBase;
       const onFontProgress = (ev: ImportProgressEvent) => {
         if (ev.kind === "font_uploading") {
-          emit(res, { kind: "log", source: "stdout", text: `uploading font: ${ev.family} (${ev.fileName})` });
+          emit({ kind: "log", source: "stdout", text: `uploading font: ${ev.family} (${ev.fileName})` });
         } else if (ev.kind === "font_registered") {
-          emit(res, { kind: "log", source: "stdout", text: `registered font: ${ev.family}` });
+          emit({ kind: "log", source: "stdout", text: `registered font: ${ev.family}` });
         } else if (ev.kind === "fonts_done") {
-          emit(res, { kind: "log", source: "stdout", text: `fonts done: ${ev.uploaded} uploaded, ${ev.skipped} skipped` });
+          emit({ kind: "log", source: "stdout", text: `fonts done: ${ev.uploaded} uploaded, ${ev.skipped} skipped` });
         }
       };
 
@@ -497,21 +586,21 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
             const json = JSON.parse(readFileSync(exp.path, "utf8"));
             loaded.push({ ...exp, json });
           } catch (e: any) {
-            emit(res, { kind: "fail", id: exp.id, name: exp.name, error: `read export: ${e.message ?? e}` });
+            emit({ kind: "fail", id: exp.id, name: exp.name, error: `read export: ${e.message ?? e}` });
           }
         }
 
         // Font upload (once per batch). Unresolved fonts are reported but do
         // NOT block import.
         try {
-          emit(res, { kind: "step", label: "Uploading brand fonts…" });
+          emit({ kind: "step", label: "Uploading brand fonts…" });
           const fontResult = await uploadFontsForTemplates(loaded.map((l) => l.json), {
             jwt: redoJwt!,
             serverBase,
             account,
             onProgress: onFontProgress,
           });
-          emit(res, {
+          emit({
             kind: "fonts_done",
             uploaded: fontResult.uploaded,
             registeredFamilies: fontResult.registeredFamilies,
@@ -519,18 +608,18 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
             unresolved: fontResult.unresolved,
           });
           for (const u of fontResult.unresolved) {
-            emit(res, {
+            emit({
               kind: "warn",
               text: `unresolved font "${u.family}" (${u.reason}) — used by ${u.usedBy.join(", ")}. Add manually in brand kit.`,
             });
           }
         } catch (e: any) {
-          emit(res, { kind: "warn", text: `font upload failed: ${e.message ?? e}. Continuing with template import.` });
+          emit({ kind: "warn", text: `font upload failed: ${e.message ?? e}. Continuing with template import.` });
         }
 
-        emit(res, { kind: "step", label: "Creating templates…" });
+        emit({ kind: "step", label: "Creating templates…" });
         for (const l of loaded) {
-          emit(res, { kind: "step", label: `Importing ${l.name}…` });
+          emit({ kind: "step", label: `Importing ${l.name}…` });
           try {
             const result = await importTemplateRpc(l.json, {
               jwt: redoJwt!,
@@ -538,18 +627,18 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
               account,
               onProgress: (ev: ImportProgressEvent) => {
                 if (ev.kind === "filter_created") {
-                  emit(res, { kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
+                  emit({ kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
                 } else if (ev.kind === "template_created") {
-                  emit(res, { kind: "log", source: "stdout", text: `template created: ${ev.templateId}` });
+                  emit({ kind: "log", source: "stdout", text: `template created: ${ev.templateId}` });
                 }
               },
             });
             templateImportOk++;
-            emit(res, { kind: "imported", id: l.id, name: l.name, templateId: result.templateId });
+            emit({ kind: "imported", id: l.id, name: l.name, templateId: result.templateId });
           } catch (e: any) {
             templateImportFail++;
             const msg = e.message ?? String(e);
-            emit(res, { kind: "fail", id: l.id, name: l.name, error: `import: ${msg}` });
+            emit({ kind: "fail", id: l.id, name: l.name, error: `import: ${msg}` });
           }
         }
       }
@@ -558,7 +647,7 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
       let flowImportOk = 0;
       let flowImportFail = 0;
       if (hasFlowsToImport) {
-        emit(res, { kind: "step", label: `Fetching Klaviyo metrics…` });
+        emit({ kind: "step", label: `Fetching Klaviyo metrics…` });
         const metrics = await fetchAllMetrics(klaviyoKey);
 
         // Resolver uses on-demand Klaviyo template fetches (flow-embedded
@@ -572,7 +661,7 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
         });
 
         for (const flowId of flowIds) {
-          emit(res, { kind: "step", label: `Fetching flow ${flowId}…` });
+          emit({ kind: "step", label: `Fetching flow ${flowId}…` });
           let flowDetail: any;
           try {
             flowDetail = await klaviyo(
@@ -581,12 +670,12 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
             );
           } catch (e: any) {
             flowImportFail++;
-            emit(res, { kind: "fail", id: flowId, name: flowId, error: `fetch flow: ${e.message ?? e}` });
+            emit({ kind: "fail", id: flowId, name: flowId, error: `fetch flow: ${e.message ?? e}` });
             continue;
           }
           const flowName = flowDetail?.data?.attributes?.name ?? flowId;
 
-          emit(res, { kind: "step", label: `Parsing ${flowName}…` });
+          emit({ kind: "step", label: `Parsing ${flowName}…` });
           let parsed;
           try {
             parsed = await parseFlow(flowDetail as KlaviyoFlow, metrics, {
@@ -595,12 +684,12 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
             });
           } catch (e: any) {
             flowImportFail++;
-            emit(res, { kind: "fail", id: flowId, name: flowName, error: `parse flow: ${e.message ?? e}` });
+            emit({ kind: "fail", id: flowId, name: flowName, error: `parse flow: ${e.message ?? e}` });
             continue;
           }
           if (!parsed.automation) {
             flowImportFail++;
-            emit(res, {
+            emit({
               kind: "fail",
               id: flowId,
               name: flowName,
@@ -609,7 +698,32 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
             continue;
           }
 
-          emit(res, { kind: "step", label: `Importing ${flowName}…` });
+          // Needs-input hook: if the flow has a transactional-email warning,
+          // ask the user whether to route through Redo's transactional send
+          // path before importing. Repeated questions across items are
+          // auto-answered from the job's cache (ask-once behavior). Answer
+          // is recorded but V1 doesn't change import behavior based on it —
+          // wire-up is a follow-up.
+          const hasTxnWarning = parsed.warnings.some((w) =>
+            typeof w.message === "string" && w.message.includes("transactional"),
+          );
+          if (hasTxnWarning) {
+            const answer = await ctrl.prompt({
+              questionKey: "transactional-routing",
+              question: `Flow "${flowName}" has a send-email step marked transactional. Route it through Redo's transactional send path?`,
+              context: "Transactional emails bypass merchant unsubscribe state. Klaviyo lets merchants flag specific sends transactional; Redo requires routing through a separate send path to preserve that behavior.",
+              type: "boolean",
+              default: "false",
+              itemId: flowId,
+              itemLabel: flowName,
+            });
+            emit({
+              kind: "info",
+              text: `Transactional routing for ${flowName}: ${answer === "true" ? "yes" : "no"}`,
+            });
+          }
+
+          emit({ kind: "step", label: `Importing ${flowName}…` });
           try {
             const result = await importFlowRpc(
               {
@@ -623,17 +737,17 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
                 account,
                 onProgress: (ev: ImportProgressEvent) => {
                   if (ev.kind === "filter_created") {
-                    emit(res, { kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
+                    emit({ kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
                   } else if (ev.kind === "template_created") {
-                    emit(res, { kind: "log", source: "stdout", text: `  email template created: ${ev.templateId}` });
+                    emit({ kind: "log", source: "stdout", text: `  email template created: ${ev.templateId}` });
                   } else if (ev.kind === "flow_created") {
-                    emit(res, { kind: "log", source: "stdout", text: `flow created: ${ev.flowId}` });
+                    emit({ kind: "log", source: "stdout", text: `flow created: ${ev.flowId}` });
                   }
                 },
               },
             );
             flowImportOk++;
-            emit(res, {
+            emit({
               kind: "flow_imported",
               id: flowId,
               name: flowName,
@@ -644,12 +758,16 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
             });
           } catch (e: any) {
             flowImportFail++;
-            emit(res, { kind: "fail", id: flowId, name: flowName, error: `import: ${e.message ?? e}` });
+            emit({ kind: "fail", id: flowId, name: flowName, error: `import: ${e.message ?? e}` });
           }
         }
       }
 
-      emit(res, {
+      summary.templatesImported = templateImportOk;
+      summary.templatesFailed = templateImportFail;
+      summary.flowsImported = flowImportOk;
+      summary.flowsFailed = flowImportFail;
+      emit({
         kind: "done",
         importMethod: "rpc",
         imported: templateImportOk,
@@ -657,16 +775,15 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
         flowsImported: flowImportOk,
         flowsFailed: flowImportFail,
       });
-      return;
+      return summary;
     }
 
     // ─── Import via bazel (local only, templates only) ─────────────────
     if (!hasTemplatesToImport) {
-      emit(res, { kind: "done", importSkipped: true });
-      res.end();
-      return;
+      emit({ kind: "done", importSkipped: true });
+      return summary;
     }
-    emit(res, { kind: "step", label: "Importing into Redo (bazel)…" });
+    emit({ kind: "step", label: "Importing into Redo (bazel)…" });
 
     const importArgs = [
       "run",
@@ -691,24 +808,198 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
 
     proc.stdout.on("data", (buf) => {
       const lines = buf.toString().split("\n").filter(Boolean);
-      for (const line of lines) emit(res, { kind: "log", source: "stdout", text: line });
+      for (const line of lines) emit({ kind: "log", source: "stdout", text: line });
     });
     proc.stderr.on("data", (buf) => {
       const lines = buf.toString().split("\n").filter(Boolean);
-      for (const line of lines) emit(res, { kind: "log", source: "stderr", text: line });
+      for (const line of lines) emit({ kind: "log", source: "stderr", text: line });
     });
 
     await new Promise<void>((resolveProc) => {
       proc.on("close", (code) => {
-        emit(res, { kind: "done", importExitCode: code });
+        emit({ kind: "done", importExitCode: code });
         resolveProc();
       });
     });
+  return summary;
+}
+
+// ─── API: /api/run (legacy NDJSON stream) ──────────────────────────────────
+// Streams events directly to the response. Kept for backwards compat with
+// the current inline HTML UI. New clients should use POST /api/jobs.
+
+async function handleRun(req: IncomingMessage, res: ServerResponse) {
+  const body = await readJsonBody(req);
+  const params = parseRunBody(body);
+  if ("error" in params) {
+    return json(res, 400, { error: params.error });
+  }
+
+  ndjsonStart(res);
+  const ctrl = resController(res);
+
+  try {
+    await runImport(params, ctrl);
   } catch (e: any) {
-    emit(res, { kind: "error", text: e.message ?? String(e) });
+    ctrl.emit({ kind: "error", severity: "error", text: e.message ?? String(e) });
   } finally {
     res.end();
   }
+}
+
+// ─── API: POST /api/jobs — create + run a job asynchronously ──────────────
+// Unlike /api/run, this returns immediately with the job id. The client
+// then streams events from GET /api/jobs/:id/stream and optionally answers
+// needs_input prompts via POST /api/jobs/:id/inputs.
+
+async function handleJobCreate(req: IncomingMessage, res: ServerResponse) {
+  const body = await readJsonBody(req);
+  const params = parseRunBody(body);
+  if ("error" in params) {
+    return json(res, 400, { error: params.error });
+  }
+  const storeName = (body.storeName as string | undefined)?.trim() || params.merchantSlug;
+
+  const job = createJob({
+    storeId: params.storeId,
+    storeName,
+    merchantSlug: params.merchantSlug,
+    templateIds: params.templateIds,
+    flowIds: params.flowIds,
+  });
+  const ctrl = jobController(job.id);
+
+  // Respond immediately with the job id.
+  json(res, 202, { jobId: job.id, status: job.status });
+
+  // Kick off the pipeline in the background. Errors funnel into the job log
+  // + status transitions; exceptions are never rethrown to the HTTP server.
+  setStatus(job.id, "running");
+  void runImport(params, ctrl)
+    .then((summary) => {
+      setStatus(job.id, "completed", { summary });
+    })
+    .catch((e: any) => {
+      ctrl.emit({
+        kind: "error",
+        severity: "error",
+        text: e?.message ?? String(e),
+      });
+      setStatus(job.id, "failed", { error: e?.message ?? String(e) });
+    });
+}
+
+// ─── API: GET /api/jobs — list jobs (optionally scoped to a store) ────────
+
+async function handleJobList(req: IncomingMessage, res: ServerResponse) {
+  const url = new URL(req.url ?? "", `http://${req.headers.host ?? "localhost"}`);
+  const storeId = url.searchParams.get("storeId") ?? undefined;
+  const jobs = listJobs(storeId ? { storeId } : undefined).map((j) => ({
+    id: j.id,
+    storeId: j.storeId,
+    storeName: j.storeName,
+    merchantSlug: j.merchantSlug,
+    status: j.status,
+    createdAt: j.createdAt,
+    startedAt: j.startedAt,
+    completedAt: j.completedAt,
+    templateIds: j.templateIds,
+    flowIds: j.flowIds,
+    eventCount: j.events.length,
+    summary: j.summary,
+    error: j.error,
+    // Tail of the event stream for a compact dashboard preview
+    lastEvent: j.events[j.events.length - 1] ?? null,
+    pendingInput: j.pendingInput ?? null,
+  }));
+  json(res, 200, { jobs });
+}
+
+// ─── API: GET /api/jobs/:id — full detail ─────────────────────────────────
+
+async function handleJobGet(res: ServerResponse, jobId: string) {
+  const job = getJob(jobId);
+  if (!job) return json(res, 404, { error: `job ${jobId} not found` });
+  json(res, 200, job);
+}
+
+// ─── API: GET /api/jobs/:id/stream — NDJSON live stream ───────────────────
+// Sends all historical events first, then streams new ones until the job
+// completes OR the client disconnects. Safe to reconnect (replays history).
+
+async function handleJobStream(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+) {
+  const job = getJob(jobId);
+  if (!job) return json(res, 404, { error: `job ${jobId} not found` });
+
+  const url = new URL(req.url ?? "", `http://${req.headers.host ?? "localhost"}`);
+  const since = Number(url.searchParams.get("since") ?? "0");
+
+  ndjsonStart(res);
+
+  // 1. Replay historical events past `since`.
+  for (const e of job.events) {
+    if (e.seq > since) res.write(JSON.stringify(e) + "\n");
+  }
+
+  // 2. If job is already terminal, close out.
+  const terminal = (status: string) =>
+    status === "completed" || status === "failed" || status === "cancelled";
+  if (terminal(job.status)) {
+    res.end();
+    return;
+  }
+
+  // 3. Otherwise subscribe to new events and stream them as they arrive.
+  const unsubscribe = subscribe(jobId, (event) => {
+    res.write(JSON.stringify(event) + "\n");
+  });
+
+  // Close the stream when the job reaches a terminal state. Poll the job
+  // status on every event (cheap — just a map lookup) so we don't need
+  // dedicated status-change notifications.
+  const interval = setInterval(() => {
+    const current = getJob(jobId);
+    if (!current || terminal(current.status)) {
+      clearInterval(interval);
+      unsubscribe();
+      res.end();
+    }
+  }, 500);
+
+  req.on("close", () => {
+    clearInterval(interval);
+    unsubscribe();
+  });
+}
+
+// ─── API: POST /api/jobs/:id/inputs — deliver an answer to needs_input ───
+
+async function handleJobInput(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+) {
+  const body = await readJsonBody(req);
+  const inputId = body.inputId as string | undefined;
+  const answer = body.answer;
+  if (!inputId || answer === undefined) {
+    return json(res, 400, { error: "inputId and answer required" });
+  }
+  const result = resolveInput(jobId, inputId, String(answer));
+  if (!result.ok) return json(res, 400, result);
+  json(res, 200, { ok: true });
+}
+
+// ─── API: DELETE /api/jobs/:id — remove a completed/failed job ───────────
+
+async function handleJobDelete(res: ServerResponse, jobId: string) {
+  const deleted = deleteJob(jobId);
+  if (!deleted) return json(res, 404, { error: `job ${jobId} not found` });
+  json(res, 200, { ok: true });
 }
 
 // ─── HTML ──────────────────────────────────────────────────────────────────
@@ -1332,6 +1623,23 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && req.url === "/api/run") {
       return handleRun(req, res);
+    }
+    // Job-based dashboard endpoints
+    const url = req.url ?? "";
+    if (req.method === "POST" && url === "/api/jobs") {
+      return handleJobCreate(req, res);
+    }
+    if (req.method === "GET" && (url === "/api/jobs" || url.startsWith("/api/jobs?"))) {
+      return handleJobList(req, res);
+    }
+    const jobPath = url.match(/^\/api\/jobs\/([^/?]+)(\/[a-z]+)?(\?.*)?$/);
+    if (jobPath) {
+      const jobId = jobPath[1];
+      const sub = jobPath[2];
+      if (req.method === "GET" && !sub) return handleJobGet(res, jobId);
+      if (req.method === "DELETE" && !sub) return handleJobDelete(res, jobId);
+      if (req.method === "GET" && sub === "/stream") return handleJobStream(req, res, jobId);
+      if (req.method === "POST" && sub === "/inputs") return handleJobInput(req, res, jobId);
     }
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not found");
