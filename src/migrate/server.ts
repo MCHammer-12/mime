@@ -13,10 +13,10 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exportTemplate } from "../export-template.js";
 import { fetchAccount } from "../fetch-account.js";
@@ -1602,12 +1602,73 @@ const HTML = /* html */ `<!doctype html>
 </body>
 </html>`;
 
+// ─── Static-file serving for the Toby 2.0 UI ──────────────────────────────
+
+const UI_ROOT = join(MIME_ROOT, "src/migrate/ui");
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".jsx": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".ico": "image/x-icon",
+};
+
+/**
+ * Attempt to serve `urlPath` from UI_ROOT. Returns true if handled
+ * (including 404 on missing-but-safe paths); false when the path is
+ * unsafe (tried to escape the UI dir) so the caller can 404 normally.
+ */
+function tryServeStatic(
+  urlPath: string,
+  res: ServerResponse,
+): boolean {
+  // Strip query string; decode URL-encoded bytes (e.g. %20 for spaces).
+  const bare = decodeURIComponent(urlPath.split("?")[0]);
+
+  // Path-traversal guard: resolve the requested file against UI_ROOT and
+  // make sure it stays inside UI_ROOT.
+  const rel = bare.replace(/^\/+/, "");
+  const fullPath = normalize(join(UI_ROOT, rel));
+  if (!fullPath.startsWith(UI_ROOT)) return false;
+
+  if (!existsSync(fullPath)) return false;
+  const stat = statSync(fullPath);
+  if (!stat.isFile()) return false;
+
+  const ext = (fullPath.match(/\.[^./]+$/)?.[0] ?? "").toLowerCase();
+  const type = CONTENT_TYPES[ext] ?? "application/octet-stream";
+  const body = readFileSync(fullPath);
+  res.writeHead(200, {
+    "content-type": type,
+    "cache-control": "no-cache",
+  });
+  res.end(body);
+  return true;
+}
+
 // ─── server ────────────────────────────────────────────────────────────────
 
 const server = createServer(async (req, res) => {
   try {
     if (!checkBasicAuth(req, res)) return;
+    // GET / → serve the Toby 2.0 UI entry point.
     if (req.method === "GET" && (req.url === "/" || req.url === "/index.html")) {
+      if (tryServeStatic("/index.html", res)) return;
+      // Fall back to the legacy inline HTML if the UI isn't present.
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(HTML);
+      return;
+    }
+    // GET /legacy → the original inline HTML (for debugging).
+    if (req.method === "GET" && req.url === "/legacy") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(HTML);
       return;
@@ -1641,6 +1702,10 @@ const server = createServer(async (req, res) => {
       if (req.method === "GET" && sub === "/stream") return handleJobStream(req, res, jobId);
       if (req.method === "POST" && sub === "/inputs") return handleJobInput(req, res, jobId);
     }
+    // Fall-through for any GET: try to serve as a static asset from the UI
+    // dir. Covers /components/*, /fonts/*, /mock-*.js, etc.
+    if (req.method === "GET" && req.url && tryServeStatic(req.url, res)) return;
+
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not found");
   } catch (e: any) {
