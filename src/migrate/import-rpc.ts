@@ -35,7 +35,10 @@ export type ImportProgressEvent =
   | { kind: "template_failed"; templateName: string; error: string }
   | { kind: "font_uploading"; family: string; fileName: string }
   | { kind: "font_registered"; family: string }
-  | { kind: "fonts_done"; uploaded: number; skipped: number };
+  | { kind: "fonts_done"; uploaded: number; skipped: number }
+  | { kind: "flow_started"; flowName: string; placeholderCount: number }
+  | { kind: "flow_created"; flowName: string; flowId: string }
+  | { kind: "flow_failed"; flowName: string; error: string };
 
 export interface ImportOptions {
   jwt: string;
@@ -410,4 +413,194 @@ function mapAccountAddress(account: KlaviyoAccount) {
     cityStateZip: cityStateZip.trim(),
     country: a.country || "",
   };
+}
+
+// ─── Flow import ───────────────────────────────────────────────────────────
+
+export interface FlowImportBundle {
+  /** Output of src/flow/parser.ts → parseFlow(). */
+  automation: {
+    team?: string;
+    name: string;
+    description?: string;
+    enabled: boolean;
+    steps: Array<Record<string, any>>;
+    schemaType: string;
+    category: string;
+    [k: string]: unknown;
+  };
+  warnings: Array<{ kind: string; message: string; actionId?: string }>;
+  placeholderTemplates: Array<{
+    sentinelId: string;
+    klaviyoTemplateId: string | null;
+    subject: string;
+    fromEmail: string | null;
+    fromLabel: string | null;
+    previewText: string | null;
+    fullTemplate: Record<string, any> | null;
+    templateWarnings: string[];
+  }>;
+}
+
+export interface FlowImportResult {
+  flowId: string;
+  name: string;
+  createdTemplateCount: number;
+  blankTemplateCount: number;
+}
+
+/**
+ * Full-automation import: for each placeholder in the bundle, create the
+ * corresponding EmailTemplate (using the parsed `fullTemplate` if present,
+ * otherwise a blank with just subject/preview metadata), swap the sentinels
+ * in the automation's send_email steps, then POST the automation via
+ * createAdvancedFlow. Team is derived from the JWT's `aud` claim.
+ *
+ * Does NOT handle font upload here — callers should invoke
+ * `uploadFontsForTemplates()` once per batch (with the union of all
+ * `placeholder.fullTemplate._fontPlan`s across the flows they're importing)
+ * BEFORE calling this function so templates reference already-registered
+ * custom fonts.
+ */
+export async function importFlowRpc(
+  bundle: FlowImportBundle,
+  options: ImportOptions,
+): Promise<FlowImportResult> {
+  options.onProgress?.({
+    kind: "flow_started",
+    flowName: bundle.automation.name,
+    placeholderCount: bundle.placeholderTemplates.length,
+  });
+
+  // 1. Create EmailTemplates for every placeholder. Build a sentinel→real-id
+  //    map to swap into the automation steps.
+  const sentinelToRealId = new Map<string, string>();
+  let createdTemplateCount = 0;
+  let blankTemplateCount = 0;
+
+  for (const ph of bundle.placeholderTemplates) {
+    const templateJson = ph.fullTemplate
+      ? {
+          ...ph.fullTemplate,
+          // Merge the Klaviyo send-email metadata over whatever the HTML
+          // parser inferred (subject/name/preview are more accurate from
+          // the action than from the template HTML).
+          subject: ph.subject || ph.fullTemplate.subject || "",
+          emailPreview: ph.previewText ?? ph.fullTemplate.emailPreview ?? null,
+          name: `${bundle.automation.name} — ${ph.subject || ph.fullTemplate.name || "email"}`.slice(0, 200),
+        }
+      : buildBlankTemplate(bundle.automation.name, ph);
+
+    try {
+      const created = await importTemplateRpc(templateJson, options);
+      sentinelToRealId.set(ph.sentinelId, created.templateId);
+      if (ph.fullTemplate) createdTemplateCount++;
+      else blankTemplateCount++;
+    } catch (e: any) {
+      // Don't abort the whole flow on one template failure — we'll fall back
+      // to a blank and let the merchant fix it in the UI. Progress event was
+      // already emitted by importTemplateRpc on failure.
+      try {
+        const blank = await importTemplateRpc(
+          buildBlankTemplate(bundle.automation.name, ph),
+          options,
+        );
+        sentinelToRealId.set(ph.sentinelId, blank.templateId);
+        blankTemplateCount++;
+      } catch {
+        // If even the blank fails, we can't proceed.
+        throw new Error(
+          `Template creation failed for "${ph.subject}": ${e.message ?? e}`,
+        );
+      }
+    }
+  }
+
+  // 2. Swap sentinel templateIds in the automation.
+  const steps = bundle.automation.steps.map((step) => {
+    if (step.type !== "send_email") return step;
+    const real = sentinelToRealId.get(String(step.templateId ?? ""));
+    if (!real) return step; // leave as-is; server will reject, caller sees the error
+    return { ...step, templateId: real };
+  });
+
+  // 3. Strip fields createAdvancedFlow doesn't accept, derive team from JWT.
+  //    The schema omits _id, createdAt, updatedAt, versionGroupId server-side.
+  const {
+    team: _discardTeam, // server uses ctx.team from JWT
+    versionGroupId: _discardVersionGroupId,
+    ...flowRest
+  } = bundle.automation;
+
+  const newFlow = { ...flowRest, steps, team: await resolveTeamId(options) };
+
+  let created: any;
+  try {
+    created = await postMarketingRpc(
+      "createAdvancedFlow",
+      { newFlow, setIndex: true },
+      options,
+    );
+  } catch (e: any) {
+    options.onProgress?.({
+      kind: "flow_failed",
+      flowName: bundle.automation.name,
+      error: e.message ?? String(e),
+    });
+    throw e;
+  }
+  const flowId = String(created.id ?? created._id ?? "");
+  options.onProgress?.({
+    kind: "flow_created",
+    flowName: bundle.automation.name,
+    flowId,
+  });
+  return {
+    flowId,
+    name: bundle.automation.name,
+    createdTemplateCount,
+    blankTemplateCount,
+  };
+}
+
+function buildBlankTemplate(
+  flowName: string,
+  ph: FlowImportBundle["placeholderTemplates"][number],
+): Record<string, any> {
+  return {
+    name: `[Placeholder] ${flowName} — ${ph.subject || ph.klaviyoTemplateId || "email"}`.slice(0, 200),
+    subject: ph.subject || "",
+    emailPreview: ph.previewText ?? null,
+    templateType: "marketing",
+    category: "Marketing",
+    schemaType: "marketing_email",
+    sections: [],
+    emailBackgroundColor: "#f7f7f7",
+    contentBackgroundColor: "#ffffff",
+    address: {
+      businessAddress: "",
+      legalAddress: "",
+      cityStateZip: "",
+      country: "",
+    },
+    linkColor: "#0000ee",
+    isPlainText: false,
+  };
+}
+
+// Cache: one /team call per ImportOptions.jwt.
+const teamIdCache = new WeakMap<object, Promise<string>>();
+async function resolveTeamId(options: ImportOptions): Promise<string> {
+  // WeakMap keyed on `options` — jwt usually stays the same per session.
+  if (!teamIdCache.has(options)) {
+    teamIdCache.set(
+      options,
+      getTeam(options).then((t) => {
+        const id = t?._id ?? t?.id;
+        if (!id) throw new Error("Could not resolve team ID from /team response");
+        return String(id);
+      }),
+    );
+  }
+  return teamIdCache.get(options)!;
 }

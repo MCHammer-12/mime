@@ -20,9 +20,17 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exportTemplate } from "../export-template.js";
 import { fetchAccount } from "../fetch-account.js";
+import { parseFlow } from "../flow/parser.js";
+import { createTemplateResolver } from "../flow/template-resolver.js";
+import type { KlaviyoFlow } from "../flow/types.js";
 import { klaviyo, paginate, slug } from "../klaviyo.js";
+import { fetchAllMetrics } from "../extract-metrics.js";
 import type { ImportProgressEvent } from "./import-rpc.js";
-import { importTemplateRpc, uploadFontsForTemplates } from "./import-rpc.js";
+import {
+  importFlowRpc,
+  importTemplateRpc,
+  uploadFontsForTemplates,
+} from "./import-rpc.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
 const DEFAULT_REDOAPP_DIR = join(homedir(), "code/redoapp");
@@ -334,6 +342,7 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
   const storeId = body.storeId as string;
   const merchantSlug = body.merchantSlug as string;
   const templateIds = (body.templateIds ?? []) as string[];
+  const flowIds = (body.flowIds ?? []) as string[];
   const skipAi = body.skipAi !== false; // default true for the web UI
   // Hosted deploys (Replit etc.) can't run bazel — force export-only regardless of UI toggle.
   const anthropicKey = body.anthropicKey as string | undefined;
@@ -350,9 +359,15 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
   const redoappDir =
     (body.redoappDir as string | undefined) || process.env.REDOAPP_DIR || DEFAULT_REDOAPP_DIR;
 
-  if (!klaviyoKey || !storeId || !merchantSlug || templateIds.length === 0) {
+  if (
+    !klaviyoKey ||
+    !storeId ||
+    !merchantSlug ||
+    (templateIds.length === 0 && flowIds.length === 0)
+  ) {
     return json(res, 400, {
-      error: "klaviyoKey, storeId, merchantSlug, and templateIds required",
+      error:
+        "klaviyoKey, storeId, merchantSlug, and at least one of templateIds/flowIds required",
     });
   }
 
@@ -431,9 +446,14 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
       }
     }
 
-    emit(res, { kind: "summary", exported: exported.length, failed: failures.length });
+    if (templateIds.length > 0) {
+      emit(res, { kind: "summary", exported: exported.length, failed: failures.length });
+    }
 
-    if (exported.length === 0 || !runImport) {
+    const hasTemplatesToImport = exported.length > 0;
+    const hasFlowsToImport = flowIds.length > 0;
+
+    if (!runImport || (!hasTemplatesToImport && !hasFlowsToImport)) {
       if (IS_HOSTED_DEPLOY && !redoJwt && wantsImport) {
         emit(res, { kind: "info", text: "Import skipped. Paste a Redo auth token to import via RPC." });
       }
@@ -441,6 +461,15 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
       emit(res, { kind: "done", importSkipped: true, importCommand: cmd });
       res.end();
       return;
+    }
+
+    // Flow import requires RPC (merchant JWT) — bazel path for flows isn't
+    // wired through the server yet. If user requested flows but no JWT, warn.
+    if (hasFlowsToImport && !useRpcImport) {
+      emit(res, {
+        kind: "warn",
+        text: `Flow import requires a Redo auth token (JWT). Skipping ${flowIds.length} flow(s). Templates below will still import via bazel.`,
+      });
     }
 
     // ─── Import via marketing-rpc + font upload (Replit + local) ──────
@@ -456,80 +485,187 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
         }
       };
 
-      // Load the exported template JSON once so we can upload fonts (union
-      // across the batch) before creating templates.
-      const loaded: Array<{ id: string; name: string; path: string; json: any }> = [];
-      for (const exp of exported) {
-        try {
-          const json = JSON.parse(readFileSync(exp.path, "utf8"));
-          loaded.push({ ...exp, json });
-        } catch (e: any) {
-          emit(res, { kind: "fail", id: exp.id, name: exp.name, error: `read export: ${e.message ?? e}` });
+      // ─── Template phase ────────────────────────────────────────────
+      let templateImportOk = 0;
+      let templateImportFail = 0;
+      if (hasTemplatesToImport) {
+        // Load the exported template JSON once so we can upload fonts (union
+        // across the batch) before creating templates.
+        const loaded: Array<{ id: string; name: string; path: string; json: any }> = [];
+        for (const exp of exported) {
+          try {
+            const json = JSON.parse(readFileSync(exp.path, "utf8"));
+            loaded.push({ ...exp, json });
+          } catch (e: any) {
+            emit(res, { kind: "fail", id: exp.id, name: exp.name, error: `read export: ${e.message ?? e}` });
+          }
         }
-      }
 
-      // Font upload (once per batch). Unresolved fonts are reported but do
-      // NOT block import — templates render with the fallback in that case
-      // and the merchant can resolve manually afterward.
-      try {
-        emit(res, { kind: "step", label: "Uploading brand fonts…" });
-        const fontResult = await uploadFontsForTemplates(loaded.map((l) => l.json), {
-          jwt: redoJwt!,
-          serverBase,
-          account,
-          onProgress: onFontProgress,
-        });
-        emit(res, {
-          kind: "fonts_done",
-          uploaded: fontResult.uploaded,
-          registeredFamilies: fontResult.registeredFamilies,
-          skipped: fontResult.skipped,
-          unresolved: fontResult.unresolved,
-        });
-        for (const u of fontResult.unresolved) {
-          emit(res, {
-            kind: "warn",
-            text: `unresolved font "${u.family}" (${u.reason}) — used by ${u.usedBy.join(", ")}. Add manually in brand kit.`,
-          });
-        }
-      } catch (e: any) {
-        emit(res, { kind: "warn", text: `font upload failed: ${e.message ?? e}. Continuing with template import.` });
-      }
-
-      // Create templates.
-      emit(res, { kind: "step", label: "Creating templates…" });
-      let importOk = 0;
-      let importFail = 0;
-      for (const l of loaded) {
-        emit(res, { kind: "step", label: `Importing ${l.name}…` });
+        // Font upload (once per batch). Unresolved fonts are reported but do
+        // NOT block import.
         try {
-          const result = await importTemplateRpc(l.json, {
+          emit(res, { kind: "step", label: "Uploading brand fonts…" });
+          const fontResult = await uploadFontsForTemplates(loaded.map((l) => l.json), {
             jwt: redoJwt!,
             serverBase,
             account,
-            onProgress: (ev: ImportProgressEvent) => {
-              if (ev.kind === "filter_created") {
-                emit(res, { kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
-              } else if (ev.kind === "template_created") {
-                emit(res, { kind: "log", source: "stdout", text: `template created: ${ev.templateId}` });
-              }
-            },
+            onProgress: onFontProgress,
           });
-          importOk++;
-          emit(res, { kind: "imported", id: l.id, name: l.name, templateId: result.templateId });
+          emit(res, {
+            kind: "fonts_done",
+            uploaded: fontResult.uploaded,
+            registeredFamilies: fontResult.registeredFamilies,
+            skipped: fontResult.skipped,
+            unresolved: fontResult.unresolved,
+          });
+          for (const u of fontResult.unresolved) {
+            emit(res, {
+              kind: "warn",
+              text: `unresolved font "${u.family}" (${u.reason}) — used by ${u.usedBy.join(", ")}. Add manually in brand kit.`,
+            });
+          }
         } catch (e: any) {
-          importFail++;
-          const msg = e.message ?? String(e);
-          emit(res, { kind: "fail", id: l.id, name: l.name, error: `import: ${msg}` });
+          emit(res, { kind: "warn", text: `font upload failed: ${e.message ?? e}. Continuing with template import.` });
+        }
+
+        emit(res, { kind: "step", label: "Creating templates…" });
+        for (const l of loaded) {
+          emit(res, { kind: "step", label: `Importing ${l.name}…` });
+          try {
+            const result = await importTemplateRpc(l.json, {
+              jwt: redoJwt!,
+              serverBase,
+              account,
+              onProgress: (ev: ImportProgressEvent) => {
+                if (ev.kind === "filter_created") {
+                  emit(res, { kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
+                } else if (ev.kind === "template_created") {
+                  emit(res, { kind: "log", source: "stdout", text: `template created: ${ev.templateId}` });
+                }
+              },
+            });
+            templateImportOk++;
+            emit(res, { kind: "imported", id: l.id, name: l.name, templateId: result.templateId });
+          } catch (e: any) {
+            templateImportFail++;
+            const msg = e.message ?? String(e);
+            emit(res, { kind: "fail", id: l.id, name: l.name, error: `import: ${msg}` });
+          }
         }
       }
-      emit(res, { kind: "done", importMethod: "rpc", imported: importOk, importFailed: importFail });
+
+      // ─── Flow phase ────────────────────────────────────────────────
+      let flowImportOk = 0;
+      let flowImportFail = 0;
+      if (hasFlowsToImport) {
+        emit(res, { kind: "step", label: `Fetching Klaviyo metrics…` });
+        const metrics = await fetchAllMetrics(klaviyoKey);
+
+        // Resolver uses on-demand Klaviyo template fetches (flow-embedded
+        // templates aren't in the /templates/ listing). Falls back to disk
+        // if extract-templates.ts has been run for this merchant.
+        const templateResolver = createTemplateResolver({
+          merchantDir: join(MIME_ROOT, "migrations", merchantSlug),
+          account,
+          skipAi,
+          klaviyoApiKey: klaviyoKey,
+        });
+
+        for (const flowId of flowIds) {
+          emit(res, { kind: "step", label: `Fetching flow ${flowId}…` });
+          let flowDetail: any;
+          try {
+            flowDetail = await klaviyo(
+              `/flows/${flowId}/?additional-fields%5Bflow%5D=definition`,
+              klaviyoKey,
+            );
+          } catch (e: any) {
+            flowImportFail++;
+            emit(res, { kind: "fail", id: flowId, name: flowId, error: `fetch flow: ${e.message ?? e}` });
+            continue;
+          }
+          const flowName = flowDetail?.data?.attributes?.name ?? flowId;
+
+          emit(res, { kind: "step", label: `Parsing ${flowName}…` });
+          let parsed;
+          try {
+            parsed = await parseFlow(flowDetail as KlaviyoFlow, metrics, {
+              teamId: storeId,
+              templateResolver,
+            });
+          } catch (e: any) {
+            flowImportFail++;
+            emit(res, { kind: "fail", id: flowId, name: flowName, error: `parse flow: ${e.message ?? e}` });
+            continue;
+          }
+          if (!parsed.automation) {
+            flowImportFail++;
+            emit(res, {
+              kind: "fail",
+              id: flowId,
+              name: flowName,
+              error: `skipped: ${parsed.skipped?.reason ?? "could not resolve trigger"}`,
+            });
+            continue;
+          }
+
+          emit(res, { kind: "step", label: `Importing ${flowName}…` });
+          try {
+            const result = await importFlowRpc(
+              {
+                automation: parsed.automation as any,
+                warnings: parsed.warnings as any,
+                placeholderTemplates: parsed.placeholderTemplates as any,
+              },
+              {
+                jwt: redoJwt!,
+                serverBase,
+                account,
+                onProgress: (ev: ImportProgressEvent) => {
+                  if (ev.kind === "filter_created") {
+                    emit(res, { kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
+                  } else if (ev.kind === "template_created") {
+                    emit(res, { kind: "log", source: "stdout", text: `  email template created: ${ev.templateId}` });
+                  } else if (ev.kind === "flow_created") {
+                    emit(res, { kind: "log", source: "stdout", text: `flow created: ${ev.flowId}` });
+                  }
+                },
+              },
+            );
+            flowImportOk++;
+            emit(res, {
+              kind: "flow_imported",
+              id: flowId,
+              name: flowName,
+              flowId: result.flowId,
+              createdTemplateCount: result.createdTemplateCount,
+              blankTemplateCount: result.blankTemplateCount,
+              warningCount: parsed.warnings.length,
+            });
+          } catch (e: any) {
+            flowImportFail++;
+            emit(res, { kind: "fail", id: flowId, name: flowName, error: `import: ${e.message ?? e}` });
+          }
+        }
+      }
+
+      emit(res, {
+        kind: "done",
+        importMethod: "rpc",
+        imported: templateImportOk,
+        importFailed: templateImportFail,
+        flowsImported: flowImportOk,
+        flowsFailed: flowImportFail,
+      });
       return;
     }
 
-    // ─── Import via bazel (local only) ─────────────────────────────────
-    // The .redo-template.json files are already on disk in templatesDir.
-    // redo/manage:import-klaviyo-templates reads them all from --mime-dir.
+    // ─── Import via bazel (local only, templates only) ─────────────────
+    if (!hasTemplatesToImport) {
+      emit(res, { kind: "done", importSkipped: true });
+      res.end();
+      return;
+    }
     emit(res, { kind: "step", label: "Importing into Redo (bazel)…" });
 
     const importArgs = [
