@@ -1,5 +1,45 @@
 # Session Log
 
+## 2026-04-21 — Package E2: inline coupon → AI text rewrite + placeholder discount block
+
+**Done**
+- **`src/ai-rewrite.ts` (new)** — portable `@anthropic-ai/sdk` client that works on Replit (`AI_INTEGRATIONS_ANTHROPIC_BASE_URL` + `AI_INTEGRATIONS_ANTHROPIC_API_KEY` env vars) and locally (`ANTHROPIC_API_KEY`) with zero code changes. Single concrete implementation — no `LLMClient` abstraction layer; the SDK is the abstraction.
+- **Model: `claude-sonnet-4-6`** with system-prompt `cache_control: ephemeral`. System prompt is static across all rewrites in a migration → first call writes the cache (~1.25×), subsequent calls within 5 min read it (~0.1×).
+- **System prompt** instructs the model to: (a) remove the `{% coupon_code %}` variable, (b) restructure the sentence so it flows into a discount block that will be inserted immediately below, (c) preserve all HTML tags/inline styles, (d) keep other liquid variables intact (`{{ person.first_name }}`, etc). Three few-shot examples in the prompt cover the most common phrasings.
+- **`src/transform.ts`** — converted to async. Text-block handler now: (1) runs E1 variable substitution, (2) detects surviving `{% coupon_code %}` via `hasInlineCoupon`, (3) calls `rewriteInlineCoupon`, (4) emits `[rewrittenText, placeholderDiscountBlock]`. The placeholder DiscountBlock is styled from the text block's own fields (inherits `fontFamily`, `textColor`, `sectionColor`, `sectionPadding`) with `fontSize: 32`, `alignment: center`, no `discountId` (wired later in the import executor).
+- **flatMap at the top level** (`for` loop building `out[]` with `push(...transformed)`) so a single input block can emit multiple output blocks. One-to-many `transformBlock` signature is the key change.
+- **Column cells: intentionally skipped.** ColumnBlock holds a single block per column — can't splice a discount block as a sibling inside a column. Logs a console warning when detected; AI still rewrites the text in the cell.
+- **Rule-based fallback when AI is off.** When `SKIP_AI=1` (or no API key set), `ruleBasedStripInlineCoupon` deterministically excises the common `"USE CODE {% coupon_code 'X' %} FOR N% OFF"` phrase and still emits a discount block. If the phrase doesn't match the regex, the coupon stays in the text (merchant cleans up manually) and a discount block is still appended. Every inline-coupon template produces a discount block whether or not the AI ran.
+- **`src/export-template.ts`** — awaits the async transform, reports `aiRewrites` count + token usage (input / output / cache read / cache write) in the console summary.
+- **`transformSections(sections, account | null, opts)`** — `account` can now be null (when Klaviyo API fetch fails or `KLAVIYO_API_KEY` is missing). Variable substitution gates on the presence of each org field; coupon detection + rewrite still run. Missing-key fallback no longer drops discount blocks entirely.
+
+**Files created/changed**
+- `src/ai-rewrite.ts` (new)
+- `src/transform.ts` — async, coupon-rewrite pipeline, null-safe account, rule-based AI-off fallback
+- `src/export-template.ts` — await transform, report AI usage
+- `package.json` — `@anthropic-ai/sdk` dep added
+
+**Decisions (see DECISIONS.md)**
+- No `LLMClient` abstraction layer. Replit's "AI Integrations" is standard Anthropic SDK + auto-provisioned env vars — same code runs both places.
+- Placeholder `DiscountBlock` from parser + transform does NOT carry `discountId`. Real discount object linking happens in the redoapp import executor, not in mime's export.
+- Inline-coupon rewrite removes the variable AND always inserts a placeholder discount block below — single-path, deterministic structure. The text's AI rewrite assumes a block below; no branch for "maybe keep the variable".
+
+**Verified**
+- Dry run on `test-account/RfTv2d-cart-discount-1.html` (single-coupon, body-copy only) — `SKIP_AI`/no-key path emits rule-based strip + discount block cleanly; warnings suppressed; font plan still runs; section count goes from 10 → 11 (discount block inserted).
+- Type-check (`npx tsc --noEmit`) — no new errors in `ai-rewrite.ts` / `transform.ts` / `export-template.ts`.
+
+**Not done (deferred)**
+- Live AI run — Michael holding the Anthropic key. All 4 inline-coupon templates (`RfTv2d`, `SvGNVx`, `XJkGxs`, `YyKZYQ`) ready to smoke-test once a key is available.
+- Real Redo discount-object creation + `discountId` wiring. Out of scope: belongs in the redoapp import executor since it needs team-scoped API auth and a discount already exists.
+- URL-param inline coupons (`href="...?discount={% coupon_code 'X' %}"` — observed in grid-pixel templates) not handled this pass. Separate liquid-substitution concern.
+
+**Next steps**
+1. User provides Anthropic key → run the 4 inline-coupon templates end-to-end, eyeball the rewrites in element-viewer.
+2. If the Sonnet 4.6 output needs tuning: iterate the system prompt (more examples, stricter tone-preservation instructions).
+3. Wire the discount-object creation step into the redoapp import executor (`~/code/redoapp/redo/manage/src/import-klaviyo-templates.ts`). Input: parsed `DiscountBlock` with no `discountId` + migration-config prefix + inferred amount. Output: `DiscountBlock` with real `discountId`.
+
+---
+
 ## 2026-04-21 — Package E4: REVIEW list aggregator + two url-mapping gap fixes
 
 **Done**

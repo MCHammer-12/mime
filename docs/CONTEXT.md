@@ -4,7 +4,7 @@
 Automation project for manual processes Michael does at Redo. Primary target: Klaviyo → Redo email migration workflow, and improving Redo's existing HTML → JSON email parser.
 
 ## Status
-End-to-end import pipeline working: parse → transform → export → import to local redoapp → render in builder. Three templates imported successfully (Newsletter #8, Newsletter #4, merchant-2 + merchant-3 accounts). Packages A-D + F (parser polish) + E1 (variable substitution) + E4 (REVIEW aggregator) complete. 804 templates parse across 3 corpora with 0 failures. Import executor in redoapp (uncommitted) handles product filter creation. Next: E2 (coupon → discount objects + AI rewrite), E3 (font provisioning, partially landed), E5 (drop-shadow CDN upload).
+End-to-end import pipeline working: parse → transform → export → import to local redoapp → render in builder. Three templates imported successfully (Newsletter #8, Newsletter #4, merchant-2 + merchant-3 accounts). Packages A-D + F (parser polish) + E1 (variable substitution) + E2 (inline coupon → AI rewrite + placeholder discount block) + E4 (REVIEW aggregator) complete. 804 templates parse across 3 corpora with 0 failures. Import executor in redoapp (uncommitted) handles product filter creation. Next: live AI smoke-test of E2 (needs Anthropic key), discount-object creation in the redoapp import executor, E3 (font provisioning, partially landed), E5 (drop-shadow CDN upload).
 
 ## Two tracks
 - **current/** — deterministic Klaviyo HTML → Redo Section[] parser (no LLM). Uses cheerio to walk kl-*/gxp-kl-* classes. Production renderer cloned from redoapp for local verification.
