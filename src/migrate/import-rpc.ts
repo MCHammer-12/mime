@@ -536,7 +536,10 @@ export async function importFlowRpc(
 
   let created: any;
   try {
-    created = await postMarketingRpc(
+    // createAdvancedFlow is mounted on the general /rpc router, NOT /marketing-rpc.
+    // createEmailTemplate + createProductFilter are on /marketing-rpc, which is
+    // why they worked above. Confirmed in redoapp/redo/merchant/server/src/index.ts:302.
+    created = await postRpc(
       "createAdvancedFlow",
       { newFlow, setIndex: true },
       options,
