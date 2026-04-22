@@ -1,5 +1,24 @@
 # Session Log
 
+## 2026-04-15 — Spacer element deep-dive (parser + renderer fix)
+
+**Done**
+- Fixed `parseSpacerBlock` — was returning null for Klaviyo spacers because it summed the outer wrapper TD's `padding-top + padding-bottom` (usually 0). Klaviyo actually puts the height in an inner `<div style="height:Npx;line-height:Npx;">` and the background on the inner TD via `background:` shorthand (not `background-color:`). New parser reads the inner div height, sums outer + inner TD padding, and checks inner/outer TD `background` and `background-color`.
+- Fixed renderer — `MjmlSection` defaults to `padding: 20px 0`, so a 9px spacer was rendering as 49px. Added explicit `padding="0"` on section/column/spacer.
+- Verified via `element-viewer.ts`: Kc2UBC (height=9, #ffffff), QPETZp (height=20, #F8F8F8). Nugivf has no spacers (expected).
+
+**Files changed**
+- `src/parser/blocks/spacer.ts` — read inner div height + inner TD background; sum outer+inner padding
+- `src/renderer/blocks/spacer.tsx` — explicit `padding="0"` on section/column/spacer
+
+**Note:** Parser signature later refactored to `_ctx: ParseContext` by the concurrent integration session; extraction logic preserved.
+
+**Next steps**
+1. **Cross-cutting audit:** `MjmlSection`'s default `padding: 20px 0` likely inflates every block that doesn't explicitly zero or set section padding. Worth a sweep across text/image/button/line renderers.
+2. Spacer `sectionPadding` is hardcoded to `{0,0,0,0}`. If a template ever has horizontal padding on the wrapper, swap in `parsePadding(outerStyle)`.
+
+---
+
 ## 2026-04-15 — Image element deep-dive + Klaviyo checkout URL mapping
 
 **Context**
