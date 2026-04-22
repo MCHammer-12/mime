@@ -322,7 +322,14 @@ async function uploadAttachment(
     // non-JSON error body
   }
   if (!res.ok) {
-    const msg = body?.error ?? body?.message ?? text?.slice(0, 200) ?? res.statusText;
+    // Surface the full error body — redoapp's RPC wrapper sometimes returns
+    // plain-text 500s with the real detail in the body. Truncated messages
+    // used to hide the useful bits ("Internal server error" vs. the Zod
+    // stack trace that follows it).
+    const msg =
+      body?.error ??
+      body?.message ??
+      (text && text.length > 0 ? text.slice(0, 2000) : res.statusText);
     throw new Error(`upload-attachment ${res.status}: ${msg}`);
   }
   const url = body?.url;
@@ -340,7 +347,7 @@ async function getTeam(options: ImportOptions): Promise<any> {
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`get team ${res.status}: ${text?.slice(0, 200) ?? res.statusText}`);
+    throw new Error(`get team ${res.status}: ${text?.slice(0, 2000) ?? res.statusText}`);
   }
   try {
     return text ? JSON.parse(text) : null;
@@ -390,7 +397,14 @@ async function postAtPath(
     // non-JSON error body
   }
   if (!res.ok) {
-    const msg = body?.error ?? body?.message ?? text?.slice(0, 200) ?? res.statusText;
+    // Surface the full error body — redoapp's RPC wrapper sometimes returns
+    // plain-text 500s with the real detail in the body. Truncated messages
+    // used to hide the useful bits ("Internal server error" vs. the Zod
+    // stack trace that follows it).
+    const msg =
+      body?.error ??
+      body?.message ??
+      (text && text.length > 0 ? text.slice(0, 2000) : res.statusText);
     throw new Error(`POST ${path} ${res.status}: ${msg}`);
   }
   if (body?.error) {
@@ -552,6 +566,22 @@ export async function importFlowRpc(
       options,
     );
   } catch (e: any) {
+    // Log a compact breadcrumb of the payload that failed validation so it
+    // shows up in the UI's job log. Full payload would be huge; summarize.
+    const stepTypes: Record<string, number> = {};
+    for (const s of newFlow.steps ?? []) {
+      const t = String((s as any).type ?? "?");
+      stepTypes[t] = (stepTypes[t] ?? 0) + 1;
+    }
+    options.onProgress?.({
+      kind: "template_failed" as any,
+      templateName: `[flow debug] ${bundle.automation.name}`,
+      error:
+        `schemaType=${(newFlow as any).schemaType} ` +
+        `category=${(newFlow as any).category} ` +
+        `team=${(newFlow as any).team} ` +
+        `steps=${(newFlow.steps ?? []).length} (${JSON.stringify(stepTypes)})`,
+    });
     options.onProgress?.({
       kind: "flow_failed",
       flowName: bundle.automation.name,
