@@ -1,5 +1,71 @@
 # Session Log
 
+## 2026-04-15 — Image element deep-dive + Klaviyo checkout URL mapping
+
+**Context**
+Continued the per-element deep-dive from `plans/element-deep-dive.md`. Scope:
+`src/parser/blocks/image.ts` and `src/renderer/blocks/image.tsx`. Test fixtures:
+Nugivf logo + hero, QP9hma grid-pixel (gxp- variant), QPETZp flow template
+(including a 200px centered image), RfTv2d/WyxTcg/SvGNVx/Wyj7Sk cart+checkout
+discount templates, UNaeqg checkout-gloves (image-as-CTA design).
+
+**Done — image parser + renderer**
+- **Padding-td fallback:** when `kl-img-base-auto-width` class is absent (e.g.
+  the QPETZp 200px image's container td has `class=""`), fall back to the td
+  containing the `<img>` tag, then to the kl-image td itself. Fixed
+  silent-zero-padding parse of images in this shape.
+- **Constrained-width centering:** if the image's container td declares an
+  explicit `width:` smaller than `EMAIL_MAX_WIDTH_PX - sectionPadding`,
+  compute horizontal inner padding to center the image at its native size.
+  Fixes QP9hma 560px image (was stretching to 580px; now `padding={10,20,10,20}`)
+  and QPETZp 200px image (was stretching to 600px; now `padding={0,200,0,200}`).
+- **`showCaption: false`** on all imports (Zod schema requires it).
+- **sectionColor fallback** reads `$wrapper.attr("style")` in addition to the
+  first td's inline style.
+- **Renderer: inner padding now applied.** `EmailImage` threads
+  `props.padding` into `MjmlText` padding props; `NestedEmailImage` wraps
+  `WithLink` in a div that applies `props.padding`. Previously parsed but
+  never rendered.
+
+**Done — Klaviyo checkout URL → Redo dynamic variable**
+- Confirmed with Redo team that `schemaInstance.checkoutUrl` is already wired
+  end-to-end for button blocks: schema-registered on all four abandonment
+  schemas, populated at send time by the abandonment email handler, resolved
+  in `button.tsx:268-272`, exposed in the builder's dynamic-variable dropdown.
+  Only gap on Redo's side: not yet supported on image blocks.
+- Created `src/parser/url-mapping.ts` with `mapKlaviyoLink(url)` returning
+  either `{linkType:"dynamic-variable", schemaFieldName:"checkoutUrl"}` or
+  `{linkType:"web-page", buttonLink}`. Detects `{{ event.URL }}`,
+  `{{ event.CheckoutURL }}`, `{{ event.extra.checkout_url }}` (whitespace +
+  Liquid-filter tolerant).
+- Wired into `src/parser/blocks/button.ts`. Verified: three abandoned-cart
+  templates (XRXjBJ, VGQunZ, XSyzE6) now emit correct dynamic-variable shape;
+  static campaign buttons (QP9hma) unchanged.
+- Commits `3bea718` (url-mapping hoist + three-state classifier) and
+  `caf90ad` (types aligned with prod Zod) landed earlier today.
+
+**External dependency filed**
+- Sent Redo's internal AI coder instructions to add dynamic-variable support
+  to the image block (mirror of the button work: `clickthroughLinkType` +
+  `clickthroughSchemaFieldName` on ImageBlock, renderer resolution via
+  `schemaInstance`, builder UI picker). PR will be reviewed later. Once it
+  lands, 10-minute parser update in `image.ts` using the same
+  `mapKlaviyoLink()` helper will close the loop for the image-as-CTA pattern
+  heavy in UNaeqg (9 images, 2 with `{{ event.URL }}` clickthroughs).
+
+**Memory updates**
+- Added `project_image_as_button_conversion.md` documenting the original
+  "need AI + flow context" framing. Partially obsoleted once the image
+  dynamic-variable PR lands — revisit then.
+
+**Next steps**
+1. Wait for Redo image dynamic-variable PR → update `image.ts` parser
+2. Re-run `element-viewer image` on UNaeqg and the abandoned-cart templates
+   to verify CTA images produce the correct dynamic-variable JSON
+3. Move on to the next element in the deep-dive plan (text, header, menu, etc.)
+
+---
+
 ## 2026-04-15 — Footer block deep-dive (reversed — keep as Text)
 
 **Done**
