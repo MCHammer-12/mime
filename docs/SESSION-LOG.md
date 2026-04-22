@@ -1,5 +1,28 @@
 # Session Log
 
+## 2026-04-15 — Socials element deep-dive
+
+**Done**
+- Fixed `parseSocialsBlock` against H76ZS6 (`/subtle/` → gray), KT5Xxh (`/default/` → prod-invalid `original`), Kc2UBC (`/subtle/` → gray).
+- Prod `SocialIconColor` enum is `black`/`white`/`gray` only — `original` fails Zod validation. Mapping helper now returns `BLACK` for `/default/` Klaviyo CDN icons.
+- Color precedence: prefer a specific style (`/subtle/`, `/solid/`, `/white/`) over `/default/` when icons mix within a block, instead of last-icon-wins (fixes the custom-tiktok-image case in KT5Xxh where the last link is a non-Klaviyo asset).
+- Alignment extracted from the wrapper's `text-align` inline style (was hardcoded `CENTER`).
+- `iconPadding` read from the first icon's `display:inline-block` parent (was last, which frequently has an empty style attribute).
+- Replaced `as any` casts with typed output (`SocialItem[]`, `SocialPlatform`, `SocialIconColor`).
+- After a parallel integration session landed `ParseContext` + `classifyKlaviyoUrl`, the parser now also runs URL classification on each social `href` for the shared `REVIEW:` / `UNSUPPORTED:` warning pipeline.
+
+**Files changed**
+- `src/parser/blocks/socials.ts`
+
+**Decisions (see DECISIONS.md)**
+- 2026-04-14 — Socials icon color: lossy mapping to prod enum. `/default/` → `black`. Michael confirmed exact icon color match isn't required for migrations as long as background, URLs, and padding are correct.
+
+**Next steps**
+1. Renderer subtracts `iconPadding` from section top/bottom — horizontal gap in Klaviyo, vertical math in the renderer. Works visually today but flag if padding ever looks off.
+2. Grep for any remaining `SocialIconColor.ORIGINAL` emissions elsewhere in the parser once the prod Zod alignment in `caf90ad` settles — types.ts still keeps the enum value, so local builder rendering is unaffected, but prod writes must not include it.
+
+---
+
 ## 2026-04-15 — Spacer element deep-dive (parser + renderer fix)
 
 **Done**
