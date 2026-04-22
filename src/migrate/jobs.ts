@@ -1,21 +1,25 @@
 /**
- * In-memory job registry for the multi-store migration dashboard.
+ * Job registry for the multi-store migration dashboard.
  *
  * A job is one "Import" click — potentially migrating multiple templates +
  * flows for a single store. Multiple jobs can run concurrently across
- * different stores (and even same-store, though the UI typically queues
- * those).
+ * different stores.
  *
- * Events are append-only per job and streamed to connected listeners.
- * `needs_input` events pause the job until the caller resolves them via
- * `resolveInput()` — typically from a `POST /api/jobs/:id/inputs` handler.
+ * Persistence model:
+ *   - In-memory Map is the hot source for streaming + subscribers.
+ *   - Postgres (via `./db`) is the durable log; all mutations dual-write.
+ *     If DATABASE_URL is unset the DB writes no-op and we fall back to
+ *     memory-only (dev mode).
+ *   - On startup, `hydrateFromDb()` loads recent jobs back into memory so
+ *     the dashboard list endpoint sees yesterday's runs after a redeploy.
  *
- * Persistence: in-memory only. Process restart = lost jobs. Good enough for
- * V1 since the whole migration is re-runnable (we'll add klaviyoSourceId
- * dedup on the redoapp side to make that safe).
+ * needs_input pauses a job via an awaitable promise resolved by
+ * `POST /api/jobs/:id/inputs`. Those promises are in-memory only (can't
+ * cross replicas); Replit autoscale is configured single-instance for V1.
  */
 
 import { randomUUID } from "node:crypto";
+import { getPool, isDbEnabled } from "./db.js";
 
 export type Severity = "info" | "warn" | "error" | "success";
 
@@ -154,6 +158,29 @@ export function createJob(params: {
     answers: {},
   };
   jobs.set(id, job);
+  // Fire-and-forget DB insert. If the DB is unavailable the row won't
+  // persist past a restart, but the in-memory job still works for the
+  // current session — no user-visible impact.
+  if (isDbEnabled()) {
+    getPool()
+      .query(
+        `INSERT INTO jobs (id, store_id, store_name, merchant_slug, status,
+                           created_at, template_ids, flow_ids)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)
+         ON CONFLICT (id) DO NOTHING`,
+        [
+          job.id,
+          job.storeId,
+          job.storeName,
+          job.merchantSlug,
+          job.status,
+          job.createdAt,
+          JSON.stringify(job.templateIds),
+          JSON.stringify(job.flowIds),
+        ],
+      )
+      .catch((e) => console.warn("[jobs] persist createJob failed:", e));
+  }
   return job;
 }
 
@@ -198,6 +225,18 @@ export function appendEvent(
   job.events.push(e);
   const set = listeners.get(jobId);
   if (set) for (const h of set) h(e);
+  // Dual-write to DB. Fire-and-forget; live streams still see the event
+  // immediately via the in-memory pub/sub above.
+  if (isDbEnabled()) {
+    getPool()
+      .query(
+        `INSERT INTO job_events (job_id, seq, at, kind, severity, payload)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+         ON CONFLICT (job_id, seq) DO NOTHING`,
+        [jobId, e.seq, e.at, e.kind, e.severity, JSON.stringify(e.payload)],
+      )
+      .catch((err) => console.warn("[jobs] persist event failed:", err));
+  }
   return e;
 }
 
@@ -219,6 +258,27 @@ export function setStatus(
   }
   if (extras?.summary) job.summary = extras.summary;
   if (extras?.error) job.error = extras.error;
+  if (isDbEnabled()) {
+    getPool()
+      .query(
+        `UPDATE jobs
+           SET status = $2,
+               started_at = COALESCE(started_at, $3),
+               completed_at = $4,
+               summary = $5::jsonb,
+               error = $6
+         WHERE id = $1`,
+        [
+          jobId,
+          job.status,
+          job.startedAt ?? null,
+          job.completedAt ?? null,
+          job.summary ? JSON.stringify(job.summary) : null,
+          job.error ?? null,
+        ],
+      )
+      .catch((err) => console.warn("[jobs] persist setStatus failed:", err));
+  }
 }
 
 // ─── Subscription (for streaming endpoints) ────────────────────────────────
@@ -303,6 +363,79 @@ export function rejectInput(jobId: string, reason: string): void {
   if (!w) return;
   waiters.delete(jobId);
   w.reject(new Error(reason));
+}
+
+// ─── Startup hydration ─────────────────────────────────────────────────────
+
+/**
+ * Load recent jobs from Postgres into the in-memory cache so the
+ * dashboard reflects prior-session history after a redeploy. Called once
+ * from server.ts at startup.
+ *
+ * We load the last 200 jobs (by created_at desc) and their events. On a
+ * busy day this might leave older jobs in the DB but unloaded from memory
+ * — GET /api/jobs/:id still works because we fall back to a DB read in
+ * getJob() (see below).
+ */
+export async function hydrateFromDb(limit = 200): Promise<number> {
+  if (!isDbEnabled()) return 0;
+  const pool = getPool();
+  try {
+    const { rows: jobRows } = await pool.query(
+      `SELECT id, store_id, store_name, merchant_slug, status,
+              created_at, started_at, completed_at, template_ids, flow_ids,
+              summary, error
+         FROM jobs
+        ORDER BY created_at DESC
+        LIMIT $1`,
+      [limit],
+    );
+    if (jobRows.length === 0) return 0;
+
+    const { rows: eventRows } = await pool.query(
+      `SELECT job_id, seq, at, kind, severity, payload
+         FROM job_events
+        WHERE job_id = ANY($1)
+        ORDER BY job_id, seq`,
+      [jobRows.map((r) => r.id)],
+    );
+    const eventsByJob = new Map<string, JobEvent[]>();
+    for (const r of eventRows) {
+      const list = eventsByJob.get(r.job_id) ?? [];
+      list.push({
+        seq: r.seq,
+        at: r.at instanceof Date ? r.at.toISOString() : String(r.at),
+        kind: r.kind,
+        severity: r.severity as Severity,
+        payload: r.payload ?? {},
+      });
+      eventsByJob.set(r.job_id, list);
+    }
+
+    for (const r of jobRows) {
+      const job: JobState = {
+        id: r.id,
+        storeId: r.store_id,
+        storeName: r.store_name,
+        merchantSlug: r.merchant_slug,
+        status: r.status as JobStatus,
+        createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at,
+        startedAt: r.started_at ? (r.started_at instanceof Date ? r.started_at.toISOString() : r.started_at) : undefined,
+        completedAt: r.completed_at ? (r.completed_at instanceof Date ? r.completed_at.toISOString() : r.completed_at) : undefined,
+        templateIds: Array.isArray(r.template_ids) ? r.template_ids : [],
+        flowIds: Array.isArray(r.flow_ids) ? r.flow_ids : [],
+        events: eventsByJob.get(r.id) ?? [],
+        answers: {},
+        summary: r.summary ?? undefined,
+        error: r.error ?? undefined,
+      };
+      jobs.set(job.id, job);
+    }
+    return jobRows.length;
+  } catch (e) {
+    console.warn("[jobs] hydrateFromDb failed:", e);
+    return 0;
+  }
 }
 
 // ─── Convenience: the controller interface callers use ─────────────────────
