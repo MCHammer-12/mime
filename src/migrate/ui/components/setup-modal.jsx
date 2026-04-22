@@ -9,6 +9,8 @@ function SetupModal({ onSave, onClose }) {
   const [name, setName] = useSM("");
   const [klaviyoKey, setKlaviyoKey] = useSM("");
   const [redoToken, setRedoToken] = useSM("");
+  const [redoServerBase, setRedoServerBase] = useSM("");
+  const [showAdvanced, setShowAdvanced] = useSM(false);
   const [show, setShow] = useSM({ klaviyo: false, token: false });
 
   const decoded = window.decodeStoreIdFromToken(redoToken);
@@ -124,6 +126,36 @@ function SetupModal({ onSave, onClose }) {
               </div>
             )}
           </label>
+
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((s) => !s)}
+              className="text-[11px] text-[#6e7681] hover:text-[#e6edf3] flex items-center gap-1"
+            >
+              <span>{showAdvanced ? "▾" : "▸"}</span>
+              <span>Advanced: Redo server URL</span>
+            </button>
+            {showAdvanced && (
+              <label className="block mt-2">
+                <div className="text-[11px] text-[#8b949e] mb-1.5">
+                  Redo server URL <span className="text-[#6e7681]">(optional)</span>
+                </div>
+                <input
+                  value={redoServerBase}
+                  onChange={(e) => setRedoServerBase(e.target.value)}
+                  placeholder="https://app-server.getredo.com"
+                  className={inputClass + " font-mono text-[12px]"}
+                  spellCheck={false}
+                />
+                <div className="text-[10px] text-[#6e7681] mt-1.5 leading-relaxed">
+                  Leave blank to import into production Redo. For testing
+                  against a locally-running redoapp, expose it via ngrok /
+                  Cloudflare tunnel and paste the public URL here.
+                </div>
+              </label>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-[#21262d] bg-[#010409]">
@@ -137,6 +169,7 @@ function SetupModal({ onSave, onClose }) {
               klaviyoKey: klaviyoKey.trim(),
               redoToken: redoToken.trim(),
               decodedStoreId: decoded,
+              redoServerBase: redoServerBase.trim() || null,
             })}
             disabled={!valid}
             className="text-[12px] font-medium text-white bg-[#238636] hover:bg-[#2ea043] disabled:bg-[#21262d] disabled:text-[#6e7681] disabled:cursor-not-allowed px-3 py-1.5 rounded-[4px] border border-[#2ea043] disabled:border-[#30363d]"

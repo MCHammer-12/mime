@@ -112,6 +112,7 @@ async function* runStream({ templateIds, flowIds, signal, store, storeName, answ
       storeName: storeName ?? creds.name ?? slug,
       merchantSlug: slug,
       redoJwt: creds.redoToken,
+      redoServerBase: creds.redoServerBase ?? undefined,
       templateIds: templateIds ?? [],
       flowIds: flowIds ?? [],
       runImport: true,
