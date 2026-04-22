@@ -1,0 +1,171 @@
+import type { MetricLookup } from "../extract-metrics.js";
+import {
+  MarketingTriggerKey,
+  SchemaType,
+  type KlaviyoFlow,
+  type KlaviyoTrigger,
+  type ParseWarning,
+} from "./types.js";
+
+export interface TriggerResolution {
+  key: MarketingTriggerKey;
+  schemaType: SchemaType;
+  // Auto-generated skip condition the importer will emit on the trigger step.
+  // UI auto-inserts this on abandonment flows; repo create does not.
+  autoSkipAbandonmentField?: "isCartAbandoned" | "isBrowseAbandoned" | "isCheckoutAbandoned";
+}
+
+// Well-known Klaviyo metric names → Redo trigger. Keys are case-insensitive.
+// Merchants customize metric NAMES rarely but metric IDs always — the name is
+// the stable key. See reference PDF §2 and project_coverage_gaps memory.
+const METRIC_NAME_MAP: Record<
+  string,
+  { key: MarketingTriggerKey; schemaType: SchemaType }
+> = {
+  "started checkout":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT },
+  "checkout started":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT },
+  "added to cart":      { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT },
+  "viewed product":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT },
+  "active on site":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT },
+  "back in stock":      { key: MarketingTriggerKey.BACK_IN_STOCK,      schemaType: SchemaType.MARKETING_BACK_IN_STOCK },
+  "low inventory":      { key: MarketingTriggerKey.LOW_INVENTORY,      schemaType: SchemaType.MARKETING_LOW_INVENTORY },
+  "warranty registration": { key: MarketingTriggerKey.WARRANTY_REGISTRATION, schemaType: SchemaType.MARKETING_WARRANTY_REGISTRATION },
+};
+
+const COMMENTSOLD_VARIANTS: Record<
+  MarketingTriggerKey,
+  { key: MarketingTriggerKey; schemaType: SchemaType } | null
+> = {
+  [MarketingTriggerKey.CART_ABANDONED]: {
+    key: MarketingTriggerKey.COMMENTSOLD_CART_ABANDONED,
+    schemaType: SchemaType.MARKETING_COMMENTSOLD_CART_ABANDONMENT,
+  },
+  [MarketingTriggerKey.BROWSE_ABANDONED]: {
+    key: MarketingTriggerKey.COMMENTSOLD_BROWSE_ABANDONED,
+    schemaType: SchemaType.MARKETING_COMMENTSOLD_BROWSE_ABANDONMENT,
+  },
+  [MarketingTriggerKey.CHECKOUT_ABANDONED]: {
+    key: MarketingTriggerKey.COMMENTSOLD_CHECKOUT_ABANDONED,
+    schemaType: SchemaType.MARKETING_COMMENTSOLD_CHECKOUT_ABANDONMENT,
+  },
+  // All other triggers: no CommentSold variant — leave the standard mapping.
+} as any;
+
+const ABANDONMENT_SKIP_FIELD: Record<
+  MarketingTriggerKey,
+  TriggerResolution["autoSkipAbandonmentField"]
+> = {
+  [MarketingTriggerKey.CART_ABANDONED]: "isCartAbandoned",
+  [MarketingTriggerKey.CHECKOUT_ABANDONED]: "isCheckoutAbandoned",
+  [MarketingTriggerKey.BROWSE_ABANDONED]: "isBrowseAbandoned",
+  [MarketingTriggerKey.COMMENTSOLD_CART_ABANDONED]: "isCartAbandoned",
+  [MarketingTriggerKey.COMMENTSOLD_CHECKOUT_ABANDONED]: "isCheckoutAbandoned",
+  [MarketingTriggerKey.COMMENTSOLD_BROWSE_ABANDONED]: "isBrowseAbandoned",
+} as any;
+
+// Klaviyo's trigger filter is an object tree of condition_groups → conditions.
+// Returns true if ANY condition has the shape:
+//   { type: "metric-property", field: "Source Name",
+//     filter: { type: "string", operator: "equals", value: "CommentSold" } }
+function hasCommentSoldSourceFilter(triggerFilter: unknown): boolean {
+  if (!triggerFilter || typeof triggerFilter !== "object") return false;
+  const tf = triggerFilter as any;
+  const groups = tf.condition_groups ?? [];
+  for (const g of groups) {
+    for (const c of g.conditions ?? []) {
+      if (
+        c.type === "metric-property" &&
+        c.field === "Source Name" &&
+        c.filter?.type === "string" &&
+        c.filter?.operator === "equals" &&
+        c.filter?.value === "CommentSold"
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function resolveMetricTrigger(
+  t: KlaviyoTrigger,
+  metrics: MetricLookup,
+  flowName: string,
+  warnings: ParseWarning[],
+): TriggerResolution | null {
+  if (!t.id) {
+    warnings.push({ kind: "unsupported-trigger", message: `metric trigger has no id` });
+    return null;
+  }
+  const m = metrics[t.id];
+  if (!m) {
+    warnings.push({
+      kind: "unsupported-trigger",
+      message: `metric id ${t.id} not found in merchant metrics catalog — run extract-metrics.ts first`,
+    });
+    return null;
+  }
+  const hit = METRIC_NAME_MAP[m.name.toLowerCase()];
+  if (!hit) {
+    warnings.push({
+      kind: "unsupported-trigger",
+      message: `metric "${m.name}" (${m.integration_name ?? "no integration"}) has no Redo trigger equivalent — flow "${flowName}" skipped`,
+    });
+    return null;
+  }
+  // CommentSold detection — upgrade to CS variant if the trigger filter matches.
+  if (hasCommentSoldSourceFilter(t.trigger_filter) && COMMENTSOLD_VARIANTS[hit.key]) {
+    const cs = COMMENTSOLD_VARIANTS[hit.key]!;
+    return { key: cs.key, schemaType: cs.schemaType, autoSkipAbandonmentField: ABANDONMENT_SKIP_FIELD[cs.key] };
+  }
+  return { key: hit.key, schemaType: hit.schemaType, autoSkipAbandonmentField: ABANDONMENT_SKIP_FIELD[hit.key] };
+}
+
+function resolveListTrigger(flow: KlaviyoFlow): TriggerResolution {
+  // V1 heuristic: SMS-intent flows contain "SMS" in the name. Otherwise email.
+  // A more robust resolver would call Klaviyo's /lists/{id} to read list_type;
+  // captured as a TODO in the V2 plan.
+  const name = flow.data.attributes.name.toLowerCase();
+  const isSms = /\bsms\b/i.test(name);
+  return isSms
+    ? { key: MarketingTriggerKey.SMS_SIGNUP, schemaType: SchemaType.SMS_MARKETING_SIGNUP }
+    : { key: MarketingTriggerKey.EMAIL_SIGNUP_SHOPIFY, schemaType: SchemaType.EMAIL_MARKETING_SIGNUP };
+}
+
+export function resolveTrigger(
+  flow: KlaviyoFlow,
+  metrics: MetricLookup,
+  warnings: ParseWarning[],
+): TriggerResolution | null {
+  const defn = flow.data.attributes.definition;
+  const triggers = defn?.triggers ?? [];
+  if (triggers.length === 0) {
+    warnings.push({
+      kind: "skipped-flow",
+      message: `flow "${flow.data.attributes.name}" has no triggers configured (Unconfigured status)`,
+    });
+    return null;
+  }
+  const t = triggers[0];
+  switch (t.type) {
+    case "metric":
+      return resolveMetricTrigger(t, metrics, flow.data.attributes.name, warnings);
+    case "list":
+      return resolveListTrigger(flow);
+    case "segment":
+      return {
+        key: MarketingTriggerKey.CUSTOMER_GROUP_ENTERED,
+        schemaType: SchemaType.MARKETING_SEGMENT_MEMBERSHIP_CHANGE,
+      };
+    case "date":
+      return { key: MarketingTriggerKey.DATE, schemaType: SchemaType.MARKETING_DATE };
+    case "price-drop":
+      return { key: MarketingTriggerKey.PRICE_DROP, schemaType: SchemaType.MARKETING_PRICE_DROP };
+    default:
+      warnings.push({
+        kind: "unsupported-trigger",
+        message: `trigger type "${t.type}" is not supported`,
+      });
+      return null;
+  }
+}

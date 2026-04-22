@@ -38,42 +38,36 @@ export interface ExportResult {
   fontPlan: Awaited<ReturnType<typeof buildFontPlan>>;
 }
 
+export interface TemplateMetadata {
+  name?: string;
+  subject?: string;
+  created?: string;
+  editorType?: string;
+}
+
+export interface ExportFromHtmlResult
+  extends Omit<ExportResult, "outPath"> {
+  template: Record<string, any>;
+}
+
 /**
- * Core per-template export. Pass a pre-fetched `account` (or null to skip
- * variable substitution). `skipAi` suppresses the inline-coupon LLM call.
+ * Pure variant — takes raw HTML + metadata, returns the full EmailTemplate
+ * JSON without touching disk. Used by the flow parser to inline real email
+ * content into flow imports (see src/flow/template-resolver.ts). The CLI
+ * wrapper `exportTemplate()` just reads from disk and delegates here.
  */
-export async function exportTemplate(
-  htmlPath: string,
+export async function exportTemplateFromHtml(
+  html: string,
+  meta: TemplateMetadata,
   opts: { account: KlaviyoAccount | null; skipAi: boolean },
-): Promise<ExportResult> {
-  const html = readFileSync(htmlPath, "utf-8");
-
-  // Infer metadata from a sibling .json file if present. We read this
-  // BEFORE parsing so we can branch on editor_type.
-  const jsonPath = htmlPath.replace(/\.html$/, ".json");
-  let klaviyoMeta: {
-    name?: string;
-    subject?: string;
-    created?: string;
-    editorType?: string;
-  } = {};
-  if (existsSync(jsonPath)) {
-    const raw = JSON.parse(readFileSync(jsonPath, "utf-8"));
-    klaviyoMeta = {
-      name: raw.attributes?.name || raw.name,
-      subject: raw.attributes?.name || raw.name,
-      created: raw.attributes?.created,
-      editorType: raw.attributes?.editor_type,
-    };
-  }
-
+): Promise<ExportFromHtmlResult> {
   // Route to the appropriate parser. CODE templates are hand-coded email
   // HTML without the kl-*/gxp-kl-* class markers the default parser relies
-  // on. If editor_type isn't known (no sibling .json), fall back to a
-  // heuristic: if the HTML has zero kl-* classes, use the CODE parser.
+  // on. If editor_type isn't known, fall back to a heuristic: if the HTML
+  // has zero kl-* classes, use the CODE parser.
   const useCodeParser =
-    klaviyoMeta.editorType === "CODE" ||
-    (!klaviyoMeta.editorType && !/class="[^"]*(?:kl-|gxp-kl-)/.test(html));
+    meta.editorType === "CODE" ||
+    (!meta.editorType && !/class="[^"]*(?:kl-|gxp-kl-)/.test(html));
   const {
     sections: rawSections,
     warnings,
@@ -104,10 +98,7 @@ export async function exportTemplate(
 
   const fontPlan = await buildFontPlan(sections);
 
-  const name =
-    klaviyoMeta.name ||
-    htmlPath.split("/").pop()?.replace(".html", "") ||
-    "Imported Template";
+  const name = meta.name || "Imported Template";
 
   // If the template references the `checkoutUrl` schema field (via image
   // clickthrough or button link), it's an abandoned-checkout flow email.
@@ -116,10 +107,10 @@ export async function exportTemplate(
     ? "marketing_checkout_abandonment"
     : "marketing_email";
 
-  const emailTemplate = {
+  const template = {
     _id: new ObjectId().toString(),
     name,
-    subject: klaviyoMeta.subject || "",
+    subject: meta.subject || "",
     templateType: "marketing",
     category: "Marketing",
     schemaType,
@@ -135,17 +126,14 @@ export async function exportTemplate(
     sections,
     linkColor: "#0000ee",
     team: null,
-    createdAt: klaviyoMeta.created || new Date().toISOString(),
+    createdAt: meta.created || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     isPlainText: false,
     _fontPlan: fontPlan,
   };
 
-  const outPath = htmlPath.replace(/\.html$/, ".redo-template.json");
-  writeFileSync(outPath, JSON.stringify(emailTemplate, null, 2));
-
   return {
-    outPath,
+    template,
     name,
     sectionCount: sections.length,
     substitutions,
@@ -157,6 +145,42 @@ export async function exportTemplate(
     skippedBlocks,
     fontPlan,
   };
+}
+
+/**
+ * Core per-template export. Pass a pre-fetched `account` (or null to skip
+ * variable substitution). `skipAi` suppresses the inline-coupon LLM call.
+ */
+export async function exportTemplate(
+  htmlPath: string,
+  opts: { account: KlaviyoAccount | null; skipAi: boolean },
+): Promise<ExportResult> {
+  const html = readFileSync(htmlPath, "utf-8");
+
+  // Infer metadata from a sibling .json file if present.
+  const jsonPath = htmlPath.replace(/\.html$/, ".json");
+  let meta: TemplateMetadata = {};
+  if (existsSync(jsonPath)) {
+    const raw = JSON.parse(readFileSync(jsonPath, "utf-8"));
+    meta = {
+      name: raw.attributes?.name || raw.name,
+      subject: raw.attributes?.name || raw.name,
+      created: raw.attributes?.created,
+      editorType: raw.attributes?.editor_type,
+    };
+  }
+  // Fall back to the filename for the template name.
+  if (!meta.name) {
+    meta.name = htmlPath.split("/").pop()?.replace(".html", "");
+  }
+
+  const result = await exportTemplateFromHtml(html, meta, opts);
+
+  const outPath = htmlPath.replace(/\.html$/, ".redo-template.json");
+  writeFileSync(outPath, JSON.stringify(result.template, null, 2));
+
+  const { template: _t, ...rest } = result;
+  return { outPath, ...rest };
 }
 
 /**
