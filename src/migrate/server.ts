@@ -31,10 +31,12 @@ import {
   importTemplateRpc,
   uploadFontsForTemplates,
 } from "./import-rpc.js";
+import { isDbEnabled, reapStuckJobs, runMigrations } from "./db.js";
 import {
   createJob,
   deleteJob,
   getJob,
+  hydrateFromDb,
   jobController,
   listJobs,
   resolveInput,
@@ -1715,10 +1717,29 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  const displayHost = HOST === "0.0.0.0" ? "localhost" : HOST;
-  console.log(`Migration UI: http://${displayHost}:${PORT}`);
-  if (IS_HOSTED_DEPLOY) console.log("(hosted deploy — import disabled)");
-  if (BASIC_AUTH_ENABLED) console.log("(basic auth enabled)");
-  console.log(`(ctrl-c to stop)`);
-});
+// Startup: run DB migrations, reap stuck jobs, hydrate memory from DB, then
+// start the HTTP server. All DB calls are no-ops when DATABASE_URL isn't set.
+async function startup() {
+  if (isDbEnabled()) {
+    try {
+      await runMigrations();
+      const reaped = await reapStuckJobs();
+      const hydrated = await hydrateFromDb();
+      console.log(`[startup] db: migrations ok, reaped ${reaped}, hydrated ${hydrated} job(s)`);
+    } catch (e) {
+      console.warn("[startup] db init failed — continuing in memory-only mode:", e);
+    }
+  } else {
+    console.log("[startup] DATABASE_URL not set — running in memory-only mode");
+  }
+
+  server.listen(PORT, HOST, () => {
+    const displayHost = HOST === "0.0.0.0" ? "localhost" : HOST;
+    console.log(`Migration UI: http://${displayHost}:${PORT}`);
+    if (IS_HOSTED_DEPLOY) console.log("(hosted deploy — import disabled)");
+    if (BASIC_AUTH_ENABLED) console.log("(basic auth enabled)");
+    console.log(`(ctrl-c to stop)`);
+  });
+}
+
+void startup();

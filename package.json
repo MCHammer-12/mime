@@ -27,11 +27,13 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",
     "@faire/mjml-react": "^3.5.3",
+    "@types/pg": "^8.20.0",
     "bson": "^7.2.0",
     "cheerio": "^1.2.0",
     "classnames": "^2.5.1",
     "html-react-parser": "^3.0.16",
     "mjml": "^4.18.0",
+    "pg": "^8.20.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tsx": "^4.21.0"
