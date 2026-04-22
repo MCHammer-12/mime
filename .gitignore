@@ -10,3 +10,4 @@ samples/
 *.log
 .viewer/
 url-mappings-pending.json
+.ai-cache/

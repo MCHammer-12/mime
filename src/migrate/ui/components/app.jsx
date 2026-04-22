@@ -117,6 +117,7 @@ function App() {
       klaviyoKey: data.klaviyoKey,
       redoToken: data.redoToken,
       decodedStoreId: data.decodedStoreId,
+      redoServerBase: data.redoServerBase ?? null,
       createdAt: Date.now(),
       lastImportedAt: null,
     };

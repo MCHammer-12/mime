@@ -4,11 +4,18 @@
  * One LLM call per text block (not batched — see feedback memory).
  * System prompt is cached across calls so only the user text is billed at full rate.
  *
- * Uses Replit's native AI Integrations for Anthropic access. No user-supplied
- * API key required: the AI_INTEGRATIONS_ANTHROPIC_BASE_URL and
- * AI_INTEGRATIONS_ANTHROPIC_API_KEY environment variables are injected
- * automatically by the Replit AI Integrations blueprint.
+ * Three providers, picked by env:
+ *   - `SKIP_AI=1` → AI is disabled; callers should guard with hasInlineCoupon()
+ *     + a noop fallback.
+ *   - `AI_VIA_CLAUDE_CODE=1` → local-dev mode. Hands the prompt off to
+ *     a Claude Code session via `.ai-cache/*.request.md` + `.response.md`
+ *     file pairs. Zero API key needed; see src/ai-claude-code.ts.
+ *   - Otherwise → Replit AI Integrations (prod). Requires
+ *     `AI_INTEGRATIONS_ANTHROPIC_API_KEY` + `AI_INTEGRATIONS_ANTHROPIC_BASE_URL`
+ *     auto-injected by the Replit blueprint.
  */
+
+import { claudeCodeMessagesCreate } from "./ai-claude-code.js";
 
 // The @anthropic-ai/sdk module is loaded lazily so the pipeline can run
 // without the package installed when AI rewrites aren't needed (SKIP_AI=1).
@@ -18,16 +25,31 @@ type AnthropicCtor = new (opts: { apiKey: string; baseURL?: string }) => {
   };
 };
 
+interface MessagesCreator {
+  messages: { create: (req: any) => Promise<any> };
+}
+
 const MODEL = "claude-sonnet-4-6";
 
-let _client: InstanceType<AnthropicCtor> | null = null;
-async function client(): Promise<InstanceType<AnthropicCtor>> {
+let _client: MessagesCreator | null = null;
+async function client(): Promise<MessagesCreator> {
   if (_client) return _client;
+
+  // Local dev: route through the Claude Code file-handoff client.
+  if (process.env.AI_VIA_CLAUDE_CODE === "1") {
+    _client = {
+      messages: { create: claudeCodeMessagesCreate },
+    };
+    return _client;
+  }
+
   const apiKey = process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY;
   const baseURL = process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL;
   if (!apiKey || !baseURL) {
     throw new Error(
-      "Replit AI Integrations env vars missing. Expected AI_INTEGRATIONS_ANTHROPIC_API_KEY and AI_INTEGRATIONS_ANTHROPIC_BASE_URL — these are auto-set by the Replit Anthropic integration.",
+      "No AI provider configured. Set AI_VIA_CLAUDE_CODE=1 for local dev, " +
+        "or AI_INTEGRATIONS_ANTHROPIC_API_KEY + AI_INTEGRATIONS_ANTHROPIC_BASE_URL " +
+        "(auto-set by the Replit Anthropic integration).",
     );
   }
   // Dynamic import of an optional peer. The package is declared in
