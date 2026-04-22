@@ -582,6 +582,16 @@ export async function importFlowRpc(
         `team=${(newFlow as any).team} ` +
         `steps=${(newFlow.steps ?? []).length} (${JSON.stringify(stepTypes)})`,
     });
+    // Per-step dump: type + id + keys. Lets us see at a glance which step has
+    // an unexpected shape without piping the whole JSON back to the UI.
+    for (const s of newFlow.steps ?? []) {
+      const keys = Object.keys(s as any).sort().join(",");
+      options.onProgress?.({
+        kind: "template_failed" as any,
+        templateName: `[flow debug] ${bundle.automation.name} step`,
+        error: `type=${(s as any).type} id=${(s as any).id} keys=${keys}`,
+      });
+    }
     options.onProgress?.({
       kind: "flow_failed",
       flowName: bundle.automation.name,

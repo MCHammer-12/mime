@@ -744,6 +744,12 @@ async function runImport(
                     emit({ kind: "log", source: "stdout", text: `  email template created: ${ev.templateId}` });
                   } else if (ev.kind === "flow_created") {
                     emit({ kind: "log", source: "stdout", text: `flow created: ${ev.flowId}` });
+                  } else if (ev.kind === "template_failed") {
+                    // Debug breadcrumb from importFlowRpc on createAdvancedFlow failure
+                    // — templateName is `[flow debug] <name>`, error holds the step summary.
+                    emit({ kind: "log", source: "stderr", text: `${ev.templateName}: ${ev.error}` });
+                  } else if (ev.kind === "flow_failed") {
+                    emit({ kind: "log", source: "stderr", text: `flow failed (${ev.flowName}): ${ev.error}` });
                   }
                 },
               },
