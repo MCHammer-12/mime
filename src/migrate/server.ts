@@ -373,6 +373,158 @@ async function handleFlows(req: IncomingMessage, res: ServerResponse) {
   }
 }
 
+// ─── API: /api/campaigns ───────────────────────────────────────────────────
+//
+// Campaign emails in Klaviyo live as campaign → campaign-message → template.
+// When the merchant built the campaign in Klaviyo's UI (never clicked
+// "Save as template"), the underlying template is a non-reusable clone
+// that does NOT appear in /templates/ listings. We walk campaigns → messages
+// and pull each message's template relationship so the UI can offer
+// campaigns as a third importable source alongside standalone templates +
+// flow emails.
+
+async function handleCampaigns(req: IncomingMessage, res: ServerResponse) {
+  const body = await readJsonBody(req);
+  const key = body.klaviyoKey as string;
+  if (!key) return json(res, 400, { error: "klaviyoKey required" });
+
+  try {
+    type CampaignMeta = {
+      id: string;
+      attributes: {
+        name: string;
+        status: string;
+        send_time?: string | null;
+        created_at?: string | null;
+      };
+    };
+    // filter=equals(messages.channel,'email') is Klaviyo's required filter
+    // on the campaigns endpoint (they split email + sms campaigns).
+    const filter = encodeURIComponent("equals(messages.channel,'email')");
+    const campaigns = await paginate<CampaignMeta>(
+      `/campaigns/?filter=${filter}&fields[campaign]=name,status,send_time,created_at&sort=-created_at`,
+      key,
+    );
+
+    type CampaignOut = {
+      campaignId: string;
+      campaignName: string;
+      status: string;
+      sendTime: string | null;
+      createdAt: string | null;
+      messages: Array<{
+        messageId: string;
+        templateId: string | null;
+        label: string | null;
+        subject: string | null;
+      }>;
+    };
+    const out: CampaignOut[] = [];
+
+    const debug = {
+      totalCampaigns: campaigns.length,
+      campaignsWithMessages: 0,
+      campaignsWithNoMessages: 0,
+      messagesSeen: 0,
+      messagesWithTemplate: 0,
+      messagesWithoutTemplate: 0,
+      failedMessageFetches: 0,
+      sampleCampaignNames: [] as string[],
+      sampleFetchErrors: [] as string[],
+      statusCounts: {} as Record<string, number>,
+    };
+
+    const LIMIT = 5;
+    let idx = 0;
+    async function worker() {
+      while (idx < campaigns.length) {
+        const i = idx++;
+        const c = campaigns[i]!;
+        const status = c.attributes.status ?? "unknown";
+        debug.statusCounts[status] = (debug.statusCounts[status] ?? 0) + 1;
+        if (debug.sampleCampaignNames.length < 10) {
+          debug.sampleCampaignNames.push(c.attributes.name);
+        }
+
+        try {
+          // Per-campaign: get its messages. Messages carry `label`
+          // (A/B variant label — "Message A", "Message B") and a
+          // template relationship (inline).
+          const msgs: any = await klaviyo(
+            `/campaigns/${c.id}/campaign-messages/`,
+            key,
+          );
+          const msgData = msgs?.data ?? [];
+          if (msgData.length === 0) {
+            debug.campaignsWithNoMessages++;
+            continue;
+          }
+          debug.campaignsWithMessages++;
+
+          const messages: CampaignOut["messages"] = [];
+          for (const m of msgData) {
+            debug.messagesSeen++;
+            // Try inline relationship first; fall back to the dedicated
+            // relationships endpoint if needed (same pattern as flow-messages).
+            let tplId: string | null =
+              m.relationships?.template?.data?.id ?? null;
+            if (!tplId) {
+              try {
+                const rel: any = await klaviyo(
+                  `/campaign-messages/${m.id}/relationships/template/`,
+                  key,
+                );
+                tplId = rel?.data?.id ?? null;
+              } catch (e: any) {
+                debug.failedMessageFetches++;
+                if (debug.sampleFetchErrors.length < 3) {
+                  debug.sampleFetchErrors.push(
+                    `rel: ${e.message?.slice(0, 120) ?? String(e).slice(0, 120)}`,
+                  );
+                }
+              }
+            }
+            if (tplId) debug.messagesWithTemplate++;
+            else debug.messagesWithoutTemplate++;
+
+            // Klaviyo names these fields inside `definition` on the message.
+            const def = m.attributes?.definition ?? {};
+            messages.push({
+              messageId: m.id,
+              templateId: tplId,
+              label: m.attributes?.label ?? null,
+              subject: def.content?.subject ?? null,
+            });
+          }
+
+          out.push({
+            campaignId: c.id,
+            campaignName: c.attributes.name,
+            status,
+            sendTime: c.attributes.send_time ?? null,
+            createdAt: c.attributes.created_at ?? null,
+            messages,
+          });
+        } catch (e: any) {
+          debug.failedMessageFetches++;
+          if (debug.sampleFetchErrors.length < 3) {
+            debug.sampleFetchErrors.push(
+              `messages: ${e.message?.slice(0, 120) ?? String(e).slice(0, 120)}`,
+            );
+          }
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: LIMIT }, () => worker()));
+
+    // Already sorted by `-created_at` from the query; no need to re-sort.
+
+    json(res, 200, { campaigns: out, debug });
+  } catch (e: any) {
+    json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
 // ─── Run parameters + core pipeline ────────────────────────────────────────
 
 interface RunParams {
@@ -381,6 +533,7 @@ interface RunParams {
   merchantSlug: string;
   templateIds: string[];
   flowIds: string[];
+  campaignIds: string[];
   skipAi: boolean;
   anthropicKey?: string;
   redoJwt?: string;
@@ -397,15 +550,16 @@ function parseRunBody(body: any): RunParams | { error: string } {
   const merchantSlug = body.merchantSlug as string;
   const templateIds = (body.templateIds ?? []) as string[];
   const flowIds = (body.flowIds ?? []) as string[];
+  const campaignIds = (body.campaignIds ?? []) as string[];
   if (
     !klaviyoKey ||
     !storeId ||
     !merchantSlug ||
-    (templateIds.length === 0 && flowIds.length === 0)
+    (templateIds.length === 0 && flowIds.length === 0 && campaignIds.length === 0)
   ) {
     return {
       error:
-        "klaviyoKey, storeId, merchantSlug, and at least one of templateIds/flowIds required",
+        "klaviyoKey, storeId, merchantSlug, and at least one of templateIds/flowIds/campaignIds required",
     };
   }
   const redoJwt = (body.redoJwt as string | undefined)?.trim() || undefined;
@@ -416,6 +570,7 @@ function parseRunBody(body: any): RunParams | { error: string } {
     merchantSlug,
     templateIds,
     flowIds,
+    campaignIds,
     skipAi: body.skipAi !== false,
     anthropicKey: body.anthropicKey as string | undefined,
     redoJwt,
@@ -446,6 +601,7 @@ async function runImport(
     merchantSlug,
     templateIds,
     flowIds,
+    campaignIds,
     skipAi,
     anthropicKey,
     redoJwt,
@@ -461,6 +617,8 @@ async function runImport(
     templatesFailed: 0,
     flowsImported: 0,
     flowsFailed: 0,
+    campaignsImported: 0,
+    campaignsFailed: 0,
   };
 
   const emit = (event: { kind: string; severity?: Severity; [k: string]: unknown }) =>
@@ -544,8 +702,12 @@ async function runImport(
 
     const hasTemplatesToImport = exported.length > 0;
     const hasFlowsToImport = flowIds.length > 0;
+    const hasCampaignsToImport = campaignIds.length > 0;
 
-    if (!shouldImport || (!hasTemplatesToImport && !hasFlowsToImport)) {
+    if (
+      !shouldImport ||
+      (!hasTemplatesToImport && !hasFlowsToImport && !hasCampaignsToImport)
+    ) {
       if (IS_HOSTED_DEPLOY && !redoJwt && wantsImport) {
         emit({ kind: "info", text: "Import skipped. Paste a Redo auth token to import via RPC." });
       }
@@ -554,12 +716,18 @@ async function runImport(
       return summary;
     }
 
-    // Flow import requires RPC (merchant JWT) — bazel path for flows isn't
-    // wired through the server yet. If user requested flows but no JWT, warn.
+    // Flow + campaign imports require RPC (merchant JWT); bazel path for
+    // those isn't wired. If user requested them without a JWT, warn.
     if (hasFlowsToImport && !useRpcImport) {
       emit({
         kind: "warn",
         text: `Flow import requires a Redo auth token (JWT). Skipping ${flowIds.length} flow(s). Templates below will still import via bazel.`,
+      });
+    }
+    if (hasCampaignsToImport && !useRpcImport) {
+      emit({
+        kind: "warn",
+        text: `Campaign import requires a Redo auth token (JWT). Skipping ${campaignIds.length} campaign(s).`,
       });
     }
 
@@ -771,10 +939,192 @@ async function runImport(
         }
       }
 
+      // ─── Campaign phase ────────────────────────────────────────────
+      // Each selected campaignId → fetch its messages → for each message,
+      // resolve the template via Klaviyo API → createEmailTemplate in Redo.
+      // A/B variants (multiple messages per campaign) produce multiple
+      // EmailTemplates with variant-suffixed names. No AdvancedFlow is
+      // created; the merchant kicks off the send from Redo's UI.
+      let campaignImportOk = 0;
+      let campaignImportFail = 0;
+      if (hasCampaignsToImport) {
+        // Template resolver (API-only; we never cache campaign-embedded
+        // templates on disk — they're non-reusable clones that would only
+        // fill the merchants folder).
+        const campaignTemplateResolver = createTemplateResolver({
+          merchantDir: join(MIME_ROOT, "migrations", merchantSlug),
+          account,
+          skipAi,
+          klaviyoApiKey: klaviyoKey,
+        });
+
+        for (const campaignId of campaignIds) {
+          emit({ kind: "step", label: `Fetching campaign ${campaignId}…` });
+          let campaignName = campaignId;
+          let messages: any[] = [];
+          try {
+            const campaignRes: any = await klaviyo(
+              `/campaigns/${campaignId}/?fields%5Bcampaign%5D=name,status`,
+              klaviyoKey,
+            );
+            campaignName = campaignRes?.data?.attributes?.name ?? campaignId;
+            const msgsRes: any = await klaviyo(
+              `/campaigns/${campaignId}/campaign-messages/`,
+              klaviyoKey,
+            );
+            messages = msgsRes?.data ?? [];
+          } catch (e: any) {
+            campaignImportFail++;
+            emit({
+              kind: "fail",
+              id: campaignId,
+              name: campaignName,
+              error: `fetch campaign: ${e.message ?? e}`,
+            });
+            continue;
+          }
+
+          if (messages.length === 0) {
+            campaignImportFail++;
+            emit({
+              kind: "fail",
+              id: campaignId,
+              name: campaignName,
+              error: "no campaign-messages found",
+            });
+            continue;
+          }
+
+          let createdTemplateCount = 0;
+          let variantFailures = 0;
+          for (const m of messages) {
+            let tplId: string | null =
+              m.relationships?.template?.data?.id ?? null;
+            if (!tplId) {
+              try {
+                const rel: any = await klaviyo(
+                  `/campaign-messages/${m.id}/relationships/template/`,
+                  klaviyoKey,
+                );
+                tplId = rel?.data?.id ?? null;
+              } catch {
+                // no template
+              }
+            }
+            if (!tplId) {
+              variantFailures++;
+              emit({
+                kind: "warn",
+                text: `campaign "${campaignName}" message ${m.id} has no template — skipped`,
+              });
+              continue;
+            }
+
+            // Build a per-variant name. Klaviyo exposes a `label` on the
+            // campaign-message (e.g. "Variation A"); fall back to a letter
+            // index when missing. Messages with only one variant get the
+            // bare campaign name.
+            const label: string | null = m.attributes?.label ?? null;
+            const variantName =
+              messages.length === 1
+                ? campaignName
+                : label
+                  ? `${campaignName} — ${label}`
+                  : `${campaignName} — variant ${String.fromCharCode(
+                      65 + messages.indexOf(m),
+                    )}`;
+
+            emit({ kind: "step", label: `Resolving ${variantName}…` });
+            const resolved = campaignTemplateResolver
+              ? await campaignTemplateResolver.resolve(tplId)
+              : null;
+            if (!resolved) {
+              variantFailures++;
+              emit({
+                kind: "fail",
+                id: `${campaignId}:${m.id}`,
+                name: variantName,
+                error: `could not resolve Klaviyo template ${tplId}`,
+              });
+              continue;
+            }
+
+            const templateJson = {
+              ...resolved.template,
+              name: variantName.slice(0, 200),
+              subject:
+                m.attributes?.definition?.content?.subject ??
+                resolved.template.subject ??
+                "",
+              emailPreview:
+                m.attributes?.definition?.content?.preview_text ??
+                resolved.template.emailPreview ??
+                null,
+            };
+
+            emit({ kind: "step", label: `Importing ${variantName}…` });
+            try {
+              const result = await importTemplateRpc(templateJson, {
+                jwt: redoJwt!,
+                serverBase: bodyRedoServerBase,
+                account,
+                onProgress: (ev: ImportProgressEvent) => {
+                  if (ev.kind === "filter_created") {
+                    emit({
+                      kind: "log",
+                      source: "stdout",
+                      text: `filter created: ${ev.productFilterId}`,
+                    });
+                  } else if (ev.kind === "template_created") {
+                    emit({
+                      kind: "log",
+                      source: "stdout",
+                      text: `  campaign template created: ${ev.templateId}`,
+                    });
+                  }
+                },
+              });
+              createdTemplateCount++;
+              emit({
+                kind: "imported",
+                id: `${campaignId}:${m.id}`,
+                name: variantName,
+                templateId: result.templateId,
+              });
+            } catch (e: any) {
+              variantFailures++;
+              emit({
+                kind: "fail",
+                id: `${campaignId}:${m.id}`,
+                name: variantName,
+                error: `import: ${e.message ?? e}`,
+              });
+            }
+          }
+
+          // Emit a per-campaign summary event so the UI can flip the
+          // campaign row to "done" after all its variants resolve.
+          if (createdTemplateCount > 0) {
+            campaignImportOk++;
+            emit({
+              kind: "campaign_imported",
+              id: campaignId,
+              name: campaignName,
+              createdTemplateCount,
+              variantFailures,
+            });
+          } else {
+            campaignImportFail++;
+          }
+        }
+      }
+
       summary.templatesImported = templateImportOk;
       summary.templatesFailed = templateImportFail;
       summary.flowsImported = flowImportOk;
       summary.flowsFailed = flowImportFail;
+      summary.campaignsImported = campaignImportOk;
+      summary.campaignsFailed = campaignImportFail;
       emit({
         kind: "done",
         importMethod: "rpc",
@@ -782,6 +1132,8 @@ async function runImport(
         importFailed: templateImportFail,
         flowsImported: flowImportOk,
         flowsFailed: flowImportFail,
+        campaignsImported: campaignImportOk,
+        campaignsFailed: campaignImportFail,
       });
       return summary;
     }
@@ -1689,6 +2041,9 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && req.url === "/api/flows") {
       return handleFlows(req, res);
+    }
+    if (req.method === "POST" && req.url === "/api/campaigns") {
+      return handleCampaigns(req, res);
     }
     if (req.method === "POST" && req.url === "/api/run") {
       return handleRun(req, res);

@@ -99,7 +99,7 @@ async function* readNdjsonLines(response, signal) {
   }
 }
 
-async function* runStream({ templateIds, flowIds, signal, store, storeName, answerBroker, merchantSlug }) {
+async function* runStream({ templateIds, flowIds, campaignIds, signal, store, storeName, answerBroker, merchantSlug }) {
   const creds = store ?? {};
   const slug = merchantSlug || (storeName ?? "store").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "store";
 
@@ -115,11 +115,12 @@ async function* runStream({ templateIds, flowIds, signal, store, storeName, answ
       redoServerBase: creds.redoServerBase ?? undefined,
       templateIds: templateIds ?? [],
       flowIds: flowIds ?? [],
+      campaignIds: campaignIds ?? [],
       runImport: true,
     });
   } catch (e) {
     yield { kind: "error", text: `create job: ${e instanceof Error ? e.message : String(e)}` };
-    yield { kind: "done", importMethod: "rpc", imported: 0, importFailed: 0, flowsImported: 0, flowsFailed: 0 };
+    yield { kind: "done", importMethod: "rpc", imported: 0, importFailed: 0, flowsImported: 0, flowsFailed: 0, campaignsImported: 0, campaignsFailed: 0 };
     return;
   }
   const jobId = created.jobId;
@@ -189,9 +190,11 @@ async function* runStream({ templateIds, flowIds, signal, store, storeName, answ
 async function* retryStream({ id, name, kind, flow, store, storeName, answerBroker, merchantSlug, signal }) {
   const templateIds = kind === "template" ? [id] : [];
   const flowIds = kind === "flow" ? [id] : [];
+  const campaignIds = kind === "campaign" ? [id] : [];
   yield* runStream({
     templateIds,
     flowIds,
+    campaignIds,
     signal,
     store,
     storeName,

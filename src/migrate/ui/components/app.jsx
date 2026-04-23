@@ -32,7 +32,7 @@ function App() {
   // ─ Per-store data catalogs, fetched on demand ─
   // Each entry: { flows, templates, loading, error, loaded }
   const [storeDataMap, setStoreDataMap] = useS({});
-  const EMPTY_DATA = { flows: [], templates: [], loading: false, error: null, loaded: false };
+  const EMPTY_DATA = { flows: [], templates: [], campaigns: [], loading: false, error: null, loaded: false };
   const data = view.storeId
     ? (storeDataMap[view.storeId] || EMPTY_DATA)
     : EMPTY_DATA;
@@ -56,6 +56,7 @@ function App() {
           [view.storeId]: {
             flows: res.flows ?? [],
             templates: res.templates ?? [],
+            campaigns: res.campaigns ?? [],
             loading: false,
             error: null,
             loaded: true,
@@ -95,10 +96,11 @@ function App() {
 
   const getStoreState = (storeId) => perStore[storeId] || {
     tab: "flows",
-    flowFilter: "", tmplFilter: "",
+    flowFilter: "", tmplFilter: "", campaignFilter: "",
     flowStatus: "all",
-    hideFlow: true, hideTmpl: true,
-    selectedFlowIds: new Set(), selectedTmplIds: new Set(),
+    campaignStatus: "all",
+    hideFlow: true, hideTmpl: true, hideCampaign: true,
+    selectedFlowIds: new Set(), selectedTmplIds: new Set(), selectedCampaignIds: new Set(),
   };
   const updateStoreState = (storeId, patch) => {
     setPerStore(ps => ({ ...ps, [storeId]: { ...getStoreState(storeId), ...(typeof patch === "function" ? patch(getStoreState(storeId)) : patch) } }));
@@ -107,6 +109,7 @@ function App() {
   const getStoreImports = (storeId) => sessionImports[storeId] || {
     flows: new Set([...window.PRIOR_IMPORTED_FLOW_IDS]),
     tmpls: new Set([...window.PRIOR_IMPORTED_TEMPLATE_IDS]),
+    campaigns: new Set([...(window.PRIOR_IMPORTED_CAMPAIGN_IDS ?? [])]),
   };
 
   // ─ Add store ─
@@ -134,7 +137,7 @@ function App() {
     const store = stores.find(s => s.id === storeId);
     if (!store) return;
     const ss = getStoreState(storeId);
-    const totalSel = ss.selectedFlowIds.size + ss.selectedTmplIds.size;
+    const totalSel = ss.selectedFlowIds.size + ss.selectedTmplIds.size + ss.selectedCampaignIds.size;
     if (totalSel === 0) return;
 
     const jobId = `j_${Date.now()}`;
@@ -145,6 +148,7 @@ function App() {
 
     const flowIds = [...ss.selectedFlowIds];
     const templateIds = [...ss.selectedTmplIds];
+    const campaignIds = [...ss.selectedCampaignIds];
 
     const items = [
       ...templateIds.map(id => {
@@ -155,6 +159,10 @@ function App() {
         const f = data.flows.find(x => x.flowId === id);
         return { id, name: f?.flowName || id, kind: "flow", state: "queued" };
       }),
+      ...campaignIds.map(id => {
+        const c = data.campaigns.find(x => x.campaignId === id);
+        return { id, name: c?.campaignName || id, kind: "campaign", state: "queued" };
+      }),
     ];
 
     const job = {
@@ -164,7 +172,7 @@ function App() {
       startedAt: Date.now(), endedAt: null,
       status: "running",
       items,
-      templateCount: templateIds.length, flowCount: flowIds.length,
+      templateCount: templateIds.length, flowCount: flowIds.length, campaignCount: campaignIds.length,
       currentStep: "", warnings: [], infos: [],
       fatalError: null, fontsDone: null, exportSummary: null, importMethod: null,
       log: [], abort, broker,
@@ -172,7 +180,7 @@ function App() {
 
     setJobs(js => [job, ...js]);
     setInProgress(ip => ({ ...ip, [storeId]: new Set([...(ip[storeId] || []), ...items.map(i => i.id)]) }));
-    updateStoreState(storeId, { selectedFlowIds: new Set(), selectedTmplIds: new Set() });
+    updateStoreState(storeId, { selectedFlowIds: new Set(), selectedTmplIds: new Set(), selectedCampaignIds: new Set() });
 
     // Update store lastImportedAt
     setStores(ss => ss.map(s => s.id === storeId ? { ...s, lastImportedAt: Date.now() } : s));
@@ -180,8 +188,8 @@ function App() {
     (async () => {
       try {
         const stream = window.mockRunStream({
-          templateIds, flowIds,
-          flows: data.flows, templates: data.templates,
+          templateIds, flowIds, campaignIds,
+          flows: data.flows, templates: data.templates, campaigns: data.campaigns,
           signal: abort.signal,
           store,                           // carries klaviyoKey + redoToken + decodedStoreId
           storeName: store.name,
@@ -252,8 +260,18 @@ function App() {
         if (evt.warningCount) parts.push(`${evt.warningCount} warn`);
         items = items.map(i => i.id === evt.id ? { ...i, state: "imported", detail: parts.join(" · ") } : i);
         setSessionImports(si => {
-          const cur = si[j.storeId] || { flows: new Set([...window.PRIOR_IMPORTED_FLOW_IDS]), tmpls: new Set([...window.PRIOR_IMPORTED_TEMPLATE_IDS]) };
+          const cur = si[j.storeId] || { flows: new Set([...window.PRIOR_IMPORTED_FLOW_IDS]), tmpls: new Set([...window.PRIOR_IMPORTED_TEMPLATE_IDS]), campaigns: new Set([...(window.PRIOR_IMPORTED_CAMPAIGN_IDS ?? [])]) };
           return { ...si, [j.storeId]: { ...cur, flows: new Set([...cur.flows, evt.id]) } };
+        });
+        setLastResult(lr => ({ ...lr, [j.storeId]: new Map([...(lr[j.storeId] || new Map())]).set(evt.id, "imported") }));
+        setInProgress(ip => { const n = new Set(ip[j.storeId] || []); n.delete(evt.id); return { ...ip, [j.storeId]: n }; });
+      } else if (evt.kind === "campaign_imported") {
+        const parts = [`${evt.createdTemplateCount} template${evt.createdTemplateCount === 1 ? '' : 's'}`];
+        if (evt.variantFailures) parts.push(`${evt.variantFailures} variant fail`);
+        items = items.map(i => i.id === evt.id ? { ...i, state: "imported", detail: parts.join(" · ") } : i);
+        setSessionImports(si => {
+          const cur = si[j.storeId] || { flows: new Set([...window.PRIOR_IMPORTED_FLOW_IDS]), tmpls: new Set([...window.PRIOR_IMPORTED_TEMPLATE_IDS]), campaigns: new Set([...(window.PRIOR_IMPORTED_CAMPAIGN_IDS ?? [])]) };
+          return { ...si, [j.storeId]: { ...cur, campaigns: new Set([...cur.campaigns, evt.id]) } };
         });
         setLastResult(lr => ({ ...lr, [j.storeId]: new Map([...(lr[j.storeId] || new Map())]).set(evt.id, "imported") }));
         setInProgress(ip => { const n = new Set(ip[j.storeId] || []); n.delete(evt.id); return { ...ip, [j.storeId]: n }; });
@@ -270,7 +288,8 @@ function App() {
           warnings = [...warnings, evt.text];
         }
       } else if (evt.kind === "done") {
-        status = (evt.importFailed + evt.flowsFailed) > 0 ? "partial" : "complete";
+        const totalFailed = (evt.importFailed ?? 0) + (evt.flowsFailed ?? 0) + (evt.campaignsFailed ?? 0);
+        status = totalFailed > 0 ? "partial" : "complete";
         endedAt = Date.now();
         currentStep = "";
         importMethod = evt.importMethod;
@@ -470,8 +489,21 @@ function MigrationScreen({ store, data, state, updateState, imports, lastResult,
     return true;
   }), [data.templates, state.tmplFilter, state.hideTmpl, imports.tmpls]);
 
+  const visibleCampaigns = useM(() => (data.campaigns ?? []).filter(c => {
+    if (state.campaignStatus !== "all" && state.campaignStatus !== c.status) return false;
+    if (state.campaignFilter && !c.campaignName.toLowerCase().includes(state.campaignFilter.toLowerCase())) return false;
+    if (state.hideCampaign && imports.campaigns.has(c.campaignId)) return false;
+    return true;
+  }), [data.campaigns, state.campaignStatus, state.campaignFilter, state.hideCampaign, imports.campaigns]);
+
   const flowsAlreadyCount = useM(() => data.flows.filter(f => imports.flows.has(f.flowId)).length, [data.flows, imports.flows]);
   const tmplsAlreadyCount = useM(() => data.templates.filter(t => imports.tmpls.has(t.id)).length, [data.templates, imports.tmpls]);
+  const campaignsAlreadyCount = useM(() => (data.campaigns ?? []).filter(c => imports.campaigns.has(c.campaignId)).length, [data.campaigns, imports.campaigns]);
+
+  // Annotate campaigns whose template IDs also appear in the Templates tab —
+  // these were saved back to the Klaviyo library; merchant will see them
+  // twice (once as a Template, once as a Campaign). Non-blocking; just a hint.
+  const libraryTemplateIds = useM(() => new Set((data.templates ?? []).map(t => t.id)), [data.templates]);
 
   const toggleFlow = (id) => updateState(s => ({
     selectedFlowIds: new Set(s.selectedFlowIds.has(id)
@@ -482,6 +514,11 @@ function MigrationScreen({ store, data, state, updateState, imports, lastResult,
     selectedTmplIds: new Set(s.selectedTmplIds.has(id)
       ? [...s.selectedTmplIds].filter(x => x !== id)
       : [...s.selectedTmplIds, id]),
+  }));
+  const toggleCampaign = (id) => updateState(s => ({
+    selectedCampaignIds: new Set(s.selectedCampaignIds.has(id)
+      ? [...s.selectedCampaignIds].filter(x => x !== id)
+      : [...s.selectedCampaignIds, id]),
   }));
 
   const toggleAllFlows = () => {
@@ -502,21 +539,30 @@ function MigrationScreen({ store, data, state, updateState, imports, lastResult,
       return { selectedTmplIds: n };
     });
   };
+  const toggleAllCampaigns = () => {
+    const allSel = visibleCampaigns.every(c => state.selectedCampaignIds.has(c.campaignId));
+    updateState(s => {
+      const n = new Set(s.selectedCampaignIds);
+      if (allSel) visibleCampaigns.forEach(c => n.delete(c.campaignId));
+      else visibleCampaigns.forEach(c => n.add(c.campaignId));
+      return { selectedCampaignIds: n };
+    });
+  };
 
-  const clearSelection = () => updateState({ selectedFlowIds: new Set(), selectedTmplIds: new Set() });
-  const totalSelected = state.selectedFlowIds.size + state.selectedTmplIds.size;
+  const clearSelection = () => updateState({ selectedFlowIds: new Set(), selectedTmplIds: new Set(), selectedCampaignIds: new Set() });
+  const totalSelected = state.selectedFlowIds.size + state.selectedTmplIds.size + state.selectedCampaignIds.size;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden min-w-0">
       <Tabs
         tab={state.tab} onChange={(t) => updateState({ tab: t })}
-        flowCount={data.flows.length} tmplCount={data.templates.length}
-        flowSelCount={state.selectedFlowIds.size} tmplSelCount={state.selectedTmplIds.size}
+        flowCount={data.flows.length} tmplCount={data.templates.length} campaignCount={(data.campaigns ?? []).length}
+        flowSelCount={state.selectedFlowIds.size} tmplSelCount={state.selectedTmplIds.size} campaignSelCount={state.selectedCampaignIds.size}
       />
 
       {totalSelected > 0 && (
         <SelectionBar
-          flowCount={state.selectedFlowIds.size} tmplCount={state.selectedTmplIds.size}
+          flowCount={state.selectedFlowIds.size} tmplCount={state.selectedTmplIds.size} campaignCount={state.selectedCampaignIds.size}
           onClear={clearSelection} onImport={onImport}
         />
       )}
@@ -544,6 +590,31 @@ function MigrationScreen({ store, data, state, updateState, imports, lastResult,
                 alreadyImported={imports.flows.has(flow.flowId)}
                 inProgress={inProgress.has(flow.flowId)}
                 lastResult={lastResult.get(flow.flowId)}/>
+            )}
+          />
+        ) : state.tab === "campaigns" ? (
+          <ListShell
+            items={visibleCampaigns} selectedIds={state.selectedCampaignIds}
+            onToggle={toggleCampaign} onToggleAll={toggleAllCampaigns}
+            filter={state.campaignFilter} onFilterChange={(v) => updateState({ campaignFilter: v })}
+            statusFilter={state.campaignStatus} onStatusFilterChange={(v) => updateState({ campaignStatus: v })}
+            statuses={["sent", "scheduled", "sending", "draft", "cancelled"]}
+            hideAlreadyImported={state.hideCampaign} onHideAlreadyImportedChange={(v) => updateState({ hideCampaign: v })}
+            alreadyImportedCount={campaignsAlreadyCount}
+            countLabel={`${(data.campaigns ?? []).length} campaigns`}
+            emptyText={
+              data.loading
+                ? "Loading campaigns from Klaviyo…"
+                : data.error
+                ? `Error: ${data.error}`
+                : "No campaigns match these filters."
+            }
+            renderRow={(campaign, selected, toggle) => (
+              <CampaignRow key={campaign.campaignId} campaign={campaign} selected={selected} onToggle={toggle}
+                alreadyImported={imports.campaigns.has(campaign.campaignId)}
+                inProgress={inProgress.has(campaign.campaignId)}
+                lastResult={lastResult.get(campaign.campaignId)}
+                libraryTemplateIds={libraryTemplateIds}/>
             )}
           />
         ) : (
@@ -574,7 +645,7 @@ function MigrationScreen({ store, data, state, updateState, imports, lastResult,
   );
 }
 
-function Tabs({ tab, onChange, flowCount, tmplCount, flowSelCount, tmplSelCount }) {
+function Tabs({ tab, onChange, flowCount, tmplCount, campaignCount, flowSelCount, tmplSelCount, campaignSelCount }) {
   const mk = (key, label, count, selCount) => (
     <button
       onClick={() => onChange(key)}
@@ -591,20 +662,23 @@ function Tabs({ tab, onChange, flowCount, tmplCount, flowSelCount, tmplSelCount 
   return (
     <div className="flex border-b border-[#21262d] bg-[#0d1117] px-2">
       {mk("flows", "Flows", flowCount, flowSelCount)}
+      {mk("campaigns", "Campaigns", campaignCount, campaignSelCount)}
       {mk("templates", "Templates", tmplCount, tmplSelCount)}
     </div>
   );
 }
 
-function SelectionBar({ flowCount, tmplCount, onClear, onImport }) {
-  const total = flowCount + tmplCount;
+function SelectionBar({ flowCount, tmplCount, campaignCount, onClear, onImport }) {
+  const total = flowCount + tmplCount + campaignCount;
+  const parts = [];
+  if (flowCount) parts.push(`${flowCount} flow${flowCount === 1 ? "" : "s"}`);
+  if (campaignCount) parts.push(`${campaignCount} campaign${campaignCount === 1 ? "" : "s"}`);
+  if (tmplCount) parts.push(`${tmplCount} template${tmplCount === 1 ? "" : "s"}`);
   return (
     <div className="flex items-center gap-3 px-4 py-2 bg-[#0d1117] border-b border-[#21262d]">
       <span className="text-[12px] text-[#e6edf3] tabular-nums">
         <strong className="font-semibold">{total}</strong> selected
-        <span className="text-[#6e7681] ml-1.5">
-          ({flowCount} flow{flowCount === 1 ? "" : "s"}, {tmplCount} template{tmplCount === 1 ? "" : "s"})
-        </span>
+        <span className="text-[#6e7681] ml-1.5">({parts.join(", ")})</span>
       </span>
       <button onClick={onClear} className="text-[11px] text-[#8b949e] hover:text-[#e6edf3] px-2 py-1">clear</button>
       <button

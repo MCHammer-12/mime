@@ -5,10 +5,16 @@ const { useState, useEffect, useRef, useMemo, useCallback } = React;
 // ── Status dot for flows ──────────────────────────────────────────
 function StatusBadge({ status }) {
   const config = {
-    live:     { dot: "#3fb950", label: "live" },
-    draft:    { dot: "#8b949e", label: "draft" },
-    manual:   { dot: "#d29922", label: "manual" },
-    disabled: { dot: "#6e7681", label: "disabled" },
+    // flow statuses
+    live:      { dot: "#3fb950", label: "live" },
+    draft:     { dot: "#8b949e", label: "draft" },
+    manual:    { dot: "#d29922", label: "manual" },
+    disabled:  { dot: "#6e7681", label: "disabled" },
+    // campaign statuses
+    sent:      { dot: "#3fb950", label: "sent" },
+    scheduled: { dot: "#388bfd", label: "scheduled" },
+    sending:   { dot: "#d29922", label: "sending" },
+    cancelled: { dot: "#6e7681", label: "cancelled" },
   }[status] || { dot: "#8b949e", label: status };
 
   return (

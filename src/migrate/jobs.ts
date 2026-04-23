@@ -76,6 +76,8 @@ export interface JobSummary {
   templatesFailed: number;
   flowsImported: number;
   flowsFailed: number;
+  campaignsImported: number;
+  campaignsFailed: number;
 }
 
 export interface JobState {
