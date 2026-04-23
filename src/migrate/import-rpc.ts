@@ -643,12 +643,15 @@ function buildBlankTemplate(
 // Cache: one /team call per ImportOptions.jwt.
 const teamIdCache = new WeakMap<object, Promise<string>>();
 async function resolveTeamId(options: ImportOptions): Promise<string> {
-  // WeakMap keyed on `options` — jwt usually stays the same per session.
+  // /team response shape: `{ _id: <user/membership id>, team: { _id: <team id>, ... } }`.
+  // The top-level _id is the JWT `sub` (user/membership), NOT the team. The
+  // team's _id — which is what createAdvancedFlow's team-mismatch check
+  // compares against (ctx.team._id from JWT aud) — lives at `.team._id`.
   if (!teamIdCache.has(options)) {
     teamIdCache.set(
       options,
       getTeam(options).then((t) => {
-        const id = t?._id ?? t?.id;
+        const id = t?.team?._id ?? t?.team?.id ?? t?._id ?? t?.id;
         if (!id) throw new Error("Could not resolve team ID from /team response");
         return String(id);
       }),
