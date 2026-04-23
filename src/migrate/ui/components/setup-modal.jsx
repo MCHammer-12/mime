@@ -1,7 +1,5 @@
 // Add-store modal — three-field form. Decodes store ID from Redo token on save.
-// Token field swaps label + help copy based on env.hostedDeploy:
-//   false (dev)  → "Redo session token (dev)" + paste-from-devtools instructions
-//   true  (prod) → "Redo API token" + "Generate a token →" link
+// Token field always asks for the Redo session JWT (same in dev + prod).
 
 const { useState: useSM } = React;
 
@@ -15,7 +13,6 @@ function SetupModal({ onSave, onClose }) {
 
   const decoded = window.decodeStoreIdFromToken(redoToken);
   const valid = name.trim() && klaviyoKey.trim().length > 10 && decoded;
-  const hosted = !!(window.mockEnv && window.mockEnv.hostedDeploy);
 
   const inputClass =
     "w-full bg-[#010409] border border-[#30363d] rounded-[4px] " +
@@ -70,27 +67,15 @@ function SetupModal({ onSave, onClose }) {
           <label className="block">
             <div className="flex items-baseline justify-between mb-1.5">
               <div className="text-[11px] text-[#8b949e]">
-                {hosted ? "Redo API token" : "Redo session token"}
-                {!hosted && <span className="text-[#6e7681] ml-1.5">(dev)</span>}
+                Redo session token
               </div>
-              {hosted && (
-                <a
-                  href="https://app.getredo.com/settings/api-tokens"
-                  target="_blank"
-                  rel="noopener"
-                  className="text-[10px] text-[#58a6ff] hover:text-[#79c0ff] inline-flex items-center gap-1"
-                >
-                  Generate a token
-                  <Icon.external width="9" height="9"/>
-                </a>
-              )}
             </div>
             <div className="relative">
               <input
                 type={show.token ? "text" : "password"}
                 value={redoToken}
                 onChange={(e) => setRedoToken(e.target.value)}
-                placeholder={hosted ? "redo_pat_…" : "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"}
+                placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"
                 className={inputClass + " pr-9 font-mono text-[12px]"}
                 spellCheck={false}
                 autoComplete="off"
@@ -104,20 +89,11 @@ function SetupModal({ onSave, onClose }) {
               </button>
             </div>
             <div className="text-[10px] text-[#6e7681] mt-1.5 leading-relaxed">
-              {hosted ? (
-                <>
-                  Generate a migration token in your Redo settings. This token is stored
-                  locally in your browser and never sent anywhere except Redo.
-                </>
-              ) : (
-                <>
-                  Paste the JWT from your browser. In Chrome: open{" "}
-                  <code className="text-[#8b949e]">app.getredo.com</code> while logged in,
-                  DevTools → Application → Local Storage → copy the value of{" "}
-                  <code className="text-[#8b949e]">redo.merchant_auth_token.&lt;teamId&gt;</code>.
-                  Expires periodically; re-paste if you get a 401.
-                </>
-              )}
+              Paste the JWT from your browser. In Chrome: open{" "}
+              <code className="text-[#8b949e]">app.getredo.com</code> while logged in,
+              DevTools → Application → Local Storage → copy the value of{" "}
+              <code className="text-[#8b949e]">redo.merchant_auth_token.&lt;teamId&gt;</code>.
+              Expires periodically; re-paste if you get a 401.
             </div>
             {decoded && (
               <div className="text-[10px] text-[#3fb950] mt-1.5 font-mono flex items-center gap-1.5">
