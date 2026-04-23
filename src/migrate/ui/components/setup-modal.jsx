@@ -9,7 +9,6 @@ function SetupModal({ onSave, onClose }) {
   const [redoToken, setRedoToken] = useSM("");
   const [redoServerBase, setRedoServerBase] = useSM("");
   const [showAdvanced, setShowAdvanced] = useSM(false);
-  const [show, setShow] = useSM({ klaviyo: false, token: false });
 
   const decoded = window.decodeStoreIdFromToken(redoToken);
   const valid = name.trim() && klaviyoKey.trim().length > 10 && decoded;
@@ -44,24 +43,15 @@ function SetupModal({ onSave, onClose }) {
 
           <label className="block">
             <div className="text-[11px] text-[#8b949e] mb-1.5">Klaviyo key</div>
-            <div className="relative">
-              <input
-                type={show.klaviyo ? "text" : "password"}
-                value={klaviyoKey}
-                onChange={(e) => setKlaviyoKey(e.target.value)}
-                placeholder="pk_abc123def456…"
-                className={inputClass + " pr-9 font-mono text-[12px]"}
-                spellCheck={false}
-                autoComplete="off"
-              />
-              <button
-                onClick={() => setShow(s => ({ ...s, klaviyo: !s.klaviyo }))}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-[#6e7681] hover:text-[#e6edf3]"
-                tabIndex={-1}
-              >
-                {show.klaviyo ? <Icon.eyeOff width="14" height="14"/> : <Icon.eye width="14" height="14"/>}
-              </button>
-            </div>
+            <input
+              type="text"
+              value={klaviyoKey}
+              onChange={(e) => setKlaviyoKey(e.target.value)}
+              placeholder="pk_abc123def456…"
+              className={inputClass + " font-mono text-[12px]"}
+              spellCheck={false}
+              autoComplete="off"
+            />
           </label>
 
           <label className="block">
@@ -70,24 +60,15 @@ function SetupModal({ onSave, onClose }) {
                 Redo session token
               </div>
             </div>
-            <div className="relative">
-              <input
-                type={show.token ? "text" : "password"}
-                value={redoToken}
-                onChange={(e) => setRedoToken(e.target.value)}
-                placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"
-                className={inputClass + " pr-9 font-mono text-[12px]"}
-                spellCheck={false}
-                autoComplete="off"
-              />
-              <button
-                onClick={() => setShow(s => ({ ...s, token: !s.token }))}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-[#6e7681] hover:text-[#e6edf3]"
-                tabIndex={-1}
-              >
-                {show.token ? <Icon.eyeOff width="14" height="14"/> : <Icon.eye width="14" height="14"/>}
-              </button>
-            </div>
+            <input
+              type="text"
+              value={redoToken}
+              onChange={(e) => setRedoToken(e.target.value)}
+              placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"
+              className={inputClass + " font-mono text-[12px]"}
+              spellCheck={false}
+              autoComplete="off"
+            />
             <div className="text-[10px] text-[#6e7681] mt-1.5 leading-relaxed">
               Paste the JWT from your browser. In Chrome: open{" "}
               <code className="text-[#8b949e]">app.getredo.com</code> while logged in,
