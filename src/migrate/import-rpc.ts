@@ -29,6 +29,59 @@ import type { FontPlan, FontPlanEntry, FontFileSpec } from "../fonts.js";
 
 export const DEFAULT_SERVER_BASE = "https://app-server.getredo.com";
 
+// Minimum-viable brand kit used as the base when a merchant's existing kit
+// is missing any of the five required sibling objects
+// (colors / font / inputs / buttons / images). Mirrors
+// redoapp/redo/model/src/brand-kit.ts → defaultBrandKit so updateBrandKit's
+// Zod validator accepts the payload. Team customizations spread on top.
+const DEFAULT_BRAND_KIT = {
+  colors: { background: "#ffffff", accent: "#000000" },
+  font: {
+    fontFamily: "Arial",
+    headerFontFamily: "Arial",
+    bodyFontFamily: "Arial",
+    hierarchy: {
+      h1: { fontSizePx: 48, fontWeight: "bold" },
+      h2: { fontSizePx: 36, fontWeight: "semibold" },
+      h3: { fontSizePx: 30, fontWeight: "regular" },
+      body: { fontSizePx: 16, fontWeight: "regular" },
+      subtext: { fontSizePx: 14, fontWeight: "regular" },
+    },
+  },
+  inputs: {
+    backgroundColor: "#ffffff",
+    errorColor: "#ff0000",
+    textColor: "#000000",
+    border: { cornerRadiusPx: 8, stroke: { color: "#000000", weightPx: 1 } },
+    paddingPx: 8,
+    fontReference: "body",
+  },
+  buttons: {
+    primary: {
+      backgroundColor: "#000000",
+      textColor: "#ffffff",
+      border: { cornerRadiusPx: 8, stroke: { color: "#000000", weightPx: 1 } },
+      paddingPx: 8,
+      fontReference: "body",
+    },
+    secondary: {
+      backgroundColor: "#ffffff",
+      textColor: "#000000",
+      border: { cornerRadiusPx: 8, stroke: { color: "#000000", weightPx: 1 } },
+      paddingPx: 8,
+      fontReference: "body",
+    },
+    tertiary: {
+      backgroundColor: undefined,
+      textColor: "#000000",
+      border: { cornerRadiusPx: 8, stroke: { color: "#000000", weightPx: 0 } },
+      paddingPx: 8,
+      fontReference: "body",
+    },
+  },
+  images: { logoUrl: "", faviconUrl: "", bannerUrl: "", logoBannerUrl: "" },
+};
+
 /** Normalize a server base URL — trim trailing slashes so callers can't
  *  accidentally produce `//team` by pasting a URL with a trailing slash. */
 function resolveServerBase(serverBase: string | undefined | null): string {
@@ -192,8 +245,13 @@ export async function uploadFontsForTemplates(
   }
 
   // 1. Fetch current brand kit so we can merge (updateBrandKit overwrites).
-  const team = await getTeam(options);
-  const currentBrandKit: any = team?.settings?.brandKit ?? {};
+  //    /team returns `{_id: <user/membership id>, team: {_id: <team id>, ...}}`,
+  //    so settings.brandKit lives on `.team.settings.brandKit`, NOT top-level.
+  //    (Same wrapper bug as PR #14.) Fall back to the top-level shape in case
+  //    a different endpoint or response format returns it flat.
+  const teamResponse = await getTeam(options);
+  const teamDoc: any = teamResponse?.team ?? teamResponse ?? {};
+  const currentBrandKit: any = teamDoc?.settings?.brandKit ?? {};
   const currentFamilies: any[] = Array.isArray(currentBrandKit.customFontFamilies)
     ? currentBrandKit.customFontFamilies
     : [];
@@ -266,7 +324,12 @@ export async function uploadFontsForTemplates(
   }
 
   // 4. Merge into the existing brand kit and push it back whole.
+  //    updateBrandKit's Zod validator requires colors/font/inputs/buttons/images
+  //    as siblings (see redoapp redo/model/src/brand-kit.ts). Teams that never
+  //    customized the kit may have no values — fall back to a default shape so
+  //    the request validates. Team customizations override the default.
   const mergedBrandKit = {
+    ...DEFAULT_BRAND_KIT,
     ...currentBrandKit,
     customFontFamilies: [...currentFamilies, ...newFamilies],
   };
@@ -566,8 +629,12 @@ export async function importFlowRpc(
       options,
     );
   } catch (e: any) {
-    // Log a compact breadcrumb of the payload that failed validation so it
-    // shows up in the UI's job log. Full payload would be huge; summarize.
+    // Compact breadcrumb summarising the payload that failed. When prod
+    // redoapp's RPC framework hides the real error behind a generic 500,
+    // this at least gives us schemaType / category / team / per-type step
+    // counts for offline triage. Full step JSON was useful during active
+    // debugging — if you need it back, bisect the payload or apply
+    // create-advanced-flow's describeError patch locally and tunnel in.
     const stepTypes: Record<string, number> = {};
     for (const s of newFlow.steps ?? []) {
       const t = String((s as any).type ?? "?");
@@ -582,18 +649,6 @@ export async function importFlowRpc(
         `team=${(newFlow as any).team} ` +
         `steps=${(newFlow.steps ?? []).length} (${JSON.stringify(stepTypes)})`,
     });
-    // Full per-step JSON dump. Redoapp's RPC framework swallows the real
-    // handler error into a generic "Internal server error" 500 with no body
-    // detail (the real message only lives in server logs), so we emit the
-    // full payload here so a human can validate it against the Redo schemas
-    // offline and find the bad field.
-    for (const s of newFlow.steps ?? []) {
-      options.onProgress?.({
-        kind: "template_failed" as any,
-        templateName: `[flow debug] ${bundle.automation.name} step`,
-        error: JSON.stringify(s),
-      });
-    }
     options.onProgress?.({
       kind: "flow_failed",
       flowName: bundle.automation.name,
