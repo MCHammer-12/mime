@@ -5,6 +5,7 @@ import {
   translateTriggerSplitExpression,
 } from "./condition-mapping.js";
 import type { TemplateResolver } from "./template-resolver.js";
+import { treeifyFlow } from "./treeify.js";
 import { resolveTrigger } from "./trigger-mapping.js";
 import { rewriteKlaviyoLiquid } from "./variable-mapping.js";
 import {
@@ -153,14 +154,17 @@ async function convertAction(
         fullTemplate,
         templateWarnings,
       });
+      // Trailing send-emails need an End-of-flow terminal after them so the
+      // builder renders an End block; route orphan pointers to flow_end.
+      // Leave `disabled` unset — flow-level `enabled` is the single on/off
+      // knob the merchant flips after review.
       const step: SendEmailStep = {
         type: StepType.SEND_EMAIL,
         id,
         templateId: sentinelId,
         emailAddressFieldName: "customerEmail",
         recipientNameFieldName: "customerFullName",
-        nextId: next,
-        disabled: (action.data?.status ?? msg.status) !== "live",
+        nextId: terminate(next, state),
       };
       if (msg.smart_sending_enabled === false) {
         // Flag for the importer to set shouldSkipSmartSending on the TRIGGER step
@@ -207,7 +211,7 @@ async function convertAction(
         type: StepType.DO_NOTHING,
         id,
         customTitle: `SKIPPED SMS: ${preview}${body.length > 60 ? "…" : ""}`,
-        nextId: next,
+        nextId: terminate(next, state),
       };
       return stub;
     }
@@ -240,7 +244,7 @@ async function convertAction(
           type: StepType.DO_NOTHING,
           id,
           customTitle: `SKIPPED: webhook to ${rawUrl.slice(0, 60)}`,
-          nextId: next,
+          nextId: terminate(next, state),
         };
         return stub;
       }
@@ -258,8 +262,8 @@ async function convertAction(
         destinationUrl: urlResult.output,
         headers,
         payload: bodyResult.output,
-        nextId: next,
-        disabled: (action.data?.status ?? msg.status) !== "live",
+        nextId: terminate(next, state),
+        disabled: false,
         authType: null,
       };
       return step;
@@ -334,12 +338,11 @@ async function convertAction(
         customTitle: `TODO: ${action.type} (rebuild manually)`,
         // ab-test links through main_action.next; update-profile / list-update
         // always use plain next. Fall back to either branch pointer if we
-        // encounter an unexpected shape.
-        nextId:
-          next ??
-          action.links?.next_if_false ??
-          action.links?.next_if_true ??
-          undefined,
+        // encounter an unexpected shape; terminate if all are absent.
+        nextId: terminate(
+          next ?? action.links?.next_if_false ?? action.links?.next_if_true,
+          state,
+        ),
       };
       return stub;
     }
@@ -425,6 +428,11 @@ export async function parseFlow(
     steps.push(terminal);
   }
 
+  // Klaviyo allows branch re-merging; Redo's advanced flows are trees. Clone
+  // any step reachable from >1 parent so each incoming branch has its own
+  // copy of the downstream subtree. flow_end stays shared.
+  const treeifiedSteps = treeifyFlow(steps, warnings);
+
   const status = flow.data.attributes.status;
   const enabled = status === "live";
 
@@ -433,7 +441,7 @@ export async function parseFlow(
     name: flow.data.attributes.name,
     description: `Imported from Klaviyo flow ${flow.data.id}`,
     enabled,
-    steps,
+    steps: treeifiedSteps,
     schemaType: resolution.schemaType,
     category: "Marketing",
     ...(opts.createdByUserId ? { createdByUserId: opts.createdByUserId } : {}),
