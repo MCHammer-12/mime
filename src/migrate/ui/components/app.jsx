@@ -128,6 +128,28 @@ function App() {
     setShowAddStore(false);
   };
 
+  // ─ Delete store ─
+  // Confirms then removes the store from the list. Related per-store caches
+  // (storeDataMap, perStore, sessionImports, lastResult, inProgress) are
+  // left as orphan entries — they're keyed by storeId and garbage-collected
+  // on the next browser-storage clear. Jobs stay in the jobs panel so the
+  // user can still open their logs.
+  const deleteStore = (storeId) => {
+    const store = stores.find(s => s.id === storeId);
+    if (!store) return;
+    const jobsForStore = jobs.filter(j => j.storeId === storeId);
+    const running = jobsForStore.filter(j => j.status === "running" || j.status === "waiting_input").length;
+    const msg = running > 0
+      ? `Delete "${store.name}"?\n\n${running} job${running === 1 ? "" : "s"} still running — they'll keep running on the server but disappear from the dashboard.`
+      : `Delete "${store.name}"?\n\nThe store card will be removed from the dashboard. Prior imports in Redo are unaffected.`;
+    if (!window.confirm(msg)) return;
+    setStores(s => s.filter(x => x.id !== storeId));
+    setStoreDataMap(m => {
+      const { [storeId]: _drop, ...rest } = m;
+      return rest;
+    });
+  };
+
   // ─ Navigation ─
   const openStore = (storeId) => setView({ screen: "migration", storeId });
   const goDashboard = () => setView({ screen: "dashboard", storeId: null });
@@ -379,6 +401,7 @@ function App() {
             jobs={jobs}
             onOpenStore={openStore}
             onAddStore={() => setShowAddStore(true)}
+            onDeleteStore={deleteStore}
           />
         ) : (
           <MigrationScreen

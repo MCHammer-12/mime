@@ -2,7 +2,7 @@
 
 const { useState: useSD } = React;
 
-function Dashboard({ stores, jobs, onOpenStore, onAddStore }) {
+function Dashboard({ stores, jobs, onOpenStore, onAddStore, onDeleteStore }) {
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="max-w-[1200px] mx-auto px-8 py-8">
@@ -17,6 +17,7 @@ function Dashboard({ stores, jobs, onOpenStore, onAddStore }) {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <AddStoreCard onClick={onAddStore} />
           {stores.map(store => {
             const storeJobs = jobs.filter(j => j.storeId === store.id);
             return (
@@ -25,10 +26,10 @@ function Dashboard({ stores, jobs, onOpenStore, onAddStore }) {
                 store={store}
                 jobs={storeJobs}
                 onClick={() => onOpenStore(store.id)}
+                onDelete={onDeleteStore ? () => onDeleteStore(store.id) : null}
               />
             );
           })}
-          <AddStoreCard onClick={onAddStore} />
         </div>
       </div>
     </div>
@@ -68,61 +69,70 @@ function GlobalJobStatus({ jobs }) {
   );
 }
 
-function StoreCard({ store, jobs, onClick }) {
+function StoreCard({ store, jobs, onClick, onDelete }) {
   const running = jobs.filter(j => j.status === "running").length;
   const completed = jobs.filter(j => j.status === "complete").length;
   const failed = jobs.filter(j => j.status === "partial" || j.status === "canceled").length;
   const needsInput = jobs.filter(j => j.status === "waiting_input").length;
 
   const isActive = running + needsInput > 0;
-  const statusSummary =
-    jobs.length === 0 ? "idle" :
-    isActive
-      ? [running && `${running} running`, needsInput && `${needsInput} needs input`, failed && `${failed} failed`]
-          .filter(Boolean).join(", ")
-      : `${completed} completed${failed ? `, ${failed} failed` : ""}`;
 
+  // Outer is a `div` (not button) so we can nest the delete button. Opening
+  // the store still works via the big clickable area below.
   return (
-    <button
-      onClick={onClick}
+    <div
       className={
-        "text-left border rounded-[6px] p-4 transition-colors bg-[#0d1117] " +
+        "group relative border rounded-[6px] transition-colors bg-[#0d1117] " +
         (isActive
           ? "border-[#388bfd40] hover:border-[#388bfd80]"
           : "border-[#21262d] hover:border-[#30363d]")
       }
     >
-      <div className="flex items-start justify-between gap-2 mb-3">
-        <div className="min-w-0">
-          <div className="font-serif text-[22px] leading-[1.1] text-[#e6edf3] truncate">{store.name}</div>
-          <div className="text-[11px] text-[#6e7681] mt-1">
-            {store.lastImportedAt
-              ? `Last imported ${relDate(new Date(store.lastImportedAt).toISOString())} ago`
-              : "Never imported"}
+      {onDelete && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          title="Delete store"
+          className="absolute top-2 right-2 w-6 h-6 flex items-center justify-center rounded-[4px] text-[#6e7681] opacity-0 group-hover:opacity-100 hover:bg-[#21262d] hover:text-[#f85149] transition-opacity"
+        >
+          <Icon.x width="12" height="12"/>
+        </button>
+      )}
+      <button
+        onClick={onClick}
+        className="w-full text-left p-4"
+      >
+        <div className="flex items-start justify-between gap-2 mb-3">
+          <div className="min-w-0 pr-6">
+            <div className="font-serif text-[22px] leading-[1.1] text-[#e6edf3] truncate">{store.name}</div>
+            <div className="text-[11px] text-[#6e7681] mt-1">
+              {store.lastImportedAt
+                ? `Last imported ${relDate(new Date(store.lastImportedAt).toISOString())} ago`
+                : "Never imported"}
+            </div>
+          </div>
+          <div className="flex-shrink-0">
+            {isActive ? (
+              <span className="w-2 h-2 rounded-full bg-[#388bfd] animate-pulse inline-block"/>
+            ) : (
+              <Icon.chevronRight width="14" height="14" className="text-[#6e7681]"/>
+            )}
           </div>
         </div>
-        <div className="flex-shrink-0">
-          {isActive ? (
-            <span className="w-2 h-2 rounded-full bg-[#388bfd] animate-pulse inline-block"/>
+
+        <div className="text-[11px] text-[#8b949e]">
+          {jobs.length === 0 ? (
+            <span className="text-[#6e7681]">no jobs yet</span>
           ) : (
-            <Icon.chevronRight width="14" height="14" className="text-[#6e7681]"/>
+            <div className="flex flex-wrap gap-x-3 gap-y-1">
+              {running > 0 && <JobStat color="#388bfd" n={running} label="running" pulse/>}
+              {needsInput > 0 && <JobStat color="#58a6ff" n={needsInput} label="needs input"/>}
+              {completed > 0 && <JobStat color="#3fb950" n={completed} label="completed"/>}
+              {failed > 0 && <JobStat color="#f85149" n={failed} label="failed"/>}
+            </div>
           )}
         </div>
-      </div>
-
-      <div className="text-[11px] text-[#8b949e]">
-        {jobs.length === 0 ? (
-          <span className="text-[#6e7681]">no jobs yet</span>
-        ) : (
-          <div className="flex flex-wrap gap-x-3 gap-y-1">
-            {running > 0 && <JobStat color="#388bfd" n={running} label="running" pulse/>}
-            {needsInput > 0 && <JobStat color="#58a6ff" n={needsInput} label="needs input"/>}
-            {completed > 0 && <JobStat color="#3fb950" n={completed} label="completed"/>}
-            {failed > 0 && <JobStat color="#f85149" n={failed} label="failed"/>}
-          </div>
-        )}
-      </div>
-    </button>
+      </button>
+    </div>
   );
 }
 
