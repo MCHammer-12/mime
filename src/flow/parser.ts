@@ -27,6 +27,27 @@ import {
 } from "./types.js";
 
 const TRIGGER_STEP_ID = "trigger";
+const FLOW_END_ID = "flow_end";
+
+// Branch pointer may be absent when a Klaviyo action is the last step on its
+// path ("end path" in Klaviyo's UI). Redo's mongoose schemas mark several
+// pointer fields as `required: true` on String type, and mongoose rejects
+// empty strings for required String fields. When we don't have a real
+// pointer, route to a single shared terminal DO_NOTHING step at the tail
+// of the flow. state.needsTerminal is flipped the first time we generate a
+// reference so parseFlow can append the step.
+interface ParseState {
+  needsTerminal: boolean;
+}
+
+function terminate(
+  pointer: string | null | undefined,
+  state: ParseState,
+): string {
+  if (pointer && pointer.length > 0) return pointer;
+  state.needsTerminal = true;
+  return FLOW_END_ID;
+}
 
 function mapWaitTimeUnit(unit: string): WaitTimeUnit {
   switch (unit) {
@@ -51,6 +72,7 @@ async function convertAction(
   templateResolver: TemplateResolver | null,
   warnings: ParseWarning[],
   placeholderTemplates: PlaceholderTemplate[],
+  state: ParseState,
 ): Promise<Step | null> {
   const id = action.id;
   const next = action.links?.next ?? undefined;
@@ -69,7 +91,9 @@ async function convertAction(
           unit === WaitTimeUnit.HOURS ? value * 3600 :
           unit === WaitTimeUnit.MINUTES ? value * 60 :
           undefined,
-        nextId: next ?? "",
+        // WAIT step's nextId is mongoose-required; "" would fail validation
+        // on a terminal wait. Route orphans to the shared flow_end terminal.
+        nextId: terminate(next, state),
       };
       if (d.delay_until_time) {
         warnings.push({
@@ -245,8 +269,10 @@ async function convertAction(
       // Emit a real CONDITION step. Translate profile-metric conditions into
       // Redo's InlineSegment format (customer_activity with count + timeframe).
       // Unmapped condition types stay as warnings and omit from the expression.
-      const nextTrueId = action.links?.next_if_true ?? "";
-      const nextFalseId = action.links?.next_if_false ?? "";
+      // Both nextTrueId and nextFalseId are mongoose-required; route "end path"
+      // branches to the shared flow_end terminal.
+      const nextTrueId = terminate(action.links?.next_if_true, state);
+      const nextFalseId = terminate(action.links?.next_if_false, state);
       const expression = translateConditionalSplitExpression(action, metrics, warnings);
       const conditionCount =
         (expression as any)?.inlineSegment?.conditions?.length ?? 0;
@@ -270,8 +296,8 @@ async function convertAction(
       // Translate to Redo's TriggerData schemaBooleanExpression when possible;
       // fall back to an empty inline-segment CONDITION with a warning if the
       // Klaviyo field doesn't have a Redo equivalent in this trigger's schema.
-      const nextTrueId = action.links?.next_if_true ?? "";
-      const nextFalseId = action.links?.next_if_false ?? "";
+      const nextTrueId = terminate(action.links?.next_if_true, state);
+      const nextFalseId = terminate(action.links?.next_if_false, state);
       const tsExpr = translateTriggerSplitExpression(action, flowSchemaType, warnings);
       const expression = tsExpr ?? {
         dataSource: "inline-segment",
@@ -345,13 +371,15 @@ export async function parseFlow(
   const defn = flow.data.attributes.definition;
   const firstActionId = defn?.actions?.[0]?.id;
 
+  const state: ParseState = { needsTerminal: false };
+
   const triggerStep: TriggerStep = {
     type: StepType.TRIGGER,
     id: TRIGGER_STEP_ID,
     schemaType: resolution.schemaType,
     category: "Marketing",
     key: resolution.key,
-    nextId: firstActionId ?? "",
+    nextId: terminate(firstActionId, state),
     ...(resolution.autoSkipAbandonmentField
       ? {
           skipConditions: {
@@ -380,8 +408,21 @@ export async function parseFlow(
       opts.templateResolver ?? null,
       warnings,
       placeholderTemplates,
+      state,
     );
     if (step) steps.push(step);
+  }
+
+  // Append the shared terminal step if any branch/pointer pointed at it.
+  // DO_NOTHING has no required fields beyond type+id, so this is safe to
+  // leave dangling (no nextId needed).
+  if (state.needsTerminal) {
+    const terminal: DoNothingStep = {
+      type: StepType.DO_NOTHING,
+      id: FLOW_END_ID,
+      customTitle: "End of flow",
+    };
+    steps.push(terminal);
   }
 
   const status = flow.data.attributes.status;
