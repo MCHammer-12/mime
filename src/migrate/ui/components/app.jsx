@@ -383,14 +383,52 @@ function App() {
     }));
   }, []);
 
+  // ─ Env (prod by default; only dev when /api/env says so). Dev mode
+  //   shows a soft orange glow around the screen so it's obvious we're
+  //   not pointed at production.
+  const [hosted, setHosted] = useS(() => {
+    // Seed from mockEnv if already set (survives re-renders); otherwise prod.
+    if (window.mockEnv && typeof window.mockEnv.hostedDeploy === "boolean") {
+      return window.mockEnv.hostedDeploy;
+    }
+    window.mockEnv = { ...(window.mockEnv || {}), hostedDeploy: true };
+    return true;
+  });
+  useE(() => {
+    let cancelled = false;
+    fetch("/api/env")
+      .then(r => r.ok ? r.json() : null)
+      .then(env => {
+        if (cancelled || !env) return;
+        // Only downgrade to dev if the server explicitly says so.
+        if (env.hostedDeploy === false) {
+          window.mockEnv = { ...(window.mockEnv || {}), hostedDeploy: false };
+          setHosted(false);
+        }
+      })
+      .catch(() => { /* default stays prod */ });
+    return () => { cancelled = true; };
+  }, []);
+
   // ─ Render ─
   const activeStore = view.storeId ? stores.find(s => s.id === view.storeId) : null;
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-[#0d1117] text-[#e6edf3] font-sans">
+    <div
+      className="h-screen w-screen flex flex-col bg-[#0d1117] text-[#e6edf3] font-sans relative"
+      style={hosted ? undefined : {
+        boxShadow: "inset 0 0 0 2px rgba(255, 68, 5, 0.45), inset 0 0 60px rgba(255, 68, 5, 0.18)",
+      }}
+    >
       <TopBar
         view={view}
         store={activeStore}
+        hosted={hosted}
+        onToggleHosted={() => {
+          const next = !hosted;
+          window.mockEnv = { ...(window.mockEnv || {}), hostedDeploy: next };
+          setHosted(next);
+        }}
         onGoDashboard={goDashboard}
       />
 
@@ -452,13 +490,7 @@ function App() {
   );
 }
 
-function TopBar({ view, store, onGoDashboard }) {
-  const [hosted, setHosted] = React.useState(!!(window.mockEnv && window.mockEnv.hostedDeploy));
-  const toggleHosted = () => {
-    const next = !hosted;
-    window.mockEnv = { ...(window.mockEnv || {}), hostedDeploy: next };
-    setHosted(next);
-  };
+function TopBar({ view, store, hosted, onToggleHosted, onGoDashboard }) {
   return (
     <div className="flex items-center gap-3 px-4 py-2 border-b border-[#21262d] bg-[#010409]">
       <div className="flex items-baseline gap-2">
@@ -469,6 +501,11 @@ function TopBar({ view, store, onGoDashboard }) {
       <span className="text-[10px] uppercase tracking-wider text-[#6e7681] px-2 py-0.5 border border-[#30363d] rounded-[3px] ml-2">
         internal · ops
       </span>
+      {!hosted && (
+        <span className="text-[10px] uppercase tracking-wider text-[#FF4405] font-semibold px-2 py-0.5 border border-[#FF4405]/60 rounded-[3px] bg-[#FF440510]">
+          DEV
+        </span>
+      )}
       <div className="flex items-center gap-2 text-[12px] ml-3">
         <button
           onClick={onGoDashboard}
@@ -483,12 +520,12 @@ function TopBar({ view, store, onGoDashboard }) {
       </div>
       <div className="ml-auto text-[11px] text-[#6e7681] flex items-center gap-3">
         <button
-          onClick={toggleHosted}
-          title="Toggle GET /api/env.hostedDeploy for the next Add-store modal"
+          onClick={onToggleHosted}
+          title="Toggle env between prod and dev (visual only)"
           className="flex items-center gap-1.5 px-1.5 py-0.5 border border-[#30363d] rounded-[3px] hover:border-[#484f58] hover:text-[#e6edf3]"
         >
           <span>env:</span>
-          <span className={hosted ? "text-[#3fb950]" : "text-[#d29922]"}>
+          <span className={hosted ? "text-[#3fb950]" : "text-[#FF4405]"}>
             {hosted ? "prod" : "dev"}
           </span>
         </button>
