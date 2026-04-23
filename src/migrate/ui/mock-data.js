@@ -46,21 +46,30 @@ async function fetchStoreData(store) {
   STORE_DATA[cacheKey] = {
     flows: [],
     templates: [],
+    campaigns: [],
     state: "loading",
     error: null,
   };
 
   try {
-    const [templatesRes, flowsRes] = await Promise.all([
+    const [templatesRes, flowsRes, campaignsRes] = await Promise.all([
       postJson("/api/templates", { klaviyoKey: store.klaviyoKey }),
       postJson("/api/flows", { klaviyoKey: store.klaviyoKey }),
+      postJson("/api/campaigns", { klaviyoKey: store.klaviyoKey }).catch((e) => {
+        // Campaigns are non-fatal — if the endpoint fails we still want
+        // templates + flows to load. Log and return an empty list.
+        console.warn("campaigns fetch failed:", e?.message ?? e);
+        return { campaigns: [], debug: { error: String(e?.message ?? e) } };
+      }),
     ]);
     const loaded = {
       flows: flowsRes?.flows ?? [],
       templates: templatesRes?.templates ?? [],
+      campaigns: campaignsRes?.campaigns ?? [],
       state: "loaded",
       error: null,
       debug: flowsRes?.debug ?? null,
+      campaignsDebug: campaignsRes?.debug ?? null,
     };
     STORE_DATA[cacheKey] = loaded;
     return loaded;
@@ -69,6 +78,7 @@ async function fetchStoreData(store) {
     STORE_DATA[cacheKey] = {
       flows: [],
       templates: [],
+      campaigns: [],
       state: "error",
       error,
     };

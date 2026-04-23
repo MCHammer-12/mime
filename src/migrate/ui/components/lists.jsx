@@ -95,7 +95,7 @@ function ListShell({
 }
 
 function getItemId(item) {
-  return item.flowId || item.id;
+  return item.flowId || item.campaignId || item.id;
 }
 
 // ── Flow row ──────────────────────────────────────────────────────
@@ -245,4 +245,114 @@ function TemplateRow({ template, selected, onToggle, alreadyImported, inProgress
   );
 }
 
-Object.assign(window, { ListShell, FlowRow, TemplateRow });
+// ── Campaign row ──────────────────────────────────────────────────
+// Parallels FlowRow (expandable container showing each message). A campaign
+// with multiple messages = A/B variants → each produces an EmailTemplate.
+function CampaignRow({ campaign, selected, onToggle, alreadyImported, inProgress, lastResult, libraryTemplateIds }) {
+  const [expanded, setExpanded] = useStateList(false);
+  const msgCount = campaign.messages?.length ?? 0;
+  const hasLibraryOverlap = (campaign.messages ?? []).some(
+    (m) => m.templateId && libraryTemplateIds?.has(m.templateId),
+  );
+
+  const stateIndicator = () => {
+    if (inProgress) return (
+      <span className="text-[10px] text-[#388bfd] flex items-center gap-1">
+        <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#388bfd] animate-pulse" />
+        importing
+      </span>
+    );
+    if (lastResult === "imported") return (
+      <span className="text-[10px] text-[#3fb950] flex items-center gap-1">
+        <Icon.check width="10" height="10"/> just imported
+      </span>
+    );
+    if (lastResult === "failed") return (
+      <span className="text-[10px] text-[#f85149] flex items-center gap-1">
+        <Icon.alert width="10" height="10"/> failed
+      </span>
+    );
+    if (alreadyImported) return (
+      <span className="text-[10px] text-[#6e7681] flex items-center gap-1">
+        <Icon.check width="10" height="10"/> imported earlier
+      </span>
+    );
+    return null;
+  };
+
+  return (
+    <div className={"border-b border-[#21262d] " + (selected ? "bg-[#388bfd08]" : "hover:bg-[#161b22]")}>
+      <div
+        className="flex items-center px-4 py-2 cursor-pointer"
+        onClick={onToggle}
+      >
+        <Checkbox checked={selected} onChange={onToggle} />
+        <button
+          onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+          className="ml-1 w-4 h-4 flex items-center justify-center text-[#6e7681] hover:text-[#e6edf3]"
+        >
+          {expanded
+            ? <Icon.chevronDown width="12" height="12"/>
+            : <Icon.chevronRight width="12" height="12"/>}
+        </button>
+        <div className="flex-1 min-w-0 ml-2">
+          <div className="flex items-center gap-3">
+            <span className={"text-[13px] truncate " + (alreadyImported ? "text-[#8b949e]" : "text-[#e6edf3]")}>
+              {campaign.campaignName}
+            </span>
+            {stateIndicator()}
+          </div>
+          <div className="flex items-center gap-3 mt-0.5 text-[11px] text-[#6e7681]">
+            <StatusBadge status={campaign.status}/>
+            <span className="flex items-center gap-1">
+              <Icon.mail width="10" height="10"/>
+              {msgCount} message{msgCount === 1 ? "" : "s"}
+              {msgCount > 1 && <span className="text-[#d29922] ml-0.5">(A/B)</span>}
+            </span>
+            {campaign.sendTime && (
+              <>
+                <span>·</span>
+                <span>sent {relDate(campaign.sendTime)}</span>
+              </>
+            )}
+            {hasLibraryOverlap && (
+              <>
+                <span>·</span>
+                <span className="text-[#d29922]" title="This campaign reuses a library template that also appears in the Templates tab. Importing both will produce a duplicate in Redo.">
+                  uses library template
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+        <code className="text-[10px] text-[#484f58] font-mono hidden md:block ml-3 truncate max-w-[160px]">
+          {campaign.campaignId}
+        </code>
+      </div>
+      {expanded && (
+        <div className="pb-2 pl-[52px] pr-4 -mt-1">
+          <div className="text-[10px] uppercase tracking-wider text-[#6e7681] mb-1">
+            Messages · each becomes one email template in Redo
+          </div>
+          <div className="space-y-0.5">
+            {(campaign.messages ?? []).map((m, i) => (
+              <div key={m.messageId} className="flex items-center gap-2 text-[11px] text-[#8b949e]">
+                <span className="text-[#484f58] tabular-nums">{String(i + 1).padStart(2, "0")}</span>
+                <Icon.mail width="10" height="10" className="text-[#484f58]"/>
+                <span className="truncate">{m.label || m.subject || `variant ${String.fromCharCode(65 + i)}`}</span>
+                {m.templateId && libraryTemplateIds?.has(m.templateId) && (
+                  <span className="text-[9px] text-[#d29922]">· also in library</span>
+                )}
+                <code className="text-[#484f58] text-[10px] ml-auto truncate max-w-[140px]">
+                  {m.templateId || "(no template)"}
+                </code>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+Object.assign(window, { ListShell, FlowRow, TemplateRow, CampaignRow });
