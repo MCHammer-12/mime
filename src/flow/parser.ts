@@ -20,7 +20,6 @@ import {
   type ParseWarning,
   type PlaceholderTemplate,
   type SendEmailStep,
-  type SendSmsStep,
   type SendWebhookStep,
   type Step,
   type TriggerStep,
@@ -160,23 +159,33 @@ async function convertAction(
     }
 
     case "send-sms": {
+      // Redo's SendSmsStep requires a real SMS templateId (ObjectId string);
+      // we'd need a createSmsTemplate RPC + SMS template construction to
+      // emit a valid SendSmsStep. Until that's built, emit a DO_NOTHING stub
+      // with the body preserved in customTitle so the merchant can rebuild
+      // the SMS manually in Redo.
       const msg = action.data?.message ?? {};
-      const body = msg.body ?? "";
+      const body = String(msg.body ?? "");
+      const preview = body.slice(0, 60).replace(/\s+/g, " ");
+      warnings.push({
+        kind: "skipped-step",
+        actionId: id,
+        message: `send-sms step skipped: Redo SMS requires a pre-built template (not yet supported by migration). Body: "${body.slice(0, 200)}"`,
+      });
       if (msg.image_id) {
         warnings.push({
           kind: "requires-review",
           actionId: id,
-          message: `send-sms has image_id=${msg.image_id} (MMS); image asset fetch not yet implemented — SMS will send text-only`,
+          message: `send-sms had image_id=${msg.image_id} (MMS); rebuild manually in Redo`,
         });
       }
-      const step: SendSmsStep = {
-        type: StepType.SEND_SMS,
+      const stub: DoNothingStep = {
+        type: StepType.DO_NOTHING,
         id,
-        body,
+        customTitle: `SKIPPED SMS: ${preview}${body.length > 60 ? "…" : ""}`,
         nextId: next,
-        disabled: (action.data?.status ?? msg.status) !== "live",
       };
-      return step;
+      return stub;
     }
 
     case "send-webhook": {
