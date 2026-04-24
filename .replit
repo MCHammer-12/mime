@@ -14,11 +14,11 @@ build = ["sh", "-c", "npm ci --omit=dev"]
 ignorePorts = false
 
 [[ports]]
-localPort = 8765
+localPort = 5000
 externalPort = 80
 
 [[ports]]
-localPort = 5000
+localPort = 8765
 externalPort = 80
 
 [env]
