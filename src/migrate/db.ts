@@ -17,6 +17,12 @@ const { Pool } = pg;
 
 let pool: pg.Pool | null = null;
 let migrationsRun = false;
+// Hard kill-switch: once flipped, no more DB calls are attempted for the
+// life of the process. Set by `disableDb()` when the DB is provably
+// unreachable (e.g. startup migrations failed with a DNS error). This
+// stops the pg pool from stacking thousands of failed connection attempts
+// on every job event during an import.
+let dbDisabled = false;
 
 function buildPool(): pg.Pool | null {
   const url = process.env.DATABASE_URL;
@@ -40,15 +46,37 @@ function buildPool(): pg.Pool | null {
 }
 
 export function isDbEnabled(): boolean {
+  if (dbDisabled) return false;
   if (pool) return true;
   pool = buildPool();
   return pool !== null;
 }
 
 export function getPool(): pg.Pool {
+  if (dbDisabled) {
+    throw new Error("DB disabled — getPool() called after kill-switch tripped");
+  }
   if (!pool) pool = buildPool();
   if (!pool) throw new Error("DATABASE_URL not set — getPool() called in dev mode");
   return pool;
+}
+
+/**
+ * Permanently disable DB access for this process. Use when the DB is
+ * provably unreachable so subsequent calls don't pile up failed
+ * connection attempts. Drains the existing pool best-effort.
+ */
+export function disableDb(reason: string): void {
+  if (dbDisabled) return;
+  dbDisabled = true;
+  console.warn(`[db] disabled for the rest of this process: ${reason}`);
+  const p = pool;
+  pool = null;
+  if (p) {
+    // end() rejects in-flight queries; that's intentional — they were
+    // already failing. Swallow any error from end() itself.
+    p.end().catch(() => {});
+  }
 }
 
 const MIGRATIONS: Array<{ name: string; sql: string }> = [

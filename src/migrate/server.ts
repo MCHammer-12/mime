@@ -31,7 +31,7 @@ import {
   importTemplateRpc,
   uploadFontsForTemplates,
 } from "./import-rpc.js";
-import { isDbEnabled, reapStuckJobs, runMigrations } from "./db.js";
+import { disableDb, isDbEnabled, reapStuckJobs, runMigrations } from "./db.js";
 import {
   createJob,
   deleteJob,
@@ -2089,6 +2089,10 @@ async function startup() {
       console.log(`[startup] db: migrations ok, reaped ${reaped}, hydrated ${hydrated} job(s)`);
     } catch (e) {
       console.warn("[startup] db init failed — continuing in memory-only mode:", e);
+      // Trip the kill-switch so subsequent persistence calls don't keep
+      // hammering an unreachable host (otherwise every job event during
+      // an import racks up another DNS-timeout failure).
+      disableDb("startup migrations failed");
     }
   } else {
     console.log("[startup] DATABASE_URL not set — running in memory-only mode");
