@@ -110,6 +110,12 @@ function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpe
   const done    = job.items.filter(i => i.state === "imported");
   const flaggedCount = job.items.filter(i => (i.itemWarnings || []).length > 0).length;
   const firstFlaggedId = (job.items.find(i => (i.itemWarnings || []).length > 0) || {}).id;
+  const jobWarningCount = (job.warnings || []).length;
+  // Total surfaces of "needs your attention" — item warnings + job-level
+  // warnings. Used to gate the Review banner so users can always reach the
+  // warnings panel when *any* warning has been emitted, not just when an
+  // item carries one.
+  const totalWarningSources = flaggedCount + jobWarningCount;
 
   const [doneExpanded, setDoneExpanded] = useStateJobs(false);
 
@@ -273,16 +279,27 @@ function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpe
         </div>
       )}
 
-      {/* Warnings summary banner — shown when job complete and items have warnings */}
-      {(job.status === "complete" || job.status === "partial") && flaggedCount > 0 && (
+      {/* Warnings summary banner — always reachable. Covers item-level
+          warnings (per-item issues like skipped steps), job-level warnings
+          (broader notices the importer emits without an item id), or both.
+          Visible during running jobs too so users can peek at warnings as
+          they accumulate. Clicking opens the slide-in WarningsPanel; if
+          there are no item-flagged rows we still pass undefined and the
+          panel will surface the job-level warnings on its first view. */}
+      {totalWarningSources > 0 && (
         <div className="mx-4 mt-2 px-2.5 py-1.5 bg-[#d2992215] border border-[#d2992240] rounded-[3px] flex items-center gap-2">
-          <Icon.check width="11" height="11" className="text-[#3fb950] flex-shrink-0"/>
-          <span className="text-[11px] text-[#c9d1d9]">
-            <span className="tabular-nums">{done.length}</span> imported.
-          </span>
+          {(job.status === "complete" || job.status === "partial") && (
+            <>
+              <Icon.check width="11" height="11" className="text-[#3fb950] flex-shrink-0"/>
+              <span className="text-[11px] text-[#c9d1d9]">
+                <span className="tabular-nums">{done.length}</span> imported.
+              </span>
+            </>
+          )}
           <Icon.alert width="11" height="11" className="text-[#d29922] flex-shrink-0 ml-1"/>
           <span className="text-[11px] text-[#d29922]">
-            <span className="tabular-nums">{flaggedCount}</span> need your attention
+            <span className="tabular-nums">{totalWarningSources}</span>
+            {" "}need{totalWarningSources === 1 ? "s" : ""} your attention
           </span>
           <button
             onClick={() => onOpenWarnings && onOpenWarnings(job.id, firstFlaggedId)}
@@ -290,14 +307,6 @@ function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpe
           >
             Review →
           </button>
-        </div>
-      )}
-
-      {/* Warnings summary (legacy job-level) */}
-      {job.warnings && job.warnings.length > 0 && (
-        <div className="px-4 mt-2 text-[10px] text-[#d29922] flex items-start gap-1.5">
-          <Icon.alert width="10" height="10" className="mt-0.5 flex-shrink-0"/>
-          <span>{job.warnings.length} job-level warning{job.warnings.length === 1 ? "" : "s"} — see Review panel</span>
         </div>
       )}
 

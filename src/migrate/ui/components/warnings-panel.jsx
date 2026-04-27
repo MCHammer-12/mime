@@ -15,10 +15,43 @@ function WarningsPanel({ job, startItemId, onClose }) {
   useWPE(() => { setIdx(Math.max(0, flaggedItems.findIndex(i => i.id === startItemId))); }, [startItemId, job?.id]);
 
   if (!job) return null;
-  if (flaggedItems.length === 0) {
+
+  // Job-level warnings (no item id) — shown on every view, and used as
+  // the sole content when there are no item-flagged rows but the importer
+  // emitted broader notices (e.g. "review export in Klaviyo dashboard").
+  const jobWarnings = (job.warnings || []).map(t => ({ text: t, category: classifyWarning(t) }));
+  const jobGrouped = {};
+  jobWarnings.forEach(w => { (jobGrouped[w.category] ||= []).push(w); });
+
+  // Truly nothing to show.
+  if (flaggedItems.length === 0 && jobWarnings.length === 0) {
     return (
       <Shell onClose={onClose} title="No warnings" subtitle={`Job ${job.shortId}`}>
         <div className="px-5 py-6 text-[12px] text-[#6e7681]">Nothing to review on this job.</div>
+      </Shell>
+    );
+  }
+
+  // Job-level-only mode: render a simpler shell with no per-item nav and
+  // no "mark reviewed" footer (there's no item to mark).
+  if (flaggedItems.length === 0) {
+    return (
+      <Shell
+        onClose={onClose}
+        title="Job warnings"
+        subtitle={
+          <span className="inline-flex items-center gap-2">
+            <span>Job {job.shortId}</span>
+            <span>·</span>
+            <span>{jobWarnings.length} warning{jobWarnings.length === 1 ? "" : "s"}</span>
+          </span>
+        }
+      >
+        <div className="flex-1 overflow-y-auto">
+          {Object.keys(jobGrouped).map(cat => (
+            <Category key={"jl_"+cat} label={cat} items={jobGrouped[cat]}/>
+          ))}
+        </div>
       </Shell>
     );
   }
@@ -30,11 +63,6 @@ function WarningsPanel({ job, startItemId, onClose }) {
   });
   const categories = Object.keys(grouped);
   const isReviewed = reviewed.has(item.id);
-
-  // Job-level warnings (no item id) — shown on every view
-  const jobWarnings = (job.warnings || []).map(t => ({ text: t, category: classifyWarning(t) }));
-  const jobGrouped = {};
-  jobWarnings.forEach(w => { (jobGrouped[w.category] ||= []).push(w); });
 
   return (
     <Shell
