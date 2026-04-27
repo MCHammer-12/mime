@@ -112,7 +112,36 @@ function App() {
     campaigns: new Set([...(window.PRIOR_IMPORTED_CAMPAIGN_IDS ?? [])]),
   };
 
+  // ─ Hydrate prior imports from localStorage when a store is opened ─
+  // Without this, the "already imported" badges + filters reset to empty
+  // every time the page reloads, even though we successfully imported
+  // those items in a previous session. Per-store, scoped by storeId.
+  // Skips if sessionImports already has an entry for this store (we
+  // don't want to clobber in-progress session updates with stale disk
+  // state when the user navigates away and back).
+  useE(() => {
+    if (view.screen !== "migration" || !view.storeId) return;
+    if (sessionImports[view.storeId]) return;
+    const prior = window.loadPriorImports?.(view.storeId);
+    if (!prior) return;
+    setSessionImports((si) => ({ ...si, [view.storeId]: prior }));
+    // Also seed lastResult so already-imported items render the green
+    // "imported" pill on first paint, not just the "already imported"
+    // hide-filter toggle.
+    setLastResult((lr) => {
+      const existing = lr[view.storeId] ?? new Map();
+      const merged = new Map(existing);
+      for (const id of prior.flows) if (!merged.has(id)) merged.set(id, "imported");
+      for (const id of prior.tmpls) if (!merged.has(id)) merged.set(id, "imported");
+      for (const id of prior.campaigns) if (!merged.has(id)) merged.set(id, "imported");
+      return { ...lr, [view.storeId]: merged };
+    });
+  }, [view.screen, view.storeId]);
+
   // ─ Add store ─
+  // Saves the store and immediately opens its migration screen so the
+  // operator goes straight from "submit credentials" to "pick what to
+  // import" without an extra click on the dashboard tile.
   const addStore = (data) => {
     const newStore = {
       id: `str_${Date.now().toString(36)}`,
@@ -126,6 +155,7 @@ function App() {
     };
     setStores(s => [...s, newStore]);
     setShowAddStore(false);
+    setView({ screen: "migration", storeId: newStore.id });
   };
 
   // ─ Delete store ─
@@ -271,8 +301,10 @@ function App() {
       } else if (evt.kind === "imported") {
         items = items.map(i => i.id === evt.id ? { ...i, state: "imported", detail: `→ ${evt.templateId.slice(-8)}` } : i);
         setSessionImports(si => {
-          const cur = si[j.storeId] || { flows: new Set([...window.PRIOR_IMPORTED_FLOW_IDS]), tmpls: new Set([...window.PRIOR_IMPORTED_TEMPLATE_IDS]) };
-          return { ...si, [j.storeId]: { ...cur, tmpls: new Set([...cur.tmpls, evt.id]) } };
+          const cur = si[j.storeId] || { flows: new Set([...window.PRIOR_IMPORTED_FLOW_IDS]), tmpls: new Set([...window.PRIOR_IMPORTED_TEMPLATE_IDS]), campaigns: new Set([...(window.PRIOR_IMPORTED_CAMPAIGN_IDS ?? [])]) };
+          const nextStore = { ...cur, tmpls: new Set([...cur.tmpls, evt.id]) };
+          window.savePriorImports?.(j.storeId, nextStore);
+          return { ...si, [j.storeId]: nextStore };
         });
         setLastResult(lr => ({ ...lr, [j.storeId]: new Map([...(lr[j.storeId] || new Map())]).set(evt.id, "imported") }));
         setInProgress(ip => { const n = new Set(ip[j.storeId] || []); n.delete(evt.id); return { ...ip, [j.storeId]: n }; });
@@ -283,7 +315,9 @@ function App() {
         items = items.map(i => i.id === evt.id ? { ...i, state: "imported", detail: parts.join(" · ") } : i);
         setSessionImports(si => {
           const cur = si[j.storeId] || { flows: new Set([...window.PRIOR_IMPORTED_FLOW_IDS]), tmpls: new Set([...window.PRIOR_IMPORTED_TEMPLATE_IDS]), campaigns: new Set([...(window.PRIOR_IMPORTED_CAMPAIGN_IDS ?? [])]) };
-          return { ...si, [j.storeId]: { ...cur, flows: new Set([...cur.flows, evt.id]) } };
+          const nextStore = { ...cur, flows: new Set([...cur.flows, evt.id]) };
+          window.savePriorImports?.(j.storeId, nextStore);
+          return { ...si, [j.storeId]: nextStore };
         });
         setLastResult(lr => ({ ...lr, [j.storeId]: new Map([...(lr[j.storeId] || new Map())]).set(evt.id, "imported") }));
         setInProgress(ip => { const n = new Set(ip[j.storeId] || []); n.delete(evt.id); return { ...ip, [j.storeId]: n }; });
@@ -293,7 +327,9 @@ function App() {
         items = items.map(i => i.id === evt.id ? { ...i, state: "imported", detail: parts.join(" · ") } : i);
         setSessionImports(si => {
           const cur = si[j.storeId] || { flows: new Set([...window.PRIOR_IMPORTED_FLOW_IDS]), tmpls: new Set([...window.PRIOR_IMPORTED_TEMPLATE_IDS]), campaigns: new Set([...(window.PRIOR_IMPORTED_CAMPAIGN_IDS ?? [])]) };
-          return { ...si, [j.storeId]: { ...cur, campaigns: new Set([...cur.campaigns, evt.id]) } };
+          const nextStore = { ...cur, campaigns: new Set([...cur.campaigns, evt.id]) };
+          window.savePriorImports?.(j.storeId, nextStore);
+          return { ...si, [j.storeId]: nextStore };
         });
         setLastResult(lr => ({ ...lr, [j.storeId]: new Map([...(lr[j.storeId] || new Map())]).set(evt.id, "imported") }));
         setInProgress(ip => { const n = new Set(ip[j.storeId] || []); n.delete(evt.id); return { ...ip, [j.storeId]: n }; });

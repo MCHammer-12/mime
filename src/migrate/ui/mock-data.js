@@ -88,30 +88,35 @@ async function fetchStoreData(store) {
 
 // ─── Prior-imports persistence ────────────────────────────────────────────
 // Track which items have been imported per store so the UI can show the
-// green "already imported" state across sessions. Keyed by storeId.
+// "already imported" badge + filter across sessions. Keyed by storeId so a
+// browser used by one operator across many merchants stays scoped correctly.
 
 const PRIOR_FLOWS_KEY = (storeId) => `redo.migrate.prior_flows.${storeId}`;
 const PRIOR_TMPLS_KEY = (storeId) => `redo.migrate.prior_tmpls.${storeId}`;
+const PRIOR_CAMPAIGNS_KEY = (storeId) => `redo.migrate.prior_campaigns.${storeId}`;
 
 function loadPriorImports(storeId) {
-  if (!storeId) return { flows: new Set(), tmpls: new Set() };
+  if (!storeId) return { flows: new Set(), tmpls: new Set(), campaigns: new Set() };
   try {
     const flowsRaw = localStorage.getItem(PRIOR_FLOWS_KEY(storeId));
     const tmplsRaw = localStorage.getItem(PRIOR_TMPLS_KEY(storeId));
+    const campaignsRaw = localStorage.getItem(PRIOR_CAMPAIGNS_KEY(storeId));
     return {
       flows: new Set(flowsRaw ? JSON.parse(flowsRaw) : []),
       tmpls: new Set(tmplsRaw ? JSON.parse(tmplsRaw) : []),
+      campaigns: new Set(campaignsRaw ? JSON.parse(campaignsRaw) : []),
     };
   } catch {
-    return { flows: new Set(), tmpls: new Set() };
+    return { flows: new Set(), tmpls: new Set(), campaigns: new Set() };
   }
 }
 
-function savePriorImports(storeId, { flows, tmpls }) {
+function savePriorImports(storeId, { flows, tmpls, campaigns }) {
   if (!storeId) return;
   try {
-    localStorage.setItem(PRIOR_FLOWS_KEY(storeId), JSON.stringify([...flows]));
-    localStorage.setItem(PRIOR_TMPLS_KEY(storeId), JSON.stringify([...tmpls]));
+    localStorage.setItem(PRIOR_FLOWS_KEY(storeId), JSON.stringify([...(flows ?? [])]));
+    localStorage.setItem(PRIOR_TMPLS_KEY(storeId), JSON.stringify([...(tmpls ?? [])]));
+    localStorage.setItem(PRIOR_CAMPAIGNS_KEY(storeId), JSON.stringify([...(campaigns ?? [])]));
   } catch (e) {
     console.warn("savePriorImports: localStorage write failed", e);
   }
