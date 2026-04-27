@@ -82,6 +82,28 @@ const DEFAULT_BRAND_KIT = {
   images: { logoUrl: "", faviconUrl: "", bannerUrl: "", logoBannerUrl: "" },
 };
 
+/**
+ * Thrown when Redo returns 401/403 on an authenticated RPC call —
+ * almost always means the merchant JWT has expired (they last ~a few
+ * days). Callers can catch this specifically to prompt the user for a
+ * fresh token and retry, instead of failing the whole job with a
+ * generic "POST /foo 401" message.
+ */
+export class RedoAuthExpiredError extends Error {
+  readonly code = "redo_auth_expired" as const;
+  readonly status: number;
+  readonly endpoint: string;
+  constructor(endpoint: string, status: number, detail?: string) {
+    super(
+      `Redo auth expired (${status} on ${endpoint})` +
+        (detail ? `: ${detail}` : ""),
+    );
+    this.name = "RedoAuthExpiredError";
+    this.status = status;
+    this.endpoint = endpoint;
+  }
+}
+
 /** Normalize a server base URL — trim trailing slashes so callers can't
  *  accidentally produce `//team` by pasting a URL with a trailing slash. */
 function resolveServerBase(serverBase: string | undefined | null): string {
@@ -393,6 +415,9 @@ async function uploadAttachment(
       body?.error ??
       body?.message ??
       (text && text.length > 0 ? text.slice(0, 2000) : res.statusText);
+    if (res.status === 401 || res.status === 403) {
+      throw new RedoAuthExpiredError("/team/upload-attachment", res.status, msg);
+    }
     throw new Error(`upload-attachment ${res.status}: ${msg}`);
   }
   const url = body?.url;
@@ -410,6 +435,9 @@ async function getTeam(options: ImportOptions): Promise<any> {
   });
   const text = await res.text();
   if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      throw new RedoAuthExpiredError("/team", res.status, text?.slice(0, 500));
+    }
     throw new Error(`get team ${res.status}: ${text?.slice(0, 2000) ?? res.statusText}`);
   }
   try {
@@ -468,6 +496,9 @@ async function postAtPath(
       body?.error ??
       body?.message ??
       (text && text.length > 0 ? text.slice(0, 2000) : res.statusText);
+    if (res.status === 401 || res.status === 403) {
+      throw new RedoAuthExpiredError(path, res.status, msg);
+    }
     throw new Error(`POST ${path} ${res.status}: ${msg}`);
   }
   if (body?.error) {
@@ -581,6 +612,11 @@ export async function importFlowRpc(
       if (ph.fullTemplate) createdTemplateCount++;
       else blankTemplateCount++;
     } catch (e: any) {
+      // Auth-expiry must NOT be swallowed by the blank-template fallback —
+      // a 401 means every subsequent template create will fail with the
+      // same error, and the caller (server.ts → withFreshJwt) needs the
+      // typed error to prompt for a fresh JWT and retry the whole flow.
+      if (e instanceof RedoAuthExpiredError) throw e;
       // Don't abort the whole flow on one template failure — we'll fall back
       // to a blank and let the merchant fix it in the UI. Progress event was
       // already emitted by importTemplateRpc on failure.
@@ -591,8 +627,10 @@ export async function importFlowRpc(
         );
         sentinelToRealId.set(ph.sentinelId, blank.templateId);
         blankTemplateCount++;
-      } catch {
-        // If even the blank fails, we can't proceed.
+      } catch (e2: any) {
+        // Same rule for the fallback path: surface auth expiry typed.
+        if (e2 instanceof RedoAuthExpiredError) throw e2;
+        // If even the blank fails (and it's not auth), we can't proceed.
         throw new Error(
           `Template creation failed for "${ph.subject}": ${e.message ?? e}`,
         );

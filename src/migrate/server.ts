@@ -29,6 +29,7 @@ import type { ImportProgressEvent } from "./import-rpc.js";
 import {
   importFlowRpc,
   importTemplateRpc,
+  RedoAuthExpiredError,
   uploadFontsForTemplates,
 } from "./import-rpc.js";
 import { disableDb, isDbEnabled, reapStuckJobs, runMigrations } from "./db.js";
@@ -734,6 +735,71 @@ async function runImport(
     // ─── Import via marketing-rpc + font upload (Replit + local) ──────
     if (useRpcImport) {
       const serverBase = bodyRedoServerBase;
+      // Holder for the merchant JWT — mutable so a mid-import refresh
+      // (see withFreshJwt below) propagates to subsequent calls in this
+      // run without re-threading through every closure.
+      let currentJwt = redoJwt!;
+      // How many times we've prompted the user for a fresh token in this
+      // job. Used to make each prompt's questionKey unique so awaitInput
+      // doesn't auto-replay a stale (already-expired) answer from cache.
+      let jwtRefreshCount = 0;
+
+      /**
+       * Run an RPC call. If Redo returns 401/403 (token expired), pause
+       * the job, prompt the user for a fresh JWT, and retry — up to a
+       * small attempt cap so a wrong token doesn't loop forever. The
+       * refreshed token is reused by every subsequent RPC call in this
+       * run (currentJwt is closed over).
+       */
+      async function withFreshJwt<T>(
+        fn: (jwt: string) => Promise<T>,
+        label: string,
+      ): Promise<T> {
+        const MAX_REFRESH_ATTEMPTS = 5;
+        for (let attempt = 0; attempt <= MAX_REFRESH_ATTEMPTS; attempt++) {
+          try {
+            return await fn(currentJwt);
+          } catch (e: any) {
+            if (!(e instanceof RedoAuthExpiredError)) throw e;
+            if (attempt === MAX_REFRESH_ATTEMPTS) {
+              throw new Error(
+                `Redo auth still failing after ${MAX_REFRESH_ATTEMPTS} token refreshes — giving up on ${label}`,
+              );
+            }
+            emit({
+              kind: "warn",
+              text:
+                attempt === 0
+                  ? `Redo session token expired while ${label}. Paste a fresh token to continue.`
+                  : `That token also failed (${e.status}). Paste another to continue ${label}.`,
+            });
+            const fresh = await ctrl.prompt({
+              questionKey: `redo-jwt-refresh-${++jwtRefreshCount}`,
+              question:
+                "Your Redo session token has expired. Paste a fresh JWT to resume the import.",
+              context:
+                "Open redo.com in another tab and sign in. Then in DevTools → Application → Local Storage, copy the value of redo.merchant_auth_token.<teamId>. Or grab the Authorization header from any request to app-server.getredo.com.",
+              type: "text",
+              default: "",
+              itemLabel: "Redo session token",
+            });
+            const trimmed = (fresh ?? "").trim();
+            // The needs_input modal turns "Skip this item" into the
+            // type's default ("" for text). Treat empty as abort —
+            // there's nothing useful to retry with.
+            if (!trimmed || trimmed === "__skip__") {
+              throw new Error(
+                `Redo token refresh skipped — cannot continue ${label}`,
+              );
+            }
+            currentJwt = trimmed;
+            emit({ kind: "info", text: "Token refreshed. Retrying…" });
+          }
+        }
+        // Unreachable — loop either returns or throws.
+        throw new Error("withFreshJwt: unreachable");
+      }
+
       const onFontProgress = (ev: ImportProgressEvent) => {
         if (ev.kind === "font_uploading") {
           emit({ kind: "log", source: "stdout", text: `uploading font: ${ev.family} (${ev.fileName})` });
@@ -764,12 +830,16 @@ async function runImport(
         // NOT block import.
         try {
           emit({ kind: "step", label: "Uploading brand fonts…" });
-          const fontResult = await uploadFontsForTemplates(loaded.map((l) => l.json), {
-            jwt: redoJwt!,
-            serverBase,
-            account,
-            onProgress: onFontProgress,
-          });
+          const fontResult = await withFreshJwt(
+            (jwt) =>
+              uploadFontsForTemplates(loaded.map((l) => l.json), {
+                jwt,
+                serverBase,
+                account,
+                onProgress: onFontProgress,
+              }),
+            "uploading fonts",
+          );
           emit({
             kind: "fonts_done",
             uploaded: fontResult.uploaded,
@@ -791,18 +861,22 @@ async function runImport(
         for (const l of loaded) {
           emit({ kind: "step", label: `Importing ${l.name}…` });
           try {
-            const result = await importTemplateRpc(l.json, {
-              jwt: redoJwt!,
-              serverBase,
-              account,
-              onProgress: (ev: ImportProgressEvent) => {
-                if (ev.kind === "filter_created") {
-                  emit({ kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
-                } else if (ev.kind === "template_created") {
-                  emit({ kind: "log", source: "stdout", text: `template created: ${ev.templateId}` });
-                }
-              },
-            });
+            const result = await withFreshJwt(
+              (jwt) =>
+                importTemplateRpc(l.json, {
+                  jwt,
+                  serverBase,
+                  account,
+                  onProgress: (ev: ImportProgressEvent) => {
+                    if (ev.kind === "filter_created") {
+                      emit({ kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
+                    } else if (ev.kind === "template_created") {
+                      emit({ kind: "log", source: "stdout", text: `template created: ${ev.templateId}` });
+                    }
+                  },
+                }),
+              `importing template "${l.name}"`,
+            );
             templateImportOk++;
             emit({ kind: "imported", id: l.id, name: l.name, templateId: result.templateId });
           } catch (e: any) {
@@ -895,14 +969,15 @@ async function runImport(
 
           emit({ kind: "step", label: `Importing ${flowName}…` });
           try {
-            const result = await importFlowRpc(
+            const result = await withFreshJwt(
+              (jwt) => importFlowRpc(
               {
                 automation: parsed.automation as any,
                 warnings: parsed.warnings as any,
                 placeholderTemplates: parsed.placeholderTemplates as any,
               },
               {
-                jwt: redoJwt!,
+                jwt,
                 serverBase,
                 account,
                 onProgress: (ev: ImportProgressEvent) => {
@@ -921,6 +996,8 @@ async function runImport(
                   }
                 },
               },
+            ),
+              `importing flow "${flowName}"`,
             );
             flowImportOk++;
             emit({
@@ -1064,26 +1141,29 @@ async function runImport(
 
             emit({ kind: "step", label: `Importing ${variantName}…` });
             try {
-              const result = await importTemplateRpc(templateJson, {
-                jwt: redoJwt!,
-                serverBase: bodyRedoServerBase,
-                account,
-                onProgress: (ev: ImportProgressEvent) => {
-                  if (ev.kind === "filter_created") {
-                    emit({
-                      kind: "log",
-                      source: "stdout",
-                      text: `filter created: ${ev.productFilterId}`,
-                    });
-                  } else if (ev.kind === "template_created") {
-                    emit({
-                      kind: "log",
-                      source: "stdout",
-                      text: `  campaign template created: ${ev.templateId}`,
-                    });
-                  }
-                },
-              });
+              const result = await withFreshJwt(
+                (jwt) => importTemplateRpc(templateJson, {
+                  jwt,
+                  serverBase: bodyRedoServerBase,
+                  account,
+                  onProgress: (ev: ImportProgressEvent) => {
+                    if (ev.kind === "filter_created") {
+                      emit({
+                        kind: "log",
+                        source: "stdout",
+                        text: `filter created: ${ev.productFilterId}`,
+                      });
+                    } else if (ev.kind === "template_created") {
+                      emit({
+                        kind: "log",
+                        source: "stdout",
+                        text: `  campaign template created: ${ev.templateId}`,
+                      });
+                    }
+                  },
+                }),
+                `importing campaign variant "${variantName}"`,
+              );
               createdTemplateCount++;
               emit({
                 kind: "imported",
