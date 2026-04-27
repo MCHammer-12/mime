@@ -18,18 +18,20 @@ function Dashboard({ stores, jobs, onOpenStore, onAddStore, onDeleteStore }) {
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           <AddStoreCard onClick={onAddStore} />
-          {stores.map(store => {
-            const storeJobs = jobs.filter(j => j.storeId === store.id);
-            return (
-              <StoreCard
-                key={store.id}
-                store={store}
-                jobs={storeJobs}
-                onClick={() => onOpenStore(store.id)}
-                onDelete={onDeleteStore ? () => onDeleteStore(store.id) : null}
-              />
-            );
-          })}
+          {[...stores]
+            .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+            .map(store => {
+              const storeJobs = jobs.filter(j => j.storeId === store.id);
+              return (
+                <StoreCard
+                  key={store.id}
+                  store={store}
+                  jobs={storeJobs}
+                  onClick={() => onOpenStore(store.id)}
+                  onDelete={onDeleteStore ? () => onDeleteStore(store.id) : null}
+                />
+              );
+            })}
         </div>
       </div>
     </div>
