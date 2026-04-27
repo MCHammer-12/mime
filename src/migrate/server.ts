@@ -401,11 +401,20 @@ async function handleCampaigns(req: IncomingMessage, res: ServerResponse) {
     };
     // filter=equals(messages.channel,'email') is Klaviyo's required filter
     // on the campaigns endpoint (they split email + sms campaigns).
+    //
+    // We deliberately fetch only the 10 most-recent campaigns (single page,
+    // no pagination). Walking every campaign + every campaign-message +
+    // every template relationship for accounts with hundreds of historical
+    // campaigns would routinely exceed the deploy proxy's 60s response
+    // window and return a 504 Gateway Timeout. Most merchants only want
+    // their recent campaigns migrated anyway; older ones can be added
+    // later by lifting this cap.
     const filter = encodeURIComponent("equals(messages.channel,'email')");
-    const campaigns = await paginate<CampaignMeta>(
-      `/campaigns/?filter=${filter}&fields[campaign]=name,status,send_time,created_at&sort=-created_at`,
+    const campaignsBody: any = await klaviyo(
+      `/campaigns/?filter=${filter}&fields[campaign]=name,status,send_time,created_at&sort=-created_at&page[size]=10`,
       key,
     );
+    const campaigns: CampaignMeta[] = (campaignsBody?.data ?? []).slice(0, 10);
 
     type CampaignOut = {
       campaignId: string;
