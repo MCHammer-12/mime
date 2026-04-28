@@ -197,180 +197,274 @@ async function handleTemplates(req: IncomingMessage, res: ServerResponse) {
 // so the UI can show "Flow name → Email 1, Email 2, …" and the user can
 // pick by flow email rather than scroll a flat 400-entry template list.
 
+// Walker shared by /api/flows (single JSON response) and
+// /api/flows/stream (NDJSON progress + terminal payload). Extracted so
+// both endpoints stay in lockstep — the streaming endpoint is purely a
+// presentation wrapper around the same logic.
+//
+// `onProgress` receives:
+//   - { kind: "discovered", total }  — once, after the flow list is paginated
+//   - { kind: "scanned", scanned, total, currentName, emailsForFlow }
+//                                    — once per flow, in completion order
+//
+// Both events are best-effort; the walker never fails because of progress.
+type FlowWalkProgress =
+  | { kind: "discovered"; total: number }
+  | { kind: "scanned"; scanned: number; total: number; currentName: string; emailsForFlow: number };
+
+async function walkFlowsFromKlaviyo(
+  key: string,
+  onProgress?: (ev: FlowWalkProgress) => void,
+) {
+  type FlowMeta = {
+    id: string;
+    attributes: { name: string; status: string; trigger_type: string };
+  };
+  const flows = await paginate<FlowMeta>(
+    "/flows/?fields[flow]=name,status,trigger_type&sort=-updated",
+    key,
+  );
+  try { onProgress?.({ kind: "discovered", total: flows.length }); } catch {}
+
+  // For each flow, walk actions + messages to collect send-email steps.
+  // Run in parallel across flows (bounded concurrency), serial per-flow.
+  const LIMIT = 5;
+  const out: Array<{
+    flowId: string;
+    flowName: string;
+    flowStatus: string;
+    triggerType: string;
+    emails: Array<{
+      templateId: string | null;
+      messageId: string;
+      actionId: string;
+      name: string | null;
+    }>;
+  }> = [];
+
+  // Diagnostics — surface what the walker actually saw so the UI can
+  // show something useful when "0 flow emails" is returned.
+  const debug = {
+    totalFlows: flows.length,
+    flowsWithActions: 0,
+    flowsWithNoActions: 0,
+    actionTypeCounts: {} as Record<string, number>,
+    messagesSeen: 0,
+    messagesWithTemplate: 0,
+    messagesWithoutTemplate: 0,
+    failedActionFetches: 0,
+    failedMessageFetches: 0,
+    sampleFlowNames: [] as string[],
+    sampleMessageFetchErrors: [] as string[],
+  };
+
+  let idx = 0;
+  let scanned = 0;
+  async function worker() {
+    while (idx < flows.length) {
+      const i = idx++;
+      const f = flows[i]!;
+      if (debug.sampleFlowNames.length < 10) {
+        debug.sampleFlowNames.push(f.attributes.name);
+      }
+      let emailsForFlow = 0;
+      try {
+        const actionsBody: any = await klaviyo(
+          `/flows/${f.id}/flow-actions/`,
+          key,
+        );
+        const emails: Array<{
+          templateId: string | null;
+          messageId: string;
+          actionId: string;
+          name: string | null;
+        }> = [];
+
+        const allActions = actionsBody.data ?? [];
+        if (allActions.length > 0) debug.flowsWithActions++;
+        else debug.flowsWithNoActions++;
+
+        for (const a of allActions) {
+          const type = (a.attributes?.definition?.type ?? "").toLowerCase();
+          debug.actionTypeCounts[type] =
+            (debug.actionTypeCounts[type] ?? 0) + 1;
+        }
+
+        // Fetch flow-messages for each action. Klaviyo only returns
+        // messages for send-* actions (not time-delay / split / etc.);
+        // non-email actions return empty data or 404/400, so we ignore
+        // errors per-action. We probe both known endpoint shapes since
+        // Klaviyo's API has shifted between them and we've seen both
+        // in the wild:
+        //   1. /flow-actions/{id}/flow-messages/  (original)
+        //   2. /flow-messages/?filter=equals(flow-action.id,"<id>")
+        // Try #1 first, fall back to #2 on any failure.
+        for (const a of allActions) {
+          let msgs: any = null;
+          try {
+            msgs = await klaviyo(
+              `/flow-actions/${a.id}/flow-messages/`,
+              key,
+            );
+          } catch (e: any) {
+            if (debug.sampleMessageFetchErrors.length < 3) {
+              debug.sampleMessageFetchErrors.push(
+                `direct: ${e.message?.slice(0, 120) ?? String(e).slice(0, 120)}`,
+              );
+            }
+            // Fall back to the filter endpoint.
+            try {
+              msgs = await klaviyo(
+                `/flow-messages/?filter=${encodeURIComponent(
+                  `equals(flow-action.id,"${a.id}")`,
+                )}`,
+                key,
+              );
+            } catch (e2: any) {
+              debug.failedMessageFetches++;
+              if (debug.sampleMessageFetchErrors.length < 6) {
+                debug.sampleMessageFetchErrors.push(
+                  `filter: ${e2.message?.slice(0, 120) ?? String(e2).slice(0, 120)}`,
+                );
+              }
+              continue;
+            }
+          }
+          for (const m of msgs?.data ?? []) {
+            debug.messagesSeen++;
+            // Try inline relationship first; fall back to the dedicated
+            // relationships endpoint if needed.
+            let tplId: string | null =
+              m.relationships?.template?.data?.id ?? null;
+            if (!tplId) {
+              try {
+                const rel: any = await klaviyo(
+                  `/flow-messages/${m.id}/relationships/template/`,
+                  key,
+                );
+                tplId = rel?.data?.id ?? null;
+              } catch (e) {
+                // no template attached; leave null
+              }
+            }
+            if (tplId) debug.messagesWithTemplate++;
+            else debug.messagesWithoutTemplate++;
+            emails.push({
+              templateId: tplId,
+              messageId: m.id,
+              actionId: a.id,
+              name: m.attributes?.name ?? null,
+            });
+          }
+        }
+        if (emails.length > 0) {
+          emailsForFlow = emails.length;
+          out.push({
+            flowId: f.id,
+            flowName: f.attributes.name,
+            flowStatus: f.attributes.status,
+            triggerType: f.attributes.trigger_type,
+            emails,
+          });
+        }
+      } catch (e) {
+        debug.failedActionFetches++;
+        // skip bad flow
+      }
+      scanned++;
+      try {
+        onProgress?.({
+          kind: "scanned",
+          scanned,
+          total: flows.length,
+          currentName: f.attributes.name,
+          emailsForFlow,
+        });
+      } catch {}
+    }
+  }
+  await Promise.all(Array.from({ length: LIMIT }, () => worker()));
+
+  // Sort: live flows first, then by name
+  out.sort((a, b) => {
+    const rank = (s: string) =>
+      s === "live" ? 0 : s === "manual" ? 1 : s === "draft" ? 2 : 3;
+    return (
+      rank(a.flowStatus) - rank(b.flowStatus) ||
+      a.flowName.localeCompare(b.flowName)
+    );
+  });
+
+  return { flows: out, debug };
+}
+
 async function handleFlows(req: IncomingMessage, res: ServerResponse) {
   const body = await readJsonBody(req);
   const key = body.klaviyoKey as string;
   if (!key) return json(res, 400, { error: "klaviyoKey required" });
 
   try {
-    type FlowMeta = {
-      id: string;
-      attributes: { name: string; status: string; trigger_type: string };
-    };
-    const flows = await paginate<FlowMeta>(
-      "/flows/?fields[flow]=name,status,trigger_type&sort=-updated",
-      key,
-    );
-
-    // For each flow, walk actions + messages to collect send-email steps.
-    // Run in parallel across flows (bounded concurrency), serial per-flow.
-    const LIMIT = 5;
-    const out: Array<{
-      flowId: string;
-      flowName: string;
-      flowStatus: string;
-      triggerType: string;
-      emails: Array<{
-        templateId: string | null;
-        messageId: string;
-        actionId: string;
-        name: string | null;
-      }>;
-    }> = [];
-
-    // Diagnostics — surface what the walker actually saw so the UI can
-    // show something useful when "0 flow emails" is returned.
-    const debug = {
-      totalFlows: flows.length,
-      flowsWithActions: 0,
-      flowsWithNoActions: 0,
-      actionTypeCounts: {} as Record<string, number>,
-      messagesSeen: 0,
-      messagesWithTemplate: 0,
-      messagesWithoutTemplate: 0,
-      failedActionFetches: 0,
-      failedMessageFetches: 0,
-      sampleFlowNames: [] as string[],
-      sampleMessageFetchErrors: [] as string[],
-    };
-
-    let idx = 0;
-    async function worker() {
-      while (idx < flows.length) {
-        const i = idx++;
-        const f = flows[i]!;
-        if (debug.sampleFlowNames.length < 10) {
-          debug.sampleFlowNames.push(f.attributes.name);
-        }
-        try {
-          const actionsBody: any = await klaviyo(
-            `/flows/${f.id}/flow-actions/`,
-            key,
-          );
-          const emails: Array<{
-            templateId: string | null;
-            messageId: string;
-            actionId: string;
-            name: string | null;
-          }> = [];
-
-          const allActions = actionsBody.data ?? [];
-          if (allActions.length > 0) debug.flowsWithActions++;
-          else debug.flowsWithNoActions++;
-
-          for (const a of allActions) {
-            const type = (a.attributes?.definition?.type ?? "").toLowerCase();
-            debug.actionTypeCounts[type] =
-              (debug.actionTypeCounts[type] ?? 0) + 1;
-          }
-
-          // Fetch flow-messages for each action. Klaviyo only returns
-          // messages for send-* actions (not time-delay / split / etc.);
-          // non-email actions return empty data or 404/400, so we ignore
-          // errors per-action. We probe both known endpoint shapes since
-          // Klaviyo's API has shifted between them and we've seen both
-          // in the wild:
-          //   1. /flow-actions/{id}/flow-messages/  (original)
-          //   2. /flow-messages/?filter=equals(flow-action.id,"<id>")
-          // Try #1 first, fall back to #2 on any failure.
-          for (const a of allActions) {
-            let msgs: any = null;
-            try {
-              msgs = await klaviyo(
-                `/flow-actions/${a.id}/flow-messages/`,
-                key,
-              );
-            } catch (e: any) {
-              if (debug.sampleMessageFetchErrors.length < 3) {
-                debug.sampleMessageFetchErrors.push(
-                  `direct: ${e.message?.slice(0, 120) ?? String(e).slice(0, 120)}`,
-                );
-              }
-              // Fall back to the filter endpoint.
-              try {
-                msgs = await klaviyo(
-                  `/flow-messages/?filter=${encodeURIComponent(
-                    `equals(flow-action.id,"${a.id}")`,
-                  )}`,
-                  key,
-                );
-              } catch (e2: any) {
-                debug.failedMessageFetches++;
-                if (debug.sampleMessageFetchErrors.length < 6) {
-                  debug.sampleMessageFetchErrors.push(
-                    `filter: ${e2.message?.slice(0, 120) ?? String(e2).slice(0, 120)}`,
-                  );
-                }
-                continue;
-              }
-            }
-            for (const m of msgs?.data ?? []) {
-              debug.messagesSeen++;
-              // Try inline relationship first; fall back to the dedicated
-              // relationships endpoint if needed.
-              let tplId: string | null =
-                m.relationships?.template?.data?.id ?? null;
-              if (!tplId) {
-                try {
-                  const rel: any = await klaviyo(
-                    `/flow-messages/${m.id}/relationships/template/`,
-                    key,
-                  );
-                  tplId = rel?.data?.id ?? null;
-                } catch (e) {
-                  // no template attached; leave null
-                }
-              }
-              if (tplId) debug.messagesWithTemplate++;
-              else debug.messagesWithoutTemplate++;
-              emails.push({
-                templateId: tplId,
-                messageId: m.id,
-                actionId: a.id,
-                name: m.attributes?.name ?? null,
-              });
-            }
-          }
-          if (emails.length > 0) {
-            out.push({
-              flowId: f.id,
-              flowName: f.attributes.name,
-              flowStatus: f.attributes.status,
-              triggerType: f.attributes.trigger_type,
-              emails,
-            });
-          }
-        } catch (e) {
-          debug.failedActionFetches++;
-          // skip bad flow
-        }
-      }
-    }
-    await Promise.all(Array.from({ length: LIMIT }, () => worker()));
-
-    // Sort: live flows first, then by name
-    out.sort((a, b) => {
-      const rank = (s: string) =>
-        s === "live" ? 0 : s === "manual" ? 1 : s === "draft" ? 2 : 3;
-      return (
-        rank(a.flowStatus) - rank(b.flowStatus) ||
-        a.flowName.localeCompare(b.flowName)
-      );
-    });
-
-    json(res, 200, { flows: out, debug });
+    const result = await walkFlowsFromKlaviyo(key);
+    json(res, 200, result);
   } catch (e: any) {
     json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// NDJSON streaming variant of /api/flows. Same payload as the JSON
+// version, but interleaved with progress events so the UI can render a
+// live "scanned 23 of 87 flows" bar instead of a featureless spinner.
+//
+// Wire format (one JSON object per line, terminated by \n):
+//   {"kind":"discovered","total":87}
+//   {"kind":"progress","scanned":1,"total":87,"currentName":"Welcome Series","emailsForFlow":3}
+//   ... more progress lines ...
+//   {"kind":"done","flows":[...],"debug":{...}}
+//   — or on failure —
+//   {"kind":"error","error":"..."}
+async function handleFlowsStream(req: IncomingMessage, res: ServerResponse) {
+  const body = await readJsonBody(req);
+  const key = body.klaviyoKey as string;
+  if (!key) return json(res, 400, { error: "klaviyoKey required" });
+
+  res.writeHead(200, {
+    "content-type": "application/x-ndjson; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    "x-accel-buffering": "no", // disable proxy buffering so the client sees lines as they're written
+  });
+
+  const writeLine = (obj: unknown) => {
+    try {
+      res.write(JSON.stringify(obj) + "\n");
+    } catch {
+      // peer hung up — let the walker continue but stop trying to write
+    }
+  };
+
+  // Emit an early ping so the client's first read resolves immediately,
+  // proving the connection is live even before the slow Klaviyo calls
+  // start coming back.
+  writeLine({ kind: "started" });
+
+  try {
+    const result = await walkFlowsFromKlaviyo(key, (ev) => {
+      if (ev.kind === "discovered") {
+        writeLine({ kind: "discovered", total: ev.total });
+      } else {
+        writeLine({
+          kind: "progress",
+          scanned: ev.scanned,
+          total: ev.total,
+          currentName: ev.currentName,
+          emailsForFlow: ev.emailsForFlow,
+        });
+      }
+    });
+    writeLine({ kind: "done", flows: result.flows, debug: result.debug });
+  } catch (e: any) {
+    writeLine({ kind: "error", error: e?.message ?? String(e) });
+  } finally {
+    try { res.end(); } catch {}
   }
 }
 
@@ -977,29 +1071,6 @@ async function runImport(
           }
 
           emit({ kind: "step", label: `Importing ${flowName}…` });
-          // Per-flow live progress. We surface sub-step counts (templates
-          // created, filters created, flow created) as a `flow_progress`
-          // event so the UI can render a thin sub-progress bar on the
-          // running row. Flow imports of complex automations can take
-          // 30+ seconds — without this, the row just sits there.
-          //
-          // total = number of email templates we expect to create. Some
-          // may end up blank/skipped, so the bar may not always reach
-          // 100% before the terminal `flow_imported` event — that's fine.
-          const totalTemplatesForFlow = parsed.placeholderTemplates.length;
-          let templatesCreatedSoFar = 0;
-          let filtersCreatedSoFar = 0;
-          // Initial progress so the bar appears immediately as 0/N even
-          // before the first template comes back from the RPC.
-          emit({
-            kind: "flow_progress",
-            id: flowId,
-            current: 0,
-            total: totalTemplatesForFlow,
-            label: totalTemplatesForFlow > 0
-              ? `building ${totalTemplatesForFlow} email${totalTemplatesForFlow === 1 ? "" : "s"}…`
-              : "building flow…",
-          });
           try {
             const result = await withFreshJwt(
               (jwt) => importFlowRpc(
@@ -1014,34 +1085,11 @@ async function runImport(
                 account,
                 onProgress: (ev: ImportProgressEvent) => {
                   if (ev.kind === "filter_created") {
-                    filtersCreatedSoFar++;
                     emit({ kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
-                    emit({
-                      kind: "flow_progress",
-                      id: flowId,
-                      current: templatesCreatedSoFar,
-                      total: totalTemplatesForFlow,
-                      label: `${filtersCreatedSoFar} filter${filtersCreatedSoFar === 1 ? "" : "s"} created · ${templatesCreatedSoFar}/${totalTemplatesForFlow} email${totalTemplatesForFlow === 1 ? "" : "s"}`,
-                    });
                   } else if (ev.kind === "template_created") {
-                    templatesCreatedSoFar++;
                     emit({ kind: "log", source: "stdout", text: `  email template created: ${ev.templateId}` });
-                    emit({
-                      kind: "flow_progress",
-                      id: flowId,
-                      current: templatesCreatedSoFar,
-                      total: totalTemplatesForFlow,
-                      label: `${templatesCreatedSoFar}/${totalTemplatesForFlow} email${totalTemplatesForFlow === 1 ? "" : "s"} built`,
-                    });
                   } else if (ev.kind === "flow_created") {
                     emit({ kind: "log", source: "stdout", text: `flow created: ${ev.flowId}` });
-                    emit({
-                      kind: "flow_progress",
-                      id: flowId,
-                      current: totalTemplatesForFlow,
-                      total: totalTemplatesForFlow,
-                      label: "wiring flow steps…",
-                    });
                   } else if (ev.kind === "template_failed") {
                     // Debug breadcrumb from importFlowRpc on createAdvancedFlow failure
                     // — templateName is `[flow debug] <name>`, error holds the step summary.
@@ -2176,6 +2224,9 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && req.url === "/api/flows") {
       return handleFlows(req, res);
+    }
+    if (req.method === "POST" && req.url === "/api/flows/stream") {
+      return handleFlowsStream(req, res);
     }
     if (req.method === "POST" && req.url === "/api/campaigns") {
       return handleCampaigns(req, res);

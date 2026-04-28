@@ -32,10 +32,62 @@ async function postJson(path, body) {
   return json;
 }
 
-// Fetch templates + flows in parallel for a given store. Returns normalized
-// shapes matching what the existing components expect (same as the old
-// MOCK_DATA structure).
-async function fetchStoreData(store) {
+// Stream NDJSON from /api/flows/stream. Yields each parsed event object
+// as it arrives. The server emits "started" → "discovered" → many
+// "progress" events → terminal "done" (or "error") and then closes the
+// connection.
+async function* streamFlows(klaviyoKey) {
+  const res = await fetch("/api/flows/stream", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ klaviyoKey }),
+  });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`/api/flows/stream ${res.status}: ${text.slice(0, 200) || res.statusText}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    // NDJSON: split on \n, keep the trailing partial line in buf for the
+    // next chunk.
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      try {
+        yield JSON.parse(line);
+      } catch (e) {
+        console.warn("streamFlows: bad ndjson line", line.slice(0, 200));
+      }
+    }
+  }
+  // Flush any trailing line that didn't end with a newline (defensive).
+  const tail = buf.trim();
+  if (tail) {
+    try { yield JSON.parse(tail); } catch {}
+  }
+}
+
+// Fetch templates + flows + campaigns for a given store. Reports progress
+// per section via the optional `onProgress({section, status, ...extra})`
+// callback so the migration screen can render a live status panel during
+// the (often 10-30s) catalog fetch instead of a featureless spinner.
+//
+// Sections + their status lifecycle:
+//   templates  : loading → done | error
+//   campaigns  : loading → done | error   (errors are non-fatal — we
+//                continue without campaigns and surface the failure in
+//                the panel)
+//   flows      : loading → discovered (extra: total)
+//                       → progress   (extra: scanned, total, currentName)
+//                       → done | error
+async function fetchStoreData(store, onProgress) {
   if (!store?.klaviyoKey) {
     throw new Error("store missing klaviyoKey");
   }
@@ -51,16 +103,66 @@ async function fetchStoreData(store) {
     error: null,
   };
 
+  const report = (ev) => {
+    try { onProgress?.(ev); } catch (e) { console.warn("onProgress threw", e); }
+  };
+
+  // Kick off all three sections concurrently. Each has its own progress
+  // lifecycle. The function only resolves once templates + flows complete
+  // (campaigns is best-effort).
+  report({ section: "templates", status: "loading" });
+  report({ section: "campaigns", status: "loading" });
+  report({ section: "flows", status: "loading" });
+
+  const templatesPromise = postJson("/api/templates", { klaviyoKey: store.klaviyoKey })
+    .then((r) => { report({ section: "templates", status: "done", count: r?.templates?.length ?? 0 }); return r; })
+    .catch((e) => { report({ section: "templates", status: "error", error: e?.message ?? String(e) }); throw e; });
+
+  const campaignsPromise = postJson("/api/campaigns", { klaviyoKey: store.klaviyoKey })
+    .then((r) => { report({ section: "campaigns", status: "done", count: r?.campaigns?.length ?? 0 }); return r; })
+    .catch((e) => {
+      // Campaigns are non-fatal — if the endpoint fails we still want
+      // templates + flows to load. Log and return an empty list.
+      console.warn("campaigns fetch failed:", e?.message ?? e);
+      report({ section: "campaigns", status: "error", error: e?.message ?? String(e) });
+      return { campaigns: [], debug: { error: String(e?.message ?? e) } };
+    });
+
+  const flowsPromise = (async () => {
+    let flows = [];
+    let debug = null;
+    try {
+      for await (const ev of streamFlows(store.klaviyoKey)) {
+        if (ev.kind === "discovered") {
+          report({ section: "flows", status: "discovered", total: ev.total });
+        } else if (ev.kind === "progress") {
+          report({
+            section: "flows",
+            status: "progress",
+            scanned: ev.scanned,
+            total: ev.total,
+            currentName: ev.currentName,
+          });
+        } else if (ev.kind === "done") {
+          flows = ev.flows ?? [];
+          debug = ev.debug ?? null;
+        } else if (ev.kind === "error") {
+          throw new Error(ev.error || "flows stream failed");
+        }
+      }
+      report({ section: "flows", status: "done", count: flows.length });
+      return { flows, debug };
+    } catch (e) {
+      report({ section: "flows", status: "error", error: e?.message ?? String(e) });
+      throw e;
+    }
+  })();
+
   try {
     const [templatesRes, flowsRes, campaignsRes] = await Promise.all([
-      postJson("/api/templates", { klaviyoKey: store.klaviyoKey }),
-      postJson("/api/flows", { klaviyoKey: store.klaviyoKey }),
-      postJson("/api/campaigns", { klaviyoKey: store.klaviyoKey }).catch((e) => {
-        // Campaigns are non-fatal — if the endpoint fails we still want
-        // templates + flows to load. Log and return an empty list.
-        console.warn("campaigns fetch failed:", e?.message ?? e);
-        return { campaigns: [], debug: { error: String(e?.message ?? e) } };
-      }),
+      templatesPromise,
+      flowsPromise,
+      campaignsPromise,
     ]);
     const loaded = {
       flows: flowsRes?.flows ?? [],

@@ -16,6 +16,20 @@ function classifyWarning(text) {
 }
 window.classifyWarning = classifyWarning;
 
+// Module-scope so both <App> and <MigrationScreen> reference the same
+// shape. Per-section status fields are filled in by the streaming progress
+// callback in fetchStoreData() — see mock-data.js.
+const EMPTY_PROGRESS = {
+  templates: { status: "pending" },
+  campaigns: { status: "pending" },
+  flows: { status: "pending" },
+};
+const EMPTY_DATA = {
+  flows: [], templates: [], campaigns: [],
+  loading: false, error: null, loaded: false,
+  loadProgress: EMPTY_PROGRESS,
+};
+
 function App() {
   // ─ Stores ─ (persisted to localStorage via mock-stores.js)
   const [stores, setStoresState] = useS(window.MOCK_STORES);
@@ -30,9 +44,18 @@ function App() {
   const [showAddStore, setShowAddStore] = useS(false);
 
   // ─ Per-store data catalogs, fetched on demand ─
-  // Each entry: { flows, templates, loading, error, loaded }
+  // Each entry: {
+  //   flows, templates, campaigns,
+  //   loading, error, loaded,
+  //   loadProgress: {
+  //     templates: { status, count?, error? },
+  //     campaigns: { status, count?, error? },
+  //     flows:     { status, total?, scanned?, currentName?, count?, error? },
+  //   },
+  // }
+  // loadProgress is updated live as the per-section streaming events
+  // arrive from fetchStoreData() — see mock-data.js for the event shape.
   const [storeDataMap, setStoreDataMap] = useS({});
-  const EMPTY_DATA = { flows: [], templates: [], campaigns: [], loading: false, error: null, loaded: false };
   const data = view.storeId
     ? (storeDataMap[view.storeId] || EMPTY_DATA)
     : EMPTY_DATA;
@@ -44,16 +67,40 @@ function App() {
     if (!store) return;
     if (storeDataMap[view.storeId]?.loaded) return; // already fetched
 
+    const sid = view.storeId;
     setStoreDataMap((m) => ({
       ...m,
-      [view.storeId]: { ...EMPTY_DATA, loading: true },
+      [sid]: { ...EMPTY_DATA, loading: true, loadProgress: EMPTY_PROGRESS },
     }));
+
+    // Per-section live progress callback. Merges into loadProgress so
+    // the loading panel can render the current state of each section.
+    const onProgress = (ev) => {
+      setStoreDataMap((m) => {
+        const prev = m[sid] || EMPTY_DATA;
+        const prevProg = prev.loadProgress || EMPTY_PROGRESS;
+        const sectionPatch = { ...ev };
+        delete sectionPatch.section;
+        return {
+          ...m,
+          [sid]: {
+            ...prev,
+            loadProgress: {
+              ...prevProg,
+              [ev.section]: { ...(prevProg[ev.section] || {}), ...sectionPatch },
+            },
+          },
+        };
+      });
+    };
+
     window
-      .fetchStoreData(store)
+      .fetchStoreData(store, onProgress)
       .then((res) => {
         setStoreDataMap((m) => ({
           ...m,
-          [view.storeId]: {
+          [sid]: {
+            ...(m[sid] || EMPTY_DATA),
             flows: res.flows ?? [],
             templates: res.templates ?? [],
             campaigns: res.campaigns ?? [],
@@ -66,8 +113,8 @@ function App() {
       .catch((e) => {
         setStoreDataMap((m) => ({
           ...m,
-          [view.storeId]: {
-            ...EMPTY_DATA,
+          [sid]: {
+            ...(m[sid] || EMPTY_DATA),
             loading: false,
             error: e?.message ?? String(e),
             loaded: true,
@@ -294,14 +341,6 @@ function App() {
         if (evt.aiRewrites) parts.push(`${evt.aiRewrites} AI rewrite${evt.aiRewrites === 1 ? '' : 's'}`);
         items = items.map(i => i.id === evt.id ? { ...i, state: "running", detail: parts.join(" · ") } : i);
         if (status === "waiting_input") status = "running";
-      } else if (evt.kind === "flow_progress") {
-        // Per-flow live sub-progress. Updates the running item's detail
-        // string + a structured subProgress object (current/total) the
-        // ItemRow uses to render a thin sub-bar. Cleared automatically
-        // when the item transitions to "imported" or "failed".
-        items = items.map(i => i.id === evt.id
-          ? { ...i, state: "running", detail: evt.label, subProgress: { current: evt.current, total: evt.total } }
-          : i);
       } else if (evt.kind === "summary") {
         exportSummary = { exported: evt.exported, failed: evt.failed };
       } else if (evt.kind === "fonts_done") {
@@ -671,6 +710,10 @@ function MigrationScreen({ store, data, state, updateState, imports, lastResult,
         />
       )}
 
+      {data.loading && (
+        <CatalogLoadingPanel progress={data.loadProgress || EMPTY_PROGRESS} />
+      )}
+
       <div className="flex-1 overflow-hidden">
         {state.tab === "flows" ? (
           <ListShell
@@ -745,6 +788,108 @@ function MigrationScreen({ store, data, state, updateState, imports, lastResult,
           />
         )}
       </div>
+    </div>
+  );
+}
+
+// Catalog-fetch loading panel. Shown above the (empty) tab content while
+// templates / flows / campaigns stream in from Klaviyo. Each section has
+// its own status row + (for flows) a live "X of Y scanned" progress bar
+// so the user can see exactly what's happening during the 10-30s wait.
+function CatalogLoadingPanel({ progress }) {
+  const flow = progress?.flows || { status: "pending" };
+  const tmpl = progress?.templates || { status: "pending" };
+  const camp = progress?.campaigns || { status: "pending" };
+
+  // Flow scanning progress percentage. We have a "discovered" status as
+  // soon as the flow list is paginated (so we know `total`), and then
+  // `progress` events update `scanned` per-flow. Before discovery we show
+  // an indeterminate state.
+  const flowKnownTotal = typeof flow.total === "number" && flow.total > 0;
+  const flowScanned = typeof flow.scanned === "number" ? flow.scanned : 0;
+  const flowPct = flowKnownTotal ? Math.min(100, Math.round((flowScanned / flow.total) * 100)) : null;
+
+  return (
+    <div className="px-4 py-3 border-b border-[#21262d] bg-[#0d1117]">
+      <div className="text-[11px] text-[#8b949e] mb-2">
+        Fetching catalog from Klaviyo… (this can take 10–30s on large accounts)
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <SectionRow label="Templates" section={tmpl} />
+        <SectionRow label="Campaigns" section={camp} />
+        <div>
+          <SectionRow
+            label="Flows"
+            section={flow}
+            extra={
+              flow.status === "progress" && flow.currentName
+                ? `scanning "${flow.currentName.slice(0, 50)}"`
+                : flow.status === "discovered" && flowKnownTotal
+                ? `${flow.total} flows found, scanning…`
+                : null
+            }
+            progressText={flowKnownTotal && (flow.status === "progress" || flow.status === "discovered")
+              ? `${flowScanned}/${flow.total}`
+              : null}
+          />
+          {(flow.status === "progress" || flow.status === "discovered") && (
+            <div className="mt-1 ml-[18px] mr-2 h-[3px] bg-[#21262d] rounded-full overflow-hidden">
+              <div
+                className="h-full transition-all duration-300"
+                style={{
+                  width: flowPct !== null ? `${flowPct}%` : "20%",
+                  background: "#388bfd",
+                  // Indeterminate-ish look before discovery — slow pulse via opacity.
+                  opacity: flowPct === null ? 0.5 : 1,
+                }}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SectionRow({ label, section, extra, progressText }) {
+  const status = section?.status ?? "pending";
+  // Status pip: pending = dim dot, loading/discovered/progress = blue
+  // spinner-style dot, done = green check, error = red x.
+  let pip;
+  if (status === "done") {
+    pip = <span className="text-[#3fb950]">✓</span>;
+  } else if (status === "error") {
+    pip = <span className="text-[#f85149]">✕</span>;
+  } else if (status === "pending") {
+    pip = <span className="text-[#484f58]">○</span>;
+  } else {
+    // loading / discovered / progress — animated dot
+    pip = <span className="text-[#388bfd] animate-pulse">●</span>;
+  }
+  const labelTone =
+    status === "done" ? "text-[#8b949e]"
+    : status === "error" ? "text-[#f85149]"
+    : status === "pending" ? "text-[#6e7681]"
+    : "text-[#e6edf3]";
+  const countText =
+    status === "done" && typeof section.count === "number"
+      ? `${section.count} found`
+      : null;
+  return (
+    <div className="flex items-center gap-2 text-[11px]">
+      <span className="w-3 flex-shrink-0 text-center">{pip}</span>
+      <span className={"w-[80px] flex-shrink-0 " + labelTone}>{label}</span>
+      {extra && <span className="text-[10px] text-[#6e7681] truncate">{extra}</span>}
+      {(countText || progressText) && (
+        <span className="ml-auto text-[10px] text-[#6e7681] tabular-nums flex-shrink-0">
+          {progressText || countText}
+        </span>
+      )}
+      {status === "error" && section.error && (
+        <span className="ml-auto text-[10px] text-[#f85149] truncate max-w-[300px]">
+          {section.error}
+        </span>
+      )}
     </div>
   );
 }
