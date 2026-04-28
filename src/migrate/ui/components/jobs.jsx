@@ -357,6 +357,16 @@ function ItemRow({ item, tone, onRetry, onOpenWarnings }) {
     : item.state === "waiting_input" ? icon.waiting_input
     : icon[tone];
 
+  // Per-item live progress (currently emitted by flow imports — see
+  // `flow_progress` events on the server). We render a thin blue sub-bar
+  // below the item name + the human label as right-aligned text, so the
+  // operator can see *what* is happening inside a long-running flow
+  // import (e.g. "3/4 emails built").
+  const subProgress = item.state === "running" ? item.subProgress : null;
+  const subPct = subProgress && subProgress.total > 0
+    ? Math.min(100, Math.round((subProgress.current / subProgress.total) * 100))
+    : null;
+
   return (
     <div className="group">
       <div className="flex items-center gap-2 py-0.5 text-[11px]">
@@ -367,6 +377,9 @@ function ItemRow({ item, tone, onRetry, onOpenWarnings }) {
         <span className={"truncate " + (tone === "done" ? "text-[#8b949e]" : "text-[#e6edf3]")}>
           {item.name}
         </span>
+        {item.state === "running" && item.detail && (
+          <span className="text-[10px] text-[#8b949e] tabular-nums ml-auto flex-shrink-0">{item.detail}</span>
+        )}
         {item.state === "imported" && item.detail && (
           <span className="text-[10px] text-[#6e7681] tabular-nums ml-auto flex-shrink-0">{item.detail}</span>
         )}
@@ -391,6 +404,17 @@ function ItemRow({ item, tone, onRetry, onOpenWarnings }) {
           </button>
         )}
       </div>
+      {/* Live sub-progress bar for in-flight items (currently flows). The
+          width transitions smoothly so each `template_created` event
+          visibly nudges the bar forward. */}
+      {subPct !== null && (
+        <div className="ml-[calc(12px+40px+8px)] mr-2 h-[2px] bg-[#21262d] rounded-full overflow-hidden mt-0.5 mb-1">
+          <div
+            className="h-full transition-all duration-300"
+            style={{ width: `${subPct}%`, background: "#388bfd" }}
+          />
+        </div>
+      )}
       {item.state === "failed" && item.error && (
         <div className="ml-[calc(12px+40px+8px)] text-[10px] text-[#f85149] opacity-80 font-mono leading-relaxed pb-1">
           {item.error}

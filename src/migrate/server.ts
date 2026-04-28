@@ -977,6 +977,29 @@ async function runImport(
           }
 
           emit({ kind: "step", label: `Importing ${flowName}…` });
+          // Per-flow live progress. We surface sub-step counts (templates
+          // created, filters created, flow created) as a `flow_progress`
+          // event so the UI can render a thin sub-progress bar on the
+          // running row. Flow imports of complex automations can take
+          // 30+ seconds — without this, the row just sits there.
+          //
+          // total = number of email templates we expect to create. Some
+          // may end up blank/skipped, so the bar may not always reach
+          // 100% before the terminal `flow_imported` event — that's fine.
+          const totalTemplatesForFlow = parsed.placeholderTemplates.length;
+          let templatesCreatedSoFar = 0;
+          let filtersCreatedSoFar = 0;
+          // Initial progress so the bar appears immediately as 0/N even
+          // before the first template comes back from the RPC.
+          emit({
+            kind: "flow_progress",
+            id: flowId,
+            current: 0,
+            total: totalTemplatesForFlow,
+            label: totalTemplatesForFlow > 0
+              ? `building ${totalTemplatesForFlow} email${totalTemplatesForFlow === 1 ? "" : "s"}…`
+              : "building flow…",
+          });
           try {
             const result = await withFreshJwt(
               (jwt) => importFlowRpc(
@@ -991,11 +1014,34 @@ async function runImport(
                 account,
                 onProgress: (ev: ImportProgressEvent) => {
                   if (ev.kind === "filter_created") {
+                    filtersCreatedSoFar++;
                     emit({ kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
+                    emit({
+                      kind: "flow_progress",
+                      id: flowId,
+                      current: templatesCreatedSoFar,
+                      total: totalTemplatesForFlow,
+                      label: `${filtersCreatedSoFar} filter${filtersCreatedSoFar === 1 ? "" : "s"} created · ${templatesCreatedSoFar}/${totalTemplatesForFlow} email${totalTemplatesForFlow === 1 ? "" : "s"}`,
+                    });
                   } else if (ev.kind === "template_created") {
+                    templatesCreatedSoFar++;
                     emit({ kind: "log", source: "stdout", text: `  email template created: ${ev.templateId}` });
+                    emit({
+                      kind: "flow_progress",
+                      id: flowId,
+                      current: templatesCreatedSoFar,
+                      total: totalTemplatesForFlow,
+                      label: `${templatesCreatedSoFar}/${totalTemplatesForFlow} email${totalTemplatesForFlow === 1 ? "" : "s"} built`,
+                    });
                   } else if (ev.kind === "flow_created") {
                     emit({ kind: "log", source: "stdout", text: `flow created: ${ev.flowId}` });
+                    emit({
+                      kind: "flow_progress",
+                      id: flowId,
+                      current: totalTemplatesForFlow,
+                      total: totalTemplatesForFlow,
+                      label: "wiring flow steps…",
+                    });
                   } else if (ev.kind === "template_failed") {
                     // Debug breadcrumb from importFlowRpc on createAdvancedFlow failure
                     // — templateName is `[flow debug] <name>`, error holds the step summary.

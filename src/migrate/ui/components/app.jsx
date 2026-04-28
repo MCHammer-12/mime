@@ -294,6 +294,14 @@ function App() {
         if (evt.aiRewrites) parts.push(`${evt.aiRewrites} AI rewrite${evt.aiRewrites === 1 ? '' : 's'}`);
         items = items.map(i => i.id === evt.id ? { ...i, state: "running", detail: parts.join(" · ") } : i);
         if (status === "waiting_input") status = "running";
+      } else if (evt.kind === "flow_progress") {
+        // Per-flow live sub-progress. Updates the running item's detail
+        // string + a structured subProgress object (current/total) the
+        // ItemRow uses to render a thin sub-bar. Cleared automatically
+        // when the item transitions to "imported" or "failed".
+        items = items.map(i => i.id === evt.id
+          ? { ...i, state: "running", detail: evt.label, subProgress: { current: evt.current, total: evt.total } }
+          : i);
       } else if (evt.kind === "summary") {
         exportSummary = { exported: evt.exported, failed: evt.failed };
       } else if (evt.kind === "fonts_done") {
