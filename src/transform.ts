@@ -25,6 +25,8 @@ import { hasInlineCoupon, rewriteInlineCoupon } from "./ai-rewrite.js";
 export interface TransformResult {
   sections: Section[];
   substitutions: string[];
+  /** Data-loss warnings from transform pass (e.g. {% web_view %} dropped). */
+  warnings: string[];
   aiRewrites: number;
   aiUsage: {
     inputTokens: number;
@@ -45,6 +47,7 @@ export async function transformSections(
   opts: TransformOptions = {},
 ): Promise<TransformResult> {
   const subs: string[] = [];
+  const warnings: string[] = [];
   // When account fetch failed (bad/dummy Klaviyo key, network error) we
   // skip organization-variable substitution but STILL run coupon
   // detection and other section-level transforms — otherwise an export
@@ -69,6 +72,7 @@ export async function transformSections(
       orgAddress,
       orgUrl,
       subs,
+      warnings,
       skipAi: opts.skipAi === true,
       usage,
       onRewrite: () => aiRewrites++,
@@ -76,7 +80,7 @@ export async function transformSections(
     out.push(...transformed);
   }
 
-  return { sections: out, substitutions: subs, aiRewrites, aiUsage: usage };
+  return { sections: out, substitutions: subs, warnings, aiRewrites, aiUsage: usage };
 }
 
 interface Ctx {
@@ -84,6 +88,7 @@ interface Ctx {
   orgAddress: string;
   orgUrl: string;
   subs: string[];
+  warnings: string[];
   skipAi: boolean;
   usage: TransformResult["aiUsage"];
   onRewrite: () => void;
@@ -96,7 +101,15 @@ async function transformBlock(
   // Text blocks: variable substitution, then inline-coupon rewrite + discount insertion
   if (block.type === EmailBlockType.TEXT) {
     const tb = block as TextBlock;
-    const withSubs = { ...tb, text: substituteTextVars(tb.text, ctx) };
+    const substitutedText = substituteTextVars(tb.text, ctx);
+    // If the substitution stripped a {% web_view %} (or similar) and the
+    // host text block has nothing else, drop the block entirely so we don't
+    // emit an empty Text block in Redo.
+    if (isEffectivelyEmpty(substitutedText)) {
+      ctx.warnings.push("dropped empty text block (only contained unsupported Klaviyo tag)");
+      return [];
+    }
+    const withSubs = { ...tb, text: substitutedText };
 
     if (hasInlineCoupon(withSubs.text)) {
       if (!ctx.skipAi) {
@@ -222,13 +235,107 @@ function buildDiscountFromTextBlock(tb: TextBlock): DiscountBlock {
 }
 
 // ─── Text variable substitution (E1) ──────────────────────────────
+//
+// Order of operations matters:
+//   1. Drop unsupported anchored links (manage_preferences, web_view_link, …)
+//      WITH adjacent " | " / " or " separators, so the cleanup pass doesn't
+//      have to guess where the separator belonged.
+//   2. Drop unsupported standalone block tags ({% web_view %} inside spans).
+//   3. Substitute unsubscribe forms (anchor href / bare tag / 'X' arg).
+//   4. Substitute organization vars (existing).
+//   5. Substitute shop.name / shop_name → orgName.
+//   6. Map customer/profile vars ({{ first_name }} → {{ customer_first_name }}).
+//   7. Cleanup empty inline tags + stranded separators left by drops.
+
+// Klaviyo Liquid tags Redo can't render — anchor wrapping them is removed.
+// (manage_preferences and email_preference_url have no Redo equivalent.)
+const DROP_ANCHOR_PATTERNS = [
+  { name: "manage_preferences_link", body: "\\{%\\s*manage_preferences_link\\s*%\\}" },
+  { name: "manage_preferences",      body: "\\{%\\s*manage_preferences\\b[^%]*%\\}" },
+  { name: "email_preference_url",    body: "\\{\\{\\s*email_preference_url\\s*\\}\\}" },
+];
+
+// Klaviyo block tags Redo doesn't support — strip the tag standalone; if
+// the host text block has nothing else, transformBlock drops the block.
+const DROP_BLOCK_TAGS = [
+  { name: "manage_preferences", re: /\{%\s*manage_preferences(?:\s+'[^']*')?\s*%\}/gi },
+];
+
+// Pipe / dot / "or" separators between footer links. After dropping a
+// flanking link we strip ONE adjacent separator (prefer leading) so the
+// remaining footer reads cleanly.
+const SEP = "(?:&nbsp;|\\s)*[|·•](?:&nbsp;|\\s)*|(?:&nbsp;|\\s)+or(?:&nbsp;|\\s)+";
+
+// Klaviyo profile-attribute → Redo schema-instance customer field.
+// Mirrors flow/variable-mapping.ts but scoped to text-block usage:
+// `person.X` flow attributes + the bare `first_name` shortcut Klaviyo
+// permits in templates.
+const TEXT_VAR_MAP: Record<string, string> = {
+  "first_name":          "customer_first_name",
+  "last_name":           "customer_last_name",
+  "person.first_name":   "customer_first_name",
+  "person.last_name":    "customer_last_name",
+  "person.email":        "customer_email",
+  "person.full_name":    "customer_full_name",
+  "person.phone":        "customer_phone",
+  "person.phone_number": "customer_phone",
+  "person.id":           "redo_customer_id",
+};
 
 function substituteTextVars(html: string, ctx: Ctx): string {
   let result = html;
 
-  // {% unsubscribe %} — two patterns:
-  //   a) wrapped in <a>: <a ...>{% unsubscribe %}</a> → <a href="{{ unsubscribe_link }}">original text</a>
-  //   b) bare: {% unsubscribe %} → <a href="{{ unsubscribe_link }}">Unsubscribe</a>
+  result = dropUnsupportedAnchors(result, ctx);
+  result = dropUnsupportedBlockTags(result, ctx);
+
+  // {% unsubscribe_link %} / {% web_view_link %} as href value → Redo's
+  // runtime variable. Both produce a URL when rendered by Klaviyo.
+  if (/href="[^"]*\{%\s*unsubscribe_link\s*%\}[^"]*"/i.test(result)) {
+    result = result.replace(
+      /href="\{%\s*unsubscribe_link\s*%\}"/gi,
+      'href="{{ unsubscribe_link }}"',
+    );
+    ctx.subs.push("href={% unsubscribe_link %} → {{ unsubscribe_link }}");
+  }
+  if (/href="[^"]*\{%\s*web_view_link\s*%\}[^"]*"/i.test(result)) {
+    result = result.replace(
+      /href="\{%\s*web_view_link\s*%\}"/gi,
+      'href="{{ view_in_browser_link }}"',
+    );
+    ctx.subs.push("href={% web_view_link %} → {{ view_in_browser_link }}");
+  }
+
+  // {% web_view %} / {% web_view 'X' %} — Klaviyo block tag that renders a
+  // full <a href="...view in browser url...">{label}</a>. Redo exposes the
+  // same as {{ view_in_browser_link }}.
+  const webViewArg = /\{%\s*web_view\s+'([^']+)'\s*%\}/g;
+  if (webViewArg.test(result)) {
+    result = result.replace(
+      /\{%\s*web_view\s+'([^']+)'\s*%\}/g,
+      (_m, label) => `<a href="{{ view_in_browser_link }}">${label}</a>`,
+    );
+    ctx.subs.push("{% web_view 'X' %} → <a>X</a> (view_in_browser_link)");
+  }
+  if (/\{%\s*web_view\s*%\}/.test(result)) {
+    result = result.replace(
+      /\{%\s*web_view\s*%\}/g,
+      `<a href="{{ view_in_browser_link }}">View in browser</a>`,
+    );
+    ctx.subs.push("{% web_view %} → {{ view_in_browser_link }}");
+  }
+
+  // {% unsubscribe 'Custom Text' %} → anchor with that text.
+  // Run before the bare-form replacement so the matched arg is preserved.
+  const unsubArg = /\{%\s*unsubscribe\s+'([^']+)'\s*%\}/g;
+  if (unsubArg.test(result)) {
+    result = result.replace(
+      /\{%\s*unsubscribe\s+'([^']+)'\s*%\}/g,
+      (_m, label) => `<a href="{{ unsubscribe_link }}">${label}</a>`,
+    );
+    ctx.subs.push("{% unsubscribe 'X' %} → <a>X</a> (unsubscribe link)");
+  }
+
+  // {% unsubscribe %} wrapped in <a>: rewrite href, keep visible text.
   const wrappedUnsub = /<a\s[^>]*>([^<]*\{%\s*unsubscribe\s*%\}[^<]*)<\/a>/gi;
   if (wrappedUnsub.test(result)) {
     result = result.replace(
@@ -240,6 +347,7 @@ function substituteTextVars(html: string, ctx: Ctx): string {
     );
     ctx.subs.push("{% unsubscribe %} → {{ unsubscribe_link }}");
   }
+  // {% unsubscribe %} bare: wrap in default anchor.
   if (/\{%\s*unsubscribe\s*%\}/.test(result)) {
     result = result.replace(
       /\{%\s*unsubscribe\s*%\}/g,
@@ -261,7 +369,104 @@ function substituteTextVars(html: string, ctx: Ctx): string {
   }
 
   result = substituteOrgUrlInHtml(result, ctx);
+
+  // Klaviyo Shopify integration: {{ shop.name }} / {{ shop_name }} → org.
+  if (ctx.orgName) {
+    const shopRe = /\{\{\s*shop(?:\.name|_name)\s*\}\}/g;
+    if (shopRe.test(result)) {
+      result = result.replace(shopRe, ctx.orgName);
+      ctx.subs.push(`{{ shop.name|shop_name }} → ${ctx.orgName}`);
+    }
+  }
+
+  result = mapProfileVars(result, ctx);
+  result = cleanupAfterDrops(result);
   return result;
+}
+
+function dropUnsupportedAnchors(html: string, ctx: Ctx): string {
+  let result = html;
+  for (const { name, body } of DROP_ANCHOR_PATTERNS) {
+    const anchor = `<a\\s[^>]*href="[^"]*${body}[^"]*"[^>]*>[^<]*</a>`;
+    let count = 0;
+    // Leading separator + anchor (e.g. "Unsubscribe | Update Preferences")
+    result = result.replace(
+      new RegExp(`(?:${SEP})(?:${anchor})`, "gi"),
+      () => {
+        count++;
+        return "";
+      },
+    );
+    // Anchor + trailing separator (e.g. "Update Preferences | Unsubscribe")
+    result = result.replace(
+      new RegExp(`(?:${anchor})(?:${SEP})`, "gi"),
+      () => {
+        count++;
+        return "";
+      },
+    );
+    // Orphan anchor (no surrounding separator)
+    result = result.replace(new RegExp(anchor, "gi"), () => {
+      count++;
+      return "";
+    });
+    if (count > 0) {
+      ctx.warnings.push(
+        `removed ${count} ${name} link${count > 1 ? "s" : ""} (not supported in Redo)`,
+      );
+    }
+  }
+  return result;
+}
+
+function dropUnsupportedBlockTags(html: string, ctx: Ctx): string {
+  let result = html;
+  for (const { name, re } of DROP_BLOCK_TAGS) {
+    let count = 0;
+    result = result.replace(re, () => {
+      count++;
+      return "";
+    });
+    if (count > 0) {
+      ctx.warnings.push(
+        `removed ${count} ${name} tag${count > 1 ? "s" : ""} (not supported in Redo)`,
+      );
+    }
+  }
+  return result;
+}
+
+function mapProfileVars(html: string, ctx: Ctx): string {
+  return html.replace(
+    /\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*(\|[^}]*)?\}\}/g,
+    (full, varPath: string, filters = "") => {
+      const mapped = TEXT_VAR_MAP[varPath];
+      if (!mapped) return full;
+      ctx.subs.push(`{{ ${varPath} }} → {{ ${mapped} }}`);
+      const f = filters || "";
+      return `{{ ${mapped}${f ? " " + f : ""} }}`;
+    },
+  );
+}
+
+function cleanupAfterDrops(html: string): string {
+  return html
+    // Empty inline elements left by tag drops
+    .replace(/<span[^>]*>(\s|&nbsp;)*<\/span>/gi, "")
+    .replace(/<em[^>]*>(\s|&nbsp;)*<\/em>/gi, "")
+    .replace(/<strong[^>]*>(\s|&nbsp;)*<\/strong>/gi, "")
+    // Two consecutive separators (e.g. "Terms | | Unsubscribe" left after
+    // dropping the middle anchor that we couldn't bind a separator to)
+    .replace(/([|·•])(?:\s|&nbsp;)+([|·•])/g, "$1");
+}
+
+function isEffectivelyEmpty(html: string): boolean {
+  const stripped = html
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, "")
+    .replace(/\s+/g, "")
+    .trim();
+  return stripped.length === 0;
 }
 
 function substituteOrgUrlInHtml(html: string, ctx: Ctx): string {

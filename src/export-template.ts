@@ -81,6 +81,7 @@ export async function exportTemplateFromHtml(
   let substitutions: string[] = [];
   let aiRewrites = 0;
   let aiUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+  const allWarnings = [...warnings];
 
   // transformSections handles: organization variable substitution (needs
   // account), inline-coupon detection → DiscountBlock insertion (runs
@@ -94,6 +95,7 @@ export async function exportTemplateFromHtml(
     substitutions = result.substitutions;
     aiRewrites = result.aiRewrites;
     aiUsage = result.aiUsage;
+    allWarnings.push(...result.warnings);
   }
 
   const fontPlan = await buildFontPlan(sections);
@@ -139,7 +141,7 @@ export async function exportTemplateFromHtml(
     substitutions,
     aiRewrites,
     aiUsage,
-    warnings,
+    warnings: allWarnings,
     unsupportedFeatures,
     reviewItems,
     skippedBlocks,
