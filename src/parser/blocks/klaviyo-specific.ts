@@ -48,6 +48,20 @@ export function tryParseKlaviyoSpecific(
     return [];
   }
 
+  // Klaviyo "HTML" block (custom raw-HTML block — `<td class="kl-html">`).
+  // Redo has no equivalent and the HTML payload is almost always
+  // hand-written markup (tracking pixels, custom widgets, etc.) that we
+  // can't safely re-emit as Redo blocks. Per merchant guidance: just
+  // drop the block silently — the rest of the email still imports.
+  // Tracked in skippedBlocks so it shows up in the warnings panel.
+  if (isHtmlBlock($wrapper)) {
+    ctx.skippedBlocks.push({
+      blockType: "html",
+      reason: "Klaviyo HTML block — removed (no equivalent in Redo)",
+    });
+    return [];
+  }
+
   const $shadowImg = findDropShadowImg($, $wrapper);
   if ($shadowImg.length > 0) {
     if (!isWhiteBackground(bodyBackgroundColor)) {
@@ -74,6 +88,15 @@ function isPreviewQuoteBlock(
   if ($wrapper.find(sel("kl-review-gutter")).length > 0) return true;
   const wrapperClass = $wrapper.attr("class") || "";
   return /\b(gxp-)?kl-review-/.test(wrapperClass);
+}
+
+// Klaviyo's custom-HTML / "HTML" block. The block content lives inside
+// a `<td class="kl-html">` (or `gxp-kl-html`) element — same naming
+// pattern as kl-text, kl-image, etc. Match by descendant rather than the
+// wrapper class itself since the wrapper carries the generic
+// `component-wrapper` class.
+function isHtmlBlock($wrapper: cheerio.Cheerio<El>): boolean {
+  return $wrapper.find(sel("kl-html")).length > 0;
 }
 
 function findDropShadowImg(
