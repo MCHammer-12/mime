@@ -21,6 +21,10 @@ import { fileURLToPath } from "node:url";
 import { exportTemplate } from "../export-template.js";
 import { fetchAccount } from "../fetch-account.js";
 import { parseFlow } from "../flow/parser.js";
+import {
+  findOptionByValue,
+  MARKETING_TRIGGER_OPTIONS,
+} from "../flow/marketing-trigger-options.js";
 import { createTemplateResolver } from "../flow/template-resolver.js";
 import type { KlaviyoFlow } from "../flow/types.js";
 import { klaviyo, paginate, slug } from "../klaviyo.js";
@@ -1044,6 +1048,70 @@ async function runImport(
             flowImportFail++;
             emit({ kind: "fail", id: flowId, name: flowName, error: `parse flow: ${e.message ?? e}` });
             continue;
+          }
+          // Recoverable skip: the auto-resolver couldn't map this Klaviyo
+          // trigger to a Redo schema (e.g. custom-event metric). Prompt the
+          // user to pick one and re-parse with the override before failing.
+          if (!parsed.automation && parsed.skipped?.recoverable) {
+            const klaviyoT: any = parsed.skipped.klaviyoTrigger ?? {};
+            const klaviyoMetricId = typeof klaviyoT.id === "string" ? klaviyoT.id : null;
+            const klaviyoMetric = klaviyoMetricId ? metrics[klaviyoMetricId] : null;
+            const triggerContext = klaviyoMetric
+              ? `Klaviyo trigger: ${klaviyoT.type} on metric "${klaviyoMetric.name}"${klaviyoMetric.integration_name ? ` (${klaviyoMetric.integration_name})` : ""}`
+              : `Klaviyo trigger type: ${klaviyoT.type ?? "unknown"}`;
+            const answer = await ctrl.prompt({
+              questionKey: `flow-trigger:${flowId}`,
+              question: `Pick a Redo trigger for "${flowName}"`,
+              context: `${triggerContext}. Pick the closest Redo equivalent — once configured the rest of the flow imports as-is.`,
+              type: "choice",
+              options: MARKETING_TRIGGER_OPTIONS.map((o) => ({
+                value: o.value,
+                label: o.label,
+              })),
+              itemId: flowId,
+              itemLabel: flowName,
+              // Per-flow question key — there's no shared answer to apply
+              // across other flows, so suppress the misleading checkbox.
+              hideApplyAll: true,
+            });
+            // Modal "Skip this item" sends "__skip__"; treat as a graceful
+            // skip rather than a hard error — the user explicitly declined.
+            if (answer === "__skip__") {
+              flowImportFail++;
+              emit({
+                kind: "fail",
+                id: flowId,
+                name: flowName,
+                error: `skipped: user chose not to pick a trigger`,
+              });
+              continue;
+            }
+            const picked = findOptionByValue(answer);
+            if (!picked) {
+              flowImportFail++;
+              emit({
+                kind: "fail",
+                id: flowId,
+                name: flowName,
+                error: `unknown trigger choice "${answer}" — flow skipped`,
+              });
+              continue;
+            }
+            emit({
+              kind: "info",
+              text: `Trigger for ${flowName}: ${picked.label} (chosen by user)`,
+            });
+            try {
+              parsed = await parseFlow(flowDetail as KlaviyoFlow, metrics, {
+                teamId: storeId,
+                templateResolver,
+                forcedTrigger: picked.resolution,
+              });
+            } catch (e: any) {
+              flowImportFail++;
+              emit({ kind: "fail", id: flowId, name: flowName, error: `parse flow (with chosen trigger): ${e.message ?? e}` });
+              continue;
+            }
           }
           if (!parsed.automation) {
             flowImportFail++;

@@ -50,6 +50,7 @@ function unwrapEvent(env) {
       default: input.default,
       itemId: input.itemId,
       itemName: input.itemLabel,
+      hideApplyAll: input.hideApplyAll,
       // trueLabel / falseLabel are optional — backend doesn't surface them,
       // so the UI falls back to Yes/No in the modal.
     };
