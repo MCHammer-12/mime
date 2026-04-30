@@ -453,6 +453,50 @@ function App() {
   const dismissJob = useC((jobId) => {
     setJobs(js => js.filter(j => j.id !== jobId));
   }, []);
+  // Persist a note to the server. Keeps a local mirror on the job record so
+  // re-renders see it without a refetch. Failure is silent — the user keeps
+  // their local copy and can retry on next edit.
+  const saveJobNote = useC(async (jobId, itemId, note) => {
+    setJobs(js => js.map(j => j.id !== jobId ? j : ({
+      ...j,
+      notes: { ...(j.notes || {}), [itemId]: note },
+    })));
+    try {
+      await fetch(`/api/jobs/${jobId}/notes`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ itemId, note }),
+      });
+    } catch (e) {
+      console.warn("save note failed:", e);
+    }
+  }, []);
+  // Trigger a zip download from the bundle endpoint. Posts the selected
+  // item ids/types and saves the resulting blob as a download.
+  const exportJobBundle = useC(async (jobId, items) => {
+    const r = await fetch(`/api/jobs/${jobId}/bundle`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ items }),
+    });
+    if (!r.ok) {
+      const err = await r.text().catch(() => "");
+      alert(`Bundle failed: ${r.status} ${err}`);
+      return;
+    }
+    const blob = await r.blob();
+    const cd = r.headers.get("content-disposition") || "";
+    const m = cd.match(/filename="([^"]+)"/);
+    const filename = m ? m[1] : `troubleshoot-${jobId}.zip`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, []);
   const cancelJob = useC((jobId) => {
     setJobs(js => js.map(j => {
       if (j.id !== jobId) return j;
@@ -547,6 +591,8 @@ function App() {
           onCancelJob={cancelJob}
           onOpenLog={setLogJobId}
           onOpenWarnings={(jobId, itemId) => setWarningsView({ jobId, itemId })}
+          onSaveNote={saveJobNote}
+          onExportBundle={exportJobBundle}
         />
       </div>
 

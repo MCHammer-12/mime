@@ -115,6 +115,13 @@ const MIGRATIONS: Array<{ name: string; sql: string }> = [
         ON job_events (job_id, seq);
     `,
   },
+  {
+    name: "002_notes",
+    sql: `
+      ALTER TABLE jobs
+        ADD COLUMN IF NOT EXISTS notes JSONB NOT NULL DEFAULT '{}'::jsonb;
+    `,
+  },
 ];
 
 /**

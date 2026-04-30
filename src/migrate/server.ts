@@ -41,6 +41,7 @@ import {
   jobController,
   listJobs,
   resolveInput,
+  setNote,
   setStatus,
   subscribe,
   type JobSummary,
@@ -48,6 +49,7 @@ import {
   type RunController,
   type Severity,
 } from "./jobs.js";
+import { streamBundle, type BundleItemRequest } from "./bundle.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
 const DEFAULT_REDOAPP_DIR = join(homedir(), "code/redoapp");
@@ -792,6 +794,15 @@ async function runImport(
             family: e.family,
             available: e.resolution.available,
           })),
+          // Full lists for the troubleshoot bundle. Counts above stay for the
+          // existing UI surface (summary chips); the bundle endpoint uses the
+          // full payload to write per-item parse-result.json files.
+          warningList: result.warnings,
+          unsupportedList: result.unsupportedFeatures,
+          reviewItemList: result.reviewItems,
+          skippedList: result.skippedBlocks,
+          substitutions: result.substitutions,
+          outputPath: result.outPath,
         });
       } catch (e: any) {
         const msg = e.message ?? String(e);
@@ -1111,6 +1122,10 @@ async function runImport(
               createdTemplateCount: result.createdTemplateCount,
               blankTemplateCount: result.blankTemplateCount,
               warningCount: parsed.warnings.length,
+              // For the troubleshoot bundle: full warnings + parsed automation
+              // tree so we can re-construct a per-flow report without re-running.
+              warningList: parsed.warnings,
+              parsedAutomation: parsed.automation,
             });
           } catch (e: any) {
             flowImportFail++;
@@ -1543,6 +1558,67 @@ async function handleJobDelete(res: ServerResponse, jobId: string) {
   const deleted = deleteJob(jobId);
   if (!deleted) return json(res, 404, { error: `job ${jobId} not found` });
   json(res, 200, { ok: true });
+}
+
+// ─── API: POST /api/jobs/:id/notes — upsert a per-item troubleshoot note ──
+// Body: { itemId: string, note: string }. Empty note clears the entry.
+
+async function handleJobNotes(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+) {
+  const body = await readJsonBody(req);
+  const itemId = body.itemId;
+  const note = body.note;
+  if (typeof itemId !== "string" || typeof note !== "string") {
+    return json(res, 400, { error: "itemId and note (string) required" });
+  }
+  const ok = setNote(jobId, itemId, note);
+  if (!ok) return json(res, 404, { error: `job ${jobId} not found` });
+  json(res, 200, { ok: true });
+}
+
+// ─── API: POST /api/jobs/:id/bundle — stream a troubleshoot zip ──────────
+// Body: { items: [{ id: string, type: "template" | "flow" }] }.
+
+async function handleJobBundle(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+) {
+  const job = getJob(jobId);
+  if (!job) return json(res, 404, { error: `job ${jobId} not found` });
+  const body = await readJsonBody(req);
+  const rawItems = Array.isArray(body.items) ? body.items : null;
+  if (!rawItems || rawItems.length === 0) {
+    return json(res, 400, { error: "items: non-empty array required" });
+  }
+  const items: BundleItemRequest[] = [];
+  for (const raw of rawItems) {
+    if (
+      raw &&
+      typeof raw.id === "string" &&
+      (raw.type === "template" || raw.type === "flow")
+    ) {
+      items.push({ id: raw.id, type: raw.type });
+    }
+  }
+  if (items.length === 0) {
+    return json(res, 400, { error: "no valid items (each needs id + type)" });
+  }
+  const stamp = job.completedAt ?? job.createdAt;
+  const safeStamp = stamp.replace(/[:.]/g, "-");
+  res.writeHead(200, {
+    "content-type": "application/zip",
+    "content-disposition": `attachment; filename="troubleshoot-${job.merchantSlug}-${safeStamp}.zip"`,
+  });
+  try {
+    await streamBundle(job, items, res);
+  } catch (e: any) {
+    console.error("[bundle] stream failed:", e);
+    if (!res.writableEnded) res.end();
+  }
 }
 
 // ─── HTML ──────────────────────────────────────────────────────────────────
@@ -2250,6 +2326,8 @@ const server = createServer(async (req, res) => {
       if (req.method === "DELETE" && !sub) return handleJobDelete(res, jobId);
       if (req.method === "GET" && sub === "/stream") return handleJobStream(req, res, jobId);
       if (req.method === "POST" && sub === "/inputs") return handleJobInput(req, res, jobId);
+      if (req.method === "POST" && sub === "/notes") return handleJobNotes(req, res, jobId);
+      if (req.method === "POST" && sub === "/bundle") return handleJobBundle(req, res, jobId);
     }
     // Fall-through for any GET: try to serve as a static asset from the UI
     // dir. Covers /components/*, /fonts/*, /mock-*.js, etc.
