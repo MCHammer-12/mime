@@ -15,7 +15,24 @@ export async function klaviyo(path: string, key: string): Promise<any> {
       await new Promise((r) => setTimeout(r, (retryAfter + 1) * 1000));
       continue;
     }
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText} on ${path}: ${await res.text()}`);
+    if (!res.ok) {
+      const body = await res.text();
+      // Lift Klaviyo's `errors[0].detail` (or `title`) to the front of the
+      // message so a truncated UI display still surfaces the actionable
+      // reason ("invalid_filter", "Permission denied", …) instead of just
+      // the long URL prefix.
+      let lead = "";
+      try {
+        const parsed = JSON.parse(body) as {
+          errors?: { detail?: string; title?: string; code?: string }[];
+        };
+        const e = parsed.errors?.[0];
+        if (e) lead = `${e.detail ?? e.title ?? e.code ?? ""}. `;
+      } catch {
+        // body wasn't JSON — fall through with no lead
+      }
+      throw new Error(`${lead}${res.status} ${res.statusText} on ${path}: ${body}`);
+    }
     return res.json();
   }
   throw new Error(`rate limited 6x on ${path}`);
