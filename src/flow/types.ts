@@ -31,6 +31,8 @@ export enum SchemaType {
   MARKETING_LOW_INVENTORY = "marketing_low_inventory",
   MARKETING_WARRANTY_REGISTRATION = "marketing_warranty_registration",
   MARKETING_CAMPAIGN = "marketing_campaign",
+  REFUND_RETURN_SUBMITTED = "refund_return_submitted",
+  EXCHANGE_PROCESSED_WITH_CREDIT = "exchange_processed_with_credit",
 }
 
 export enum MarketingTriggerKey {
@@ -51,6 +53,8 @@ export enum MarketingTriggerKey {
   LOW_INVENTORY = "low_inventory",
   DATE = "date",
   PRICE_DROP = "price_drop",
+  REFUND_RETURN_SUBMITTED = "refund_return_submitted",
+  EXCHANGE_PROCESSED_WITH_CREDIT = "exchange_processed_with_credit",
 }
 
 export enum WaitTimeUnit {
@@ -217,7 +221,16 @@ export interface ParseResult {
   // Map of placeholder templateId sentinels we emitted → metadata the
   // downstream importer uses to create a real blank template.
   placeholderTemplates: PlaceholderTemplate[];
-  skipped?: { reason: string };
+  skipped?: {
+    reason: string;
+    /** When true the caller can recover by re-running parseFlow with a
+     *  user-chosen trigger via opts.forcedTrigger (e.g. unknown Klaviyo
+     *  metric → user picks a Redo trigger). */
+    recoverable?: boolean;
+    /** Klaviyo trigger object (echoed from the source flow) so the caller
+     *  can render context for the user when prompting. */
+    klaviyoTrigger?: unknown;
+  };
 }
 
 export interface PlaceholderTemplate {

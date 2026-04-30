@@ -48,7 +48,7 @@ function NeedsInputModal({ question, onAnswer, onSkip }) {
           )}
 
           {type === "choice" && (
-            <div className="space-y-1.5">
+            <div className={"space-y-1.5 " + ((question.options || []).length > 8 ? "max-h-[360px] overflow-y-auto pr-1" : "")}>
               {(question.options || []).map(opt => (
                 <button
                   key={opt.value}
@@ -90,15 +90,17 @@ function NeedsInputModal({ question, onAnswer, onSkip }) {
             </div>
           )}
 
-          <label className="flex items-center gap-2 mt-3 text-[11px] text-[#8b949e] cursor-pointer">
-            <input
-              type="checkbox"
-              checked={applyAll}
-              onChange={(e) => setApplyAll(e.target.checked)}
-              className="w-3 h-3 accent-[#58a6ff] cursor-pointer"
-            />
-            Apply to other items with the same question in this job
-          </label>
+          {!question.hideApplyAll && (
+            <label className="flex items-center gap-2 mt-3 text-[11px] text-[#8b949e] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={applyAll}
+                onChange={(e) => setApplyAll(e.target.checked)}
+                className="w-3 h-3 accent-[#58a6ff] cursor-pointer"
+              />
+              Apply to other items with the same question in this job
+            </label>
+          )}
         </div>
 
         <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-[#21262d] bg-[#010409]">
