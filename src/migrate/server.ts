@@ -499,8 +499,11 @@ async function handleCampaigns(req: IncomingMessage, res: ServerResponse) {
         created_at?: string | null;
       };
     };
-    // filter=equals(messages.channel,'email') is Klaviyo's required filter
-    // on the campaigns endpoint (they split email + sms campaigns).
+    // filter=equals(messages.channel,"email") is Klaviyo's required filter
+    // on the campaigns endpoint (they split email + sms campaigns). Use
+    // double-quoted JSON-style strings to match Klaviyo's filter spec — same
+    // form as the flow-messages call elsewhere in this file. Single-quoted
+    // strings are rejected by some merchant accounts with a 400.
     //
     // We deliberately fetch only the 10 most-recent campaigns (single page,
     // no pagination). Walking every campaign + every campaign-message +
@@ -509,7 +512,7 @@ async function handleCampaigns(req: IncomingMessage, res: ServerResponse) {
     // window and return a 504 Gateway Timeout. Most merchants only want
     // their recent campaigns migrated anyway; older ones can be added
     // later by lifting this cap.
-    const filter = encodeURIComponent("equals(messages.channel,'email')");
+    const filter = encodeURIComponent(`equals(messages.channel,"email")`);
     const campaignsBody: any = await klaviyo(
       `/campaigns/?filter=${filter}&fields[campaign]=name,status,send_time,created_at&sort=-created_at&page[size]=10`,
       key,
@@ -1036,6 +1039,13 @@ async function runImport(
             continue;
           }
           const flowName = flowDetail?.data?.attributes?.name ?? flowId;
+          // Status diagnostics: surface the Klaviyo source status so we can
+          // verify enabled mapping in the importer log. Only `live` → enabled.
+          const klaviyoStatus = flowDetail?.data?.attributes?.status ?? "(unknown)";
+          emit({
+            kind: "info",
+            text: `${flowName}: Klaviyo status="${klaviyoStatus}" → Redo enabled=${klaviyoStatus === "live"}`,
+          });
 
           emit({ kind: "step", label: `Parsing ${flowName}…` });
           let parsed;
@@ -1190,6 +1200,11 @@ async function runImport(
               createdTemplateCount: result.createdTemplateCount,
               blankTemplateCount: result.blankTemplateCount,
               warningCount: parsed.warnings.length,
+              // Surfaced for the UI's "imported as draft / live" badge and
+              // to make the Klaviyo-status → Redo-enabled mapping visible
+              // in the per-job log.
+              enabled: parsed.automation?.enabled === true,
+              klaviyoStatus,
               // For the troubleshoot bundle: full warnings + parsed automation
               // tree so we can re-construct a per-flow report without re-running.
               warningList: parsed.warnings,

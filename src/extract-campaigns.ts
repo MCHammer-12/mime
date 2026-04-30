@@ -11,7 +11,10 @@ async function main() {
   await mkdir(outDir, { recursive: true });
 
   console.log(`listing campaigns for merchant=${merchant}...`);
-  const filter = encodeURIComponent("equals(messages.channel,'email')");
+  // Klaviyo's filter spec wants double-quoted strings; some accounts reject
+  // the single-quoted form with a 400. Match the working pattern used in
+  // src/migrate/server.ts (flow-messages filter).
+  const filter = encodeURIComponent(`equals(messages.channel,"email")`);
   const campaigns = await paginate(`/campaigns/?filter=${filter}`, key);
   console.log(`found ${campaigns.length} campaigns`);
 
