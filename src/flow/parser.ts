@@ -6,7 +6,7 @@ import {
 } from "./condition-mapping.js";
 import type { TemplateResolver } from "./template-resolver.js";
 import { treeifyFlow } from "./treeify.js";
-import { resolveTrigger } from "./trigger-mapping.js";
+import { resolveTrigger, type TriggerResolution } from "./trigger-mapping.js";
 import { rewriteKlaviyoLiquid } from "./variable-mapping.js";
 import {
   SchemaType,
@@ -356,18 +356,29 @@ export async function parseFlow(
     teamId: string;
     createdByUserId?: string;
     templateResolver?: TemplateResolver | null;
+    /** When provided, bypass auto-resolution and use this trigger. Caller
+     *  uses this to recover from an "unresolvable trigger" skip by asking
+     *  the user to pick a Redo trigger and re-running parseFlow. */
+    forcedTrigger?: TriggerResolution;
   },
 ): Promise<ParseResult> {
   const warnings: ParseWarning[] = [];
   const placeholderTemplates: PlaceholderTemplate[] = [];
 
-  const resolution = resolveTrigger(flow, metrics, warnings);
+  const resolution = opts.forcedTrigger ?? resolveTrigger(flow, metrics, warnings);
   if (!resolution) {
+    const klaviyoTrigger = flow.data.attributes.definition?.triggers?.[0];
     return {
       automation: null,
       warnings,
       placeholderTemplates: [],
-      skipped: { reason: "unresolvable trigger" },
+      // recoverable: caller can prompt the user, then re-call parseFlow with
+      // opts.forcedTrigger to produce a usable AdvancedFlow.
+      skipped: {
+        reason: "unresolvable trigger",
+        recoverable: true,
+        klaviyoTrigger,
+      },
     };
   }
 

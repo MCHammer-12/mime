@@ -69,6 +69,10 @@ export interface PendingInput {
   itemId?: string;
   /** Human-readable label for the item the question is about. */
   itemLabel?: string;
+  /** When the question is uniquely keyed per item, suppress the
+   *  "Apply to other items with the same question" checkbox in the UI —
+   *  the cache reuse never fires anyway and showing it just misleads. */
+  hideApplyAll?: boolean;
 }
 
 export interface JobSummary {

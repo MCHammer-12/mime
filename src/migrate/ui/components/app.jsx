@@ -332,6 +332,7 @@ function App() {
           question: evt.question, options: evt.options,
           type: evt.type, default: evt.default, placeholder: evt.placeholder,
           context: evt.context, trueLabel: evt.trueLabel, falseLabel: evt.falseLabel,
+          hideApplyAll: evt.hideApplyAll,
           broker: j.broker,
         });
       } else if (evt.kind === "exported") {
