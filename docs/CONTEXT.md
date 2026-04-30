@@ -4,7 +4,11 @@
 Automation project for manual processes Michael does at Redo. Primary target: Klaviyo → Redo email migration workflow, and improving Redo's existing HTML → JSON email parser.
 
 ## Status
-End-to-end import pipeline working: parse → transform → export → import to local redoapp → render in builder. Three templates imported successfully (Newsletter #8, Newsletter #4, merchant-2 + merchant-3 accounts). Packages A-D + F (parser polish) + E1 (variable substitution) + E2 (inline coupon → AI rewrite + placeholder discount block) + E4 (REVIEW aggregator) complete. 804 templates parse across 3 corpora with 0 failures. Import executor in redoapp (uncommitted) handles product filter creation. Next: live AI smoke-test of E2 (needs Anthropic key), discount-object creation in the redoapp import executor, E3 (font provisioning, partially landed), E5 (drop-shadow CDN upload).
+End-to-end import pipeline running in production via the Replit-deployed migrate UI. As of 2026-04-30: text-block variable substitution maps the full Klaviyo footer/profile-tag set (unsubscribe, view-in-browser, customer_*) and drops+warns on tags Redo doesn't support (manage_preferences, email_preference_url). Split + multi-column row section-padding bugs fixed. New per-job Troubleshoot panel in the migrate UI lets the user attach notes and download a zip bundle (Klaviyo source + Redo output + parse-result + notes) for offline debugging. Flow trigger picker recovers unmapped Klaviyo triggers by prompting for a Redo equivalent (13 options matching Redo's flow editor) instead of failing. Klaviyo `/campaigns/?filter=` switched to double-quoted strings to fix 400s on strict accounts.
+
+Open: button-in-wrong-column for stacked column layouts, image+product duplication, footer column text padding, bold inversion, GIF → 2 images + 2 text blocks, table-based footer, menu didn't copy on AC2, bestsellers/cart-item filter creation, Toby branch-config warnings + naming + end-as-message. Most need a troubleshoot bundle from the affected merchant before they can be debugged.
+
+Packages A-D + F (parser polish) + E1 (variable substitution) + E2 (inline coupon → AI rewrite + placeholder discount block) + E4 (REVIEW aggregator) complete. 416 templates in the local corpus parse with 0 failures. Import executor in redoapp (uncommitted) handles product filter creation.
 
 **CODE-template parser (2026-04-20):** First-pass parser for `editor_type: CODE` templates landed at `src/parser/code-template.ts` (table-based + div-based dialects). 368/368 Otishi CODE templates parse with 0 failures. Block detection works; visual fidelity in the Redo builder is insufficient to ship (image widths, column gaps, per-span text styling). Paused until CODE migration becomes a blocker. Gated behind `editor_type: CODE` / no-kl-class heuristic — inert for existing block-editor migrations. See `project_code_template_parser` memory for state and next-step queue.
 
@@ -37,6 +41,10 @@ End-to-end import pipeline working: parse → transform → export → import to
 - `src/viewer.ts` — full side-by-side comparison viewer (Klaviyo vs Redo)
 - `src/export-template.ts` — full EmailTemplate JSON exporter (production MongoDB shape)
 - `src/migrate/review-variables.ts` — interactive CLI: aggregate `reviewItems` across a migration, classify unknown Klaviyo variables as mapped / unsupported / skip. Writes `url-mappings-pending.json` for engineer to fold into `src/parser/url-mapping.ts`.
+- `src/migrate/bundle.ts` — per-job troubleshoot zip builder (Klaviyo source + Redo output + parse-result + notes). Streamed via `archiver` from `POST /api/jobs/:id/bundle`.
+- `src/migrate/bundle.smoke.ts` — bundle smoke-test (point at a real corpus template, prints zip entry list).
+- `src/flow/marketing-trigger-options.ts` — picker options for the trigger-recovery flow (mirrors Redo's marketing trigger list).
+- `src/flow/parser.smoke.ts` — round-trip smoke test for `parseFlow(forcedTrigger: …)`.
 - `src/screenshot.ts` / `src/screenshot-batch.ts` — Playwright visual comparison
 
 ## Plans

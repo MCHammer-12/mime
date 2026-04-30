@@ -1,5 +1,70 @@
 # Session Log
 
+## 2026-04-30 — Live merchant fixes: text vars, padding, troubleshoot bundle, trigger picker, campaigns filter
+
+**Context**
+Live-use feedback from running the migration on Gaidama, Roden Gray, nevermindall usa, quikcamo. Triaged ~18 issues into 6 root-cause groups, then worked through them across four merged PRs.
+
+**Done — text-block variable substitution ([#17](https://github.com/MCHammer-12/mime/pull/17))**
+- `transform.ts`: drop `manage_preferences*` / `email_preference_url` anchors with adjacent " | " / " or " separators (no Redo equivalent).
+- Map `{% web_view %}` / `{% web_view 'X' %}` / `{% web_view_link %}` (in href) → `{{ view_in_browser_link }}` after confirming the field exists in `redoapp/redo/model/src/email-builder/shared-schema-fields.ts` (sharedEmailSchemaFields).
+- Map `{% unsubscribe 'X' %}` (custom-text form), `{% unsubscribe_link %}` (URL form in href).
+- Map `{{ first_name }}`, `{{ person.* }}` → `{{ customer_* }}`; `{{ shop.name }}` / `{{ shop_name }}` → org name.
+- New `TransformResult.warnings` field; data-loss drops surface via the existing migrate UI warn count.
+- `isEffectivelyEmpty()` drops a text block whose only content was the stripped tag.
+- Cleanup pass removes empty inline tags + collapses double separators after a middle-of-chain anchor drop.
+
+**Done — section padding fixes + troubleshoot bundle ([#18](https://github.com/MCHammer-12/mime/pull/18))**
+- `parseSplitBlock`: replaced hardcoded `sectionPadding: {0,0,0,0}` with `sumAncestorPadding($td)` so the kl-split td's outer ancestors contribute padding.
+- `parseColumnRow`: same fix via new `extractRowSectionPadding` walker (4 enclosing tds above kl-row); padding distributed to first/last zippered ColumnBlock so intermediate rows don't double-pad.
+- New per-job Troubleshoot panel (jobs.jsx + app.jsx + bundle.ts + bundle.smoke.ts):
+  - Notes per template/flow stored in new `jobs.notes` JSONB column (migration 002), POST `/api/jobs/:id/notes`
+  - "Export zip (N)" button POSTs to new `/api/jobs/:id/bundle` → archiver streams a zip (Klaviyo source HTML+JSON, Redo `.redo-template.json`, parse-result with full warnings/subs/review/skipped, notes, manifest, README)
+  - `exported` event payload now includes the full warning/substitution/review/skipped lists so the bundle has them without re-running the parser.
+  - Verified end-to-end via `bundle.smoke.ts`: zip contains exactly the expected files with no duplicates after a `.sections.json` collision was caught + filtered out.
+
+**Done — trigger recovery picker ([#20](https://github.com/MCHammer-12/mime/pull/20))**
+- `parseFlow` accepts `opts.forcedTrigger`; `ParseResult.skipped` now carries `recoverable: true` + `klaviyoTrigger` so the caller can prompt the user.
+- New `src/flow/marketing-trigger-options.ts` mirrors Redo's marketing-trigger list (13 options) with display labels matching `redoapp/redo/model/src/advanced-flow/triggers.ts schemaTypeConfigs`. Abandonment options keep `autoSkipAbandonmentField`.
+- Server flow-import: detect recoverable skip → emit `needs_input` (type=choice) → re-parse with `forcedTrigger` → import normally. "Skip this item" gracefully fails the flow.
+- Modal: scrolls when option count > 8; new `PendingInput.hideApplyAll` suppresses the misleading "apply to others" checkbox for per-flow questions (per-flow questionKey means cache reuse never fires anyway).
+- Smoke test (`src/flow/parser.smoke.ts`) proves the round-trip.
+
+**Done — campaigns 400 + flow status diagnostic ([#21](https://github.com/MCHammer-12/mime/pull/21))**
+- Switched `/campaigns/?filter=equals(messages.channel,'email')` to double-quoted `"email"` to match the working flow-messages filter; some Klaviyo accounts reject single-quoted strings with 400. Same fix in `src/extract-campaigns.ts`.
+- `klaviyo.ts`: parse Klaviyo's structured `errors[0].detail/title/code` and lift it to the front of the thrown error message so a truncated UI display surfaces the actionable reason instead of just the URL prefix.
+- Flow status: parser code is correct (`enabled = status === "live"`). Added per-flow info emit `Klaviyo status="X" → Redo enabled=Y` and propagated `enabled` + `klaviyoStatus` onto the `flow_imported` event payload so the next import surfaces the mapping for verification.
+
+**Files changed (cross-PR)**
+- `src/transform.ts`, `src/export-template.ts`
+- `src/parser/blocks/column.ts`
+- `src/migrate/server.ts`, `src/migrate/jobs.ts`, `src/migrate/db.ts`
+- `src/migrate/bundle.ts` (NEW), `src/migrate/bundle.smoke.ts` (NEW)
+- `src/migrate/ui/components/jobs.jsx`, `src/migrate/ui/components/app.jsx`, `src/migrate/ui/components/needs-input.jsx`, `src/migrate/ui/mock-stream.js`
+- `src/flow/parser.ts`, `src/flow/types.ts`
+- `src/flow/marketing-trigger-options.ts` (NEW), `src/flow/parser.smoke.ts` (NEW)
+- `src/extract-campaigns.ts`, `src/klaviyo.ts`
+- `package.json` / `package-lock.json` (added `archiver`)
+
+**Decisions (see DECISIONS.md)**
+- Map vs drop for Klaviyo footer tags: map when Redo has an equivalent (`view_in_browser_link`), drop+warn otherwise.
+- Bundle delivery: zip download (not paste-ready markdown) — covers deep-debugging without truncation.
+- Trigger recovery: re-parse with `forcedTrigger` override after the user picks, rather than mid-import patching.
+- Klaviyo filter strings: standardize on double quotes.
+
+**Next steps (in priority order)**
+1. Live test [#21](https://github.com/MCHammer-12/mime/pull/21): verify campaigns filter resolves on the failing merchant; confirm flow status diagnostic shows correct mapping.
+2. Drop a troubleshoot bundle for the remaining group-2/4 issues:
+   - Roden Gray "3.6.21 |Launch": split-padding fix is live, but button-in-wrong-column still open
+   - nevermindall: image+product duplication, footer column text padding, bold inversion
+   - Roden Gray: GIF → 2 images + 2 text blocks, table-based footer breaks
+   - nevermindall AC2: menu didn't copy
+3. Group 3: bestsellers / cart-item filter creation broken (nevermindall) — code-readable, no HTML needed.
+4. Group 5 leftovers: Toby branches need config warnings, weird branch names, end-of-flow showing as message.
+5. Replit deploy: revisit the deferred plan once trigger picker + bundle are exercised in production.
+
+---
+
 ## 2026-04-15 — Image element deep-dive + Klaviyo checkout URL mapping
 
 **Context**
