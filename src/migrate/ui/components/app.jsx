@@ -124,8 +124,21 @@ function App() {
   }, [view.screen, view.storeId, stores]);
 
   // ─ Per-store session imported (prior imports + current session) ─
-  // Keyed by storeId for correct scope.
-  const [sessionImports, setSessionImports] = useS({}); // {storeId: {flows: Set, tmpls: Set}}
+  // Keyed by storeId for correct scope. Two separate sets here on purpose:
+  //
+  //   priorImports     — snapshot of what was imported BEFORE this session
+  //                       opened the store. Hydrated from localStorage on
+  //                       first open and then NEVER mutated during the
+  //                       session. Drives the "Hide already imported"
+  //                       filter so flows currently being imported do
+  //                       NOT vanish from the catalog mid-import.
+  //
+  //   sessionImports   — running union of priorImports + everything that
+  //                       has finished importing in THIS session. Drives
+  //                       the per-row "imported" badge so rows light up
+  //                       green as soon as the server emits flow_imported.
+  const [priorImports, setPriorImports] = useS({});     // {storeId: {flows: Set, tmpls: Set, campaigns: Set}}
+  const [sessionImports, setSessionImports] = useS({}); // {storeId: {flows: Set, tmpls: Set, campaigns: Set}}
   const [lastResult, setLastResult] = useS({});         // {storeId: Map<id, "imported"|"failed">}
   const [inProgress, setInProgress] = useS({});         // {storeId: Set<id>}
 
@@ -158,6 +171,14 @@ function App() {
     tmpls: new Set([...window.PRIOR_IMPORTED_TEMPLATE_IDS]),
     campaigns: new Set([...(window.PRIOR_IMPORTED_CAMPAIGN_IDS ?? [])]),
   };
+  // Read-only snapshot of imports done before this session. Hide-filters
+  // use this so newly-imported items don't disappear from the catalog
+  // during an active import.
+  const getStorePriorImports = (storeId) => priorImports[storeId] || {
+    flows: new Set(),
+    tmpls: new Set(),
+    campaigns: new Set(),
+  };
 
   // ─ Hydrate prior imports from localStorage when a store is opened ─
   // Without this, the "already imported" badges + filters reset to empty
@@ -171,6 +192,16 @@ function App() {
     if (sessionImports[view.storeId]) return;
     const prior = window.loadPriorImports?.(view.storeId);
     if (!prior) return;
+    // Snapshot for the hide-filter — must NOT update during the session.
+    setPriorImports((pi) => ({
+      ...pi,
+      [view.storeId]: {
+        flows: new Set(prior.flows),
+        tmpls: new Set(prior.tmpls),
+        campaigns: new Set(prior.campaigns),
+      },
+    }));
+    // Live combined set — starts equal to priors, grows during session.
     setSessionImports((si) => ({ ...si, [view.storeId]: prior }));
     // Also seed lastResult so already-imported items render the green
     // "imported" pill on first paint, not just the "already imported"
@@ -576,6 +607,7 @@ function App() {
             state={getStoreState(activeStore.id)}
             updateState={(patch) => updateStoreState(activeStore.id, patch)}
             imports={getStoreImports(activeStore.id)}
+            priorImports={getStorePriorImports(activeStore.id)}
             lastResult={lastResult[activeStore.id] || new Map()}
             inProgress={inProgress[activeStore.id] || new Set()}
             onImport={() => startImport(activeStore.id)}
@@ -665,30 +697,39 @@ function TopBar({ view, store, hosted, onToggleHosted, onGoDashboard }) {
   );
 }
 
-function MigrationScreen({ store, data, state, updateState, imports, lastResult, inProgress, onImport }) {
+function MigrationScreen({ store, data, state, updateState, imports, priorImports, lastResult, inProgress, onImport }) {
+  // The hide-already-imported filter intentionally uses `priorImports`
+  // (snapshot at store-open) rather than the live `imports` set. If we
+  // used `imports`, every flow would vanish from the catalog the moment
+  // it finished importing — which made an in-progress run look like
+  // "no flows match these filters" once enough rows had completed.
+  const hideSet = priorImports || { flows: new Set(), tmpls: new Set(), campaigns: new Set() };
+
   const visibleFlows = useM(() => data.flows.filter(f => {
     if (state.flowStatus !== "all" && f.flowStatus !== state.flowStatus) return false;
     if (state.flowFilter && !f.flowName.toLowerCase().includes(state.flowFilter.toLowerCase())) return false;
-    if (state.hideFlow && imports.flows.has(f.flowId)) return false;
+    if (state.hideFlow && hideSet.flows.has(f.flowId)) return false;
     return true;
-  }), [data.flows, state.flowStatus, state.flowFilter, state.hideFlow, imports.flows]);
+  }), [data.flows, state.flowStatus, state.flowFilter, state.hideFlow, hideSet.flows]);
 
   const visibleTmpls = useM(() => data.templates.filter(t => {
     if (state.tmplFilter && !t.name.toLowerCase().includes(state.tmplFilter.toLowerCase())) return false;
-    if (state.hideTmpl && imports.tmpls.has(t.id)) return false;
+    if (state.hideTmpl && hideSet.tmpls.has(t.id)) return false;
     return true;
-  }), [data.templates, state.tmplFilter, state.hideTmpl, imports.tmpls]);
+  }), [data.templates, state.tmplFilter, state.hideTmpl, hideSet.tmpls]);
 
   const visibleCampaigns = useM(() => (data.campaigns ?? []).filter(c => {
     if (state.campaignStatus !== "all" && state.campaignStatus !== c.status) return false;
     if (state.campaignFilter && !c.campaignName.toLowerCase().includes(state.campaignFilter.toLowerCase())) return false;
-    if (state.hideCampaign && imports.campaigns.has(c.campaignId)) return false;
+    if (state.hideCampaign && hideSet.campaigns.has(c.campaignId)) return false;
     return true;
-  }), [data.campaigns, state.campaignStatus, state.campaignFilter, state.hideCampaign, imports.campaigns]);
+  }), [data.campaigns, state.campaignStatus, state.campaignFilter, state.hideCampaign, hideSet.campaigns]);
 
-  const flowsAlreadyCount = useM(() => data.flows.filter(f => imports.flows.has(f.flowId)).length, [data.flows, imports.flows]);
-  const tmplsAlreadyCount = useM(() => data.templates.filter(t => imports.tmpls.has(t.id)).length, [data.templates, imports.tmpls]);
-  const campaignsAlreadyCount = useM(() => (data.campaigns ?? []).filter(c => imports.campaigns.has(c.campaignId)).length, [data.campaigns, imports.campaigns]);
+  // "X hidden" indicator must reflect what the filter actually hides,
+  // so it counts against the same priorImports snapshot.
+  const flowsAlreadyCount = useM(() => data.flows.filter(f => hideSet.flows.has(f.flowId)).length, [data.flows, hideSet.flows]);
+  const tmplsAlreadyCount = useM(() => data.templates.filter(t => hideSet.tmpls.has(t.id)).length, [data.templates, hideSet.tmpls]);
+  const campaignsAlreadyCount = useM(() => (data.campaigns ?? []).filter(c => hideSet.campaigns.has(c.campaignId)).length, [data.campaigns, hideSet.campaigns]);
 
   // Annotate campaigns whose template IDs also appear in the Templates tab —
   // these were saved back to the Klaviyo library; merchant will see them
