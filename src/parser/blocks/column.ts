@@ -19,6 +19,7 @@ import {
   parseFontSize,
   parseInlineStyles,
   parsePadding,
+  sumAncestorPadding,
 } from "../style-utils.js";
 import { type $, type El, findCls, hasClass, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
@@ -176,6 +177,7 @@ export function parseColumnRow(
   const $row = $columns.first().parent();
   const stackOnMobile = hasClass($row, "colstack") || $row.hasClass("colstack");
   const { sectionColor } = extractRowContext($, $columns);
+  const rowSectionPadding = extractRowSectionPadding($row);
 
   const rowCount = Math.max(1, ...nestablePerColumn.map((a) => a.length));
 
@@ -211,10 +213,20 @@ export function parseColumnRow(
         },
       };
     });
+    // Section padding goes on the FIRST and LAST zippered ColumnBlock so
+    // the visual frame around the multi-column row is preserved without
+    // duplicating padding between intermediate zipper rows.
+    const isFirstZipperRow = r === 0;
+    const isLastZipperRow = r === rowCount - 1;
     sections.push({
       type: EmailBlockType.COLUMN,
       blockId: nextId(),
-      sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
+      sectionPadding: {
+        top: isFirstZipperRow ? rowSectionPadding.top : 0,
+        right: rowSectionPadding.right,
+        bottom: isLastZipperRow ? rowSectionPadding.bottom : 0,
+        left: rowSectionPadding.left,
+      },
       sectionColor,
       columns: cols,
       columnCount: $columns.length,
@@ -225,6 +237,29 @@ export function parseColumnRow(
     });
   }
   return sections;
+}
+
+/**
+ * Pull padding from the nearest enclosing td above the kl-row. Klaviyo
+ * emits per-section padding on a wrapping td (often above .content-padding /
+ * .kl-row); kl-row itself almost never carries padding inline. We sum
+ * padding across up to 4 ancestor tds in case Klaviyo nests for spacing.
+ */
+function extractRowSectionPadding(
+  $row: cheerio.Cheerio<El>,
+): { top: number; right: number; bottom: number; left: number } {
+  const total = { top: 0, right: 0, bottom: 0, left: 0 };
+  let $cur: cheerio.Cheerio<El> = $row.parent().closest("td");
+  let guard = 0;
+  while ($cur.length > 0 && guard++ < 4) {
+    const p = parsePadding(parseInlineStyles($cur.attr("style")));
+    total.top += p.top;
+    total.right += p.right;
+    total.bottom += p.bottom;
+    total.left += p.left;
+    $cur = $cur.parent().closest("td");
+  }
+  return total;
 }
 
 /**
@@ -289,10 +324,13 @@ export function parseSplitBlock(
     $cur = $cur.parent();
   }
 
+  // The kl-split td itself almost always has padding:0; the surrounding
+  // section padding lives on the wrapping td(s). Sum across the chain so
+  // we don't strip the merchant's outer spacing.
   return {
     type: EmailBlockType.COLUMN,
     blockId: nextId(),
-    sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
+    sectionPadding: sumAncestorPadding($td),
     sectionColor,
     columns: [leftBlock, rightBlock],
     columnCount: 2,

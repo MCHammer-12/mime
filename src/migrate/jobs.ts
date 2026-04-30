@@ -105,6 +105,8 @@ export interface JobState {
   summary?: JobSummary;
   /** Fatal error (when status === "failed"). */
   error?: string;
+  /** Free-text per-item troubleshooting notes, keyed by template/flow id. */
+  notes: Record<string, string>;
 }
 
 interface PendingInputInternal {
@@ -158,6 +160,7 @@ export function createJob(params: {
     flowIds: params.flowIds,
     events: [],
     answers: {},
+    notes: {},
   };
   jobs.set(id, job);
   // Fire-and-forget DB insert. If the DB is unavailable the row won't
@@ -283,6 +286,31 @@ export function setStatus(
   }
 }
 
+// ─── Notes (troubleshooting annotations) ───────────────────────────────────
+
+/**
+ * Upsert a free-text note for a specific template or flow within a job.
+ * Empty string clears the note. Persists to DB on best-effort basis.
+ */
+export function setNote(jobId: string, itemId: string, note: string): boolean {
+  const job = jobs.get(jobId);
+  if (!job) return false;
+  if (note.trim() === "") {
+    delete job.notes[itemId];
+  } else {
+    job.notes[itemId] = note;
+  }
+  if (isDbEnabled()) {
+    getPool()
+      .query(`UPDATE jobs SET notes = $2::jsonb WHERE id = $1`, [
+        jobId,
+        JSON.stringify(job.notes),
+      ])
+      .catch((err) => console.warn("[jobs] persist setNote failed:", err));
+  }
+  return true;
+}
+
 // ─── Subscription (for streaming endpoints) ────────────────────────────────
 
 export function subscribe(jobId: string, handler: JobHandler): () => void {
@@ -386,7 +414,7 @@ export async function hydrateFromDb(limit = 200): Promise<number> {
     const { rows: jobRows } = await pool.query(
       `SELECT id, store_id, store_name, merchant_slug, status,
               created_at, started_at, completed_at, template_ids, flow_ids,
-              summary, error
+              summary, error, notes
          FROM jobs
         ORDER BY created_at DESC
         LIMIT $1`,
@@ -430,6 +458,7 @@ export async function hydrateFromDb(limit = 200): Promise<number> {
         answers: {},
         summary: r.summary ?? undefined,
         error: r.error ?? undefined,
+        notes: r.notes && typeof r.notes === "object" ? r.notes : {},
       };
       jobs.set(job.id, job);
     }

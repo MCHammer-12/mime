@@ -26,7 +26,7 @@
 
 const { useState: useStateJobs, useEffect: useEffectJobs, useRef: useRefJobs } = React;
 
-function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, onToggleCollapsed, onOpenLog, onOpenWarnings, scopeLabel }) {
+function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, onToggleCollapsed, onOpenLog, onOpenWarnings, onSaveNote, onExportBundle, scopeLabel }) {
   const activeCount = jobs.filter(j => j.status === "running").length;
   const failedCount = jobs.reduce((s, j) => s + j.items.filter(i => i.state === "failed").length, 0);
   const waitingCount = jobs.filter(j => j.status === "waiting_input").length;
@@ -96,6 +96,8 @@ function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, on
               onCancelJob={onCancelJob}
               onOpenLog={onOpenLog}
               onOpenWarnings={onOpenWarnings}
+              onSaveNote={onSaveNote}
+              onExportBundle={onExportBundle}
             />
           ))}
         </div>
@@ -104,7 +106,7 @@ function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, on
   );
 }
 
-function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpenWarnings }) {
+function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpenWarnings, onSaveNote, onExportBundle }) {
   const running = job.items.filter(i => i.state === "running" || i.state === "queued");
   const failed  = job.items.filter(i => i.state === "failed");
   const done    = job.items.filter(i => i.state === "imported");
@@ -318,6 +320,148 @@ function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpe
           raw log →
         </button>
       </div>
+
+      {/* Troubleshoot panel — only after a job is in a terminal state. Lets
+          the user pick problematic templates/flows, attach a note about
+          what's wrong, and download a zip Claude can read directly. */}
+      {(job.status === "complete" || job.status === "partial" || job.status === "canceled" || job.fatalError) && (
+        <TroubleshootPanel
+          job={job}
+          onSaveNote={onSaveNote}
+          onExportBundle={onExportBundle}
+        />
+      )}
+    </div>
+  );
+}
+
+function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
+  const [open, setOpen] = useStateJobs(false);
+  const [selected, setSelected] = useStateJobs(() => new Set());
+  // Local note buffers so typing doesn't lag while we debounce-save.
+  const [localNotes, setLocalNotes] = useStateJobs(() => ({ ...(job.notes || {}) }));
+  const [exporting, setExporting] = useStateJobs(false);
+  const saveTimers = useRefJobs({});
+
+  // Items that are interesting to troubleshoot — anything that finished
+  // (imported or failed). Queued/running items aren't ready to debug.
+  const items = job.items.filter(i => i.state === "imported" || i.state === "failed");
+  if (items.length === 0) return null;
+
+  const toggleSelected = (id) => {
+    setSelected(s => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  };
+
+  const selectAll = () => setSelected(new Set(items.map(i => i.id)));
+  const clearAll = () => setSelected(new Set());
+
+  const updateNote = (itemId, text) => {
+    setLocalNotes(n => ({ ...n, [itemId]: text }));
+    // Debounce save: wait 500ms after the last keystroke before POSTing.
+    if (saveTimers.current[itemId]) clearTimeout(saveTimers.current[itemId]);
+    saveTimers.current[itemId] = setTimeout(() => {
+      onSaveNote && onSaveNote(job.id, itemId, text);
+    }, 500);
+  };
+
+  const flushAndExport = async () => {
+    if (selected.size === 0) return;
+    // Flush any pending note saves before bundling so the zip includes them.
+    for (const [itemId, t] of Object.entries(saveTimers.current)) {
+      if (t) {
+        clearTimeout(t);
+        await Promise.resolve(onSaveNote && onSaveNote(job.id, itemId, localNotes[itemId] ?? ""));
+      }
+    }
+    saveTimers.current = {};
+    setExporting(true);
+    try {
+      const items = [...selected].map(id => {
+        const it = job.items.find(x => x.id === id);
+        return { id, type: (it && it.kind === "flow") ? "flow" : "template" };
+      });
+      await onExportBundle(job.id, items);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className="mx-4 mt-3 border-t border-[#21262d] pt-2">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-1.5 py-1 text-[10px] uppercase tracking-wider text-[#6e7681] hover:text-[#e6edf3]"
+      >
+        {open
+          ? <Icon.chevronDown width="10" height="10"/>
+          : <Icon.chevronRight width="10" height="10"/>}
+        Troubleshoot · {items.length} item{items.length === 1 ? "" : "s"}
+        {Object.values(localNotes).filter(n => (n||"").trim()).length > 0 && (
+          <span className="ml-auto text-[10px] text-[#58a6ff] normal-case tracking-normal">
+            {Object.values(localNotes).filter(n => (n||"").trim()).length} noted
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="space-y-2 pb-2">
+          <div className="flex items-center gap-2 text-[10px] text-[#8b949e]">
+            <button onClick={selectAll} className="hover:text-[#e6edf3]">select all</button>
+            <span className="text-[#30363d]">·</span>
+            <button onClick={clearAll} className="hover:text-[#e6edf3]">clear</button>
+            <span className="ml-auto tabular-nums">
+              {selected.size} selected
+            </span>
+            <button
+              onClick={flushAndExport}
+              disabled={selected.size === 0 || exporting}
+              className="ml-2 px-2 py-1 text-[11px] text-[#e6edf3] bg-[#238636] hover:bg-[#2ea043] disabled:bg-[#30363d] disabled:text-[#6e7681] rounded-[3px]"
+            >
+              {exporting ? "exporting…" : `Export zip${selected.size > 0 ? ` (${selected.size})` : ""}`}
+            </button>
+          </div>
+          {items.map(item => {
+            const noteVal = localNotes[item.id] ?? "";
+            return (
+              <div key={item.id} className="border border-[#21262d] rounded-[3px] p-2 bg-[#0d1117]">
+                <div className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(item.id)}
+                    onChange={() => toggleSelected(item.id)}
+                    className="mt-0.5"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline gap-2 text-[11px]">
+                      <span className="text-[10px] uppercase tracking-wider text-[#484f58] w-[40px]">
+                        {item.kind === "flow" ? "flow" : "tmpl"}
+                      </span>
+                      <span className="truncate text-[#e6edf3]">{item.name}</span>
+                      <span className="text-[10px] text-[#6e7681] tabular-nums ml-auto">{item.id}</span>
+                    </div>
+                    {item.state === "failed" && item.error && (
+                      <div className="text-[10px] text-[#f85149] opacity-80 font-mono mt-0.5">
+                        {item.error}
+                      </div>
+                    )}
+                    <textarea
+                      value={noteVal}
+                      onChange={e => updateNote(item.id, e.target.value)}
+                      placeholder="What's wrong with this one? (footer padding off, button in wrong column, …)"
+                      rows={2}
+                      className="w-full mt-1 bg-[#010409] border border-[#30363d] focus:border-[#388bfd] outline-none rounded-[3px] px-2 py-1 text-[11px] text-[#e6edf3] placeholder:text-[#484f58] resize-y"
+                    />
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
