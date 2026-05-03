@@ -218,53 +218,172 @@ type FlowWalkProgress =
   | { kind: "discovered"; total: number }
   | { kind: "scanned"; scanned: number; total: number; currentName: string; emailsForFlow: number };
 
+type FlowMeta = {
+  id: string;
+  attributes: { name: string; status: string; trigger_type: string };
+};
+
+type WalkedFlow = {
+  flowId: string;
+  flowName: string;
+  flowStatus: string;
+  triggerType: string;
+  emails: Array<{
+    templateId: string | null;
+    messageId: string;
+    actionId: string;
+    name: string | null;
+  }>;
+};
+
+type WalkDebug = {
+  totalFlows: number;
+  flowsWithActions: number;
+  flowsWithNoActions: number;
+  actionTypeCounts: Record<string, number>;
+  messagesSeen: number;
+  messagesWithTemplate: number;
+  messagesWithoutTemplate: number;
+  failedActionFetches: number;
+  failedMessageFetches: number;
+  sampleFlowNames: string[];
+  sampleMessageFetchErrors: string[];
+};
+
+function emptyWalkDebug(totalFlows = 0): WalkDebug {
+  return {
+    totalFlows,
+    flowsWithActions: 0,
+    flowsWithNoActions: 0,
+    actionTypeCounts: {},
+    messagesSeen: 0,
+    messagesWithTemplate: 0,
+    messagesWithoutTemplate: 0,
+    failedActionFetches: 0,
+    failedMessageFetches: 0,
+    sampleFlowNames: [],
+    sampleMessageFetchErrors: [],
+  };
+}
+
+// Walk one flow's actions + messages. Mutates `debug` in place. Returns
+// the walked flow row (or null if the flow had no email send-actions).
+// Extracted from walkFlowsFromKlaviyo so the same per-flow logic can be
+// reused by the batch endpoint without duplication.
+async function walkOneFlow(
+  f: FlowMeta,
+  key: string,
+  debug: WalkDebug,
+): Promise<{ walked: WalkedFlow | null; emailsForFlow: number }> {
+  if (debug.sampleFlowNames.length < 10) {
+    debug.sampleFlowNames.push(f.attributes.name);
+  }
+  try {
+    const actionsBody: any = await klaviyo(`/flows/${f.id}/flow-actions/`, key);
+    const emails: WalkedFlow["emails"] = [];
+
+    const allActions = actionsBody.data ?? [];
+    if (allActions.length > 0) debug.flowsWithActions++;
+    else debug.flowsWithNoActions++;
+
+    for (const a of allActions) {
+      const type = (a.attributes?.definition?.type ?? "").toLowerCase();
+      debug.actionTypeCounts[type] = (debug.actionTypeCounts[type] ?? 0) + 1;
+    }
+
+    // Fetch flow-messages for each action. Klaviyo only returns
+    // messages for send-* actions (not time-delay / split / etc.);
+    // non-email actions return empty data or 404/400, so we ignore
+    // errors per-action. We probe both known endpoint shapes since
+    // Klaviyo's API has shifted between them and we've seen both
+    // in the wild:
+    //   1. /flow-actions/{id}/flow-messages/  (original)
+    //   2. /flow-messages/?filter=equals(flow-action.id,"<id>")
+    // Try #1 first, fall back to #2 on any failure.
+    for (const a of allActions) {
+      let msgs: any = null;
+      try {
+        msgs = await klaviyo(`/flow-actions/${a.id}/flow-messages/`, key);
+      } catch (e: any) {
+        if (debug.sampleMessageFetchErrors.length < 3) {
+          debug.sampleMessageFetchErrors.push(
+            `direct: ${e.message?.slice(0, 120) ?? String(e).slice(0, 120)}`,
+          );
+        }
+        try {
+          msgs = await klaviyo(
+            `/flow-messages/?filter=${encodeURIComponent(
+              `equals(flow-action.id,"${a.id}")`,
+            )}`,
+            key,
+          );
+        } catch (e2: any) {
+          debug.failedMessageFetches++;
+          if (debug.sampleMessageFetchErrors.length < 6) {
+            debug.sampleMessageFetchErrors.push(
+              `filter: ${e2.message?.slice(0, 120) ?? String(e2).slice(0, 120)}`,
+            );
+          }
+          continue;
+        }
+      }
+      for (const m of msgs?.data ?? []) {
+        debug.messagesSeen++;
+        let tplId: string | null = m.relationships?.template?.data?.id ?? null;
+        if (!tplId) {
+          try {
+            const rel: any = await klaviyo(
+              `/flow-messages/${m.id}/relationships/template/`,
+              key,
+            );
+            tplId = rel?.data?.id ?? null;
+          } catch (e) {
+            // no template attached; leave null
+          }
+        }
+        if (tplId) debug.messagesWithTemplate++;
+        else debug.messagesWithoutTemplate++;
+        emails.push({
+          templateId: tplId,
+          messageId: m.id,
+          actionId: a.id,
+          name: m.attributes?.name ?? null,
+        });
+      }
+    }
+    if (emails.length > 0) {
+      return {
+        walked: {
+          flowId: f.id,
+          flowName: f.attributes.name,
+          flowStatus: f.attributes.status,
+          triggerType: f.attributes.trigger_type,
+          emails,
+        },
+        emailsForFlow: emails.length,
+      };
+    }
+    return { walked: null, emailsForFlow: 0 };
+  } catch (e) {
+    debug.failedActionFetches++;
+    return { walked: null, emailsForFlow: 0 };
+  }
+}
+
 async function walkFlowsFromKlaviyo(
   key: string,
   onProgress?: (ev: FlowWalkProgress) => void,
 ) {
-  type FlowMeta = {
-    id: string;
-    attributes: { name: string; status: string; trigger_type: string };
-  };
   const flows = await paginate<FlowMeta>(
     "/flows/?fields[flow]=name,status,trigger_type&sort=-updated",
     key,
   );
   try { onProgress?.({ kind: "discovered", total: flows.length }); } catch {}
 
-  // For each flow, walk actions + messages to collect send-email steps.
-  // Run in parallel across flows (bounded concurrency), serial per-flow.
-  // 8 keeps us well under Klaviyo's per-endpoint burst limits while
-  // shaving ~40% off wall time vs 5 for stores with many flows.
+  // Run per-flow walks in parallel with bounded concurrency.
   const LIMIT = 8;
-  const out: Array<{
-    flowId: string;
-    flowName: string;
-    flowStatus: string;
-    triggerType: string;
-    emails: Array<{
-      templateId: string | null;
-      messageId: string;
-      actionId: string;
-      name: string | null;
-    }>;
-  }> = [];
-
-  // Diagnostics — surface what the walker actually saw so the UI can
-  // show something useful when "0 flow emails" is returned.
-  const debug = {
-    totalFlows: flows.length,
-    flowsWithActions: 0,
-    flowsWithNoActions: 0,
-    actionTypeCounts: {} as Record<string, number>,
-    messagesSeen: 0,
-    messagesWithTemplate: 0,
-    messagesWithoutTemplate: 0,
-    failedActionFetches: 0,
-    failedMessageFetches: 0,
-    sampleFlowNames: [] as string[],
-    sampleMessageFetchErrors: [] as string[],
-  };
+  const out: WalkedFlow[] = [];
+  const debug = emptyWalkDebug(flows.length);
 
   let idx = 0;
   let scanned = 0;
@@ -272,113 +391,8 @@ async function walkFlowsFromKlaviyo(
     while (idx < flows.length) {
       const i = idx++;
       const f = flows[i]!;
-      if (debug.sampleFlowNames.length < 10) {
-        debug.sampleFlowNames.push(f.attributes.name);
-      }
-      let emailsForFlow = 0;
-      try {
-        const actionsBody: any = await klaviyo(
-          `/flows/${f.id}/flow-actions/`,
-          key,
-        );
-        const emails: Array<{
-          templateId: string | null;
-          messageId: string;
-          actionId: string;
-          name: string | null;
-        }> = [];
-
-        const allActions = actionsBody.data ?? [];
-        if (allActions.length > 0) debug.flowsWithActions++;
-        else debug.flowsWithNoActions++;
-
-        for (const a of allActions) {
-          const type = (a.attributes?.definition?.type ?? "").toLowerCase();
-          debug.actionTypeCounts[type] =
-            (debug.actionTypeCounts[type] ?? 0) + 1;
-        }
-
-        // Fetch flow-messages for each action. Klaviyo only returns
-        // messages for send-* actions (not time-delay / split / etc.);
-        // non-email actions return empty data or 404/400, so we ignore
-        // errors per-action. We probe both known endpoint shapes since
-        // Klaviyo's API has shifted between them and we've seen both
-        // in the wild:
-        //   1. /flow-actions/{id}/flow-messages/  (original)
-        //   2. /flow-messages/?filter=equals(flow-action.id,"<id>")
-        // Try #1 first, fall back to #2 on any failure.
-        for (const a of allActions) {
-          let msgs: any = null;
-          try {
-            msgs = await klaviyo(
-              `/flow-actions/${a.id}/flow-messages/`,
-              key,
-            );
-          } catch (e: any) {
-            if (debug.sampleMessageFetchErrors.length < 3) {
-              debug.sampleMessageFetchErrors.push(
-                `direct: ${e.message?.slice(0, 120) ?? String(e).slice(0, 120)}`,
-              );
-            }
-            // Fall back to the filter endpoint.
-            try {
-              msgs = await klaviyo(
-                `/flow-messages/?filter=${encodeURIComponent(
-                  `equals(flow-action.id,"${a.id}")`,
-                )}`,
-                key,
-              );
-            } catch (e2: any) {
-              debug.failedMessageFetches++;
-              if (debug.sampleMessageFetchErrors.length < 6) {
-                debug.sampleMessageFetchErrors.push(
-                  `filter: ${e2.message?.slice(0, 120) ?? String(e2).slice(0, 120)}`,
-                );
-              }
-              continue;
-            }
-          }
-          for (const m of msgs?.data ?? []) {
-            debug.messagesSeen++;
-            // Try inline relationship first; fall back to the dedicated
-            // relationships endpoint if needed.
-            let tplId: string | null =
-              m.relationships?.template?.data?.id ?? null;
-            if (!tplId) {
-              try {
-                const rel: any = await klaviyo(
-                  `/flow-messages/${m.id}/relationships/template/`,
-                  key,
-                );
-                tplId = rel?.data?.id ?? null;
-              } catch (e) {
-                // no template attached; leave null
-              }
-            }
-            if (tplId) debug.messagesWithTemplate++;
-            else debug.messagesWithoutTemplate++;
-            emails.push({
-              templateId: tplId,
-              messageId: m.id,
-              actionId: a.id,
-              name: m.attributes?.name ?? null,
-            });
-          }
-        }
-        if (emails.length > 0) {
-          emailsForFlow = emails.length;
-          out.push({
-            flowId: f.id,
-            flowName: f.attributes.name,
-            flowStatus: f.attributes.status,
-            triggerType: f.attributes.trigger_type,
-            emails,
-          });
-        }
-      } catch (e) {
-        debug.failedActionFetches++;
-        // skip bad flow
-      }
+      const { walked, emailsForFlow } = await walkOneFlow(f, key, debug);
+      if (walked) out.push(walked);
       scanned++;
       try {
         onProgress?.({
@@ -406,6 +420,19 @@ async function walkFlowsFromKlaviyo(
   return { flows: out, debug };
 }
 
+// Sort comparator factored out so /api/flows/walk-batch consumers can
+// reorder the assembled result the same way the streaming walker does.
+function sortWalkedFlows(out: WalkedFlow[]) {
+  out.sort((a, b) => {
+    const rank = (s: string) =>
+      s === "live" ? 0 : s === "manual" ? 1 : s === "draft" ? 2 : 3;
+    return (
+      rank(a.flowStatus) - rank(b.flowStatus) ||
+      a.flowName.localeCompare(b.flowName)
+    );
+  });
+}
+
 async function handleFlows(req: IncomingMessage, res: ServerResponse) {
   const body = await readJsonBody(req);
   const key = body.klaviyoKey as string;
@@ -414,6 +441,93 @@ async function handleFlows(req: IncomingMessage, res: ServerResponse) {
   try {
     const result = await walkFlowsFromKlaviyo(key);
     json(res, 200, result);
+  } catch (e: any) {
+    json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// Fast list-only endpoint — paginates flow metadata without walking
+// per-flow actions/messages. Used by the client to enumerate the catalog
+// quickly, then walk each flow in small batches via /api/flows/walk-batch.
+// This lets a 70+ flow store load reliably even when the proxy/cloud-run
+// imposes a hard per-request duration cap that would kill a single
+// long-running stream.
+async function handleFlowsList(req: IncomingMessage, res: ServerResponse) {
+  const body = await readJsonBody(req);
+  const key = body.klaviyoKey as string;
+  if (!key) return json(res, 400, { error: "klaviyoKey required" });
+  try {
+    const flows = await paginate<FlowMeta>(
+      "/flows/?fields[flow]=name,status,trigger_type&sort=-updated",
+      key,
+    );
+    json(res, 200, {
+      flows: flows.map((f) => ({
+        id: f.id,
+        name: f.attributes.name,
+        status: f.attributes.status,
+        triggerType: f.attributes.trigger_type,
+      })),
+    });
+  } catch (e: any) {
+    json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// Walk a caller-supplied batch of flow IDs. Each request stays well
+// under any proxy timeout because the client controls batch size
+// (~10 flows per call ≈ 10–20 s). Returns walked rows plus a debug
+// delta the client can merge to reconstruct the original walker's
+// aggregate diagnostics.
+async function handleFlowsWalkBatch(req: IncomingMessage, res: ServerResponse) {
+  const body = await readJsonBody(req);
+  const key = body.klaviyoKey as string;
+  const flowsIn = body.flows as Array<{
+    id: string;
+    name?: string;
+    status?: string;
+    triggerType?: string;
+  }> | undefined;
+  if (!key) return json(res, 400, { error: "klaviyoKey required" });
+  if (!Array.isArray(flowsIn) || flowsIn.length === 0) {
+    return json(res, 400, { error: "flows[] required" });
+  }
+  // Hard cap to keep per-request wall time bounded even if a misbehaving
+  // client asks for the world.
+  if (flowsIn.length > 25) {
+    return json(res, 400, { error: "batch too large (max 25)" });
+  }
+
+  const flowMetas: FlowMeta[] = flowsIn.map((f) => ({
+    id: f.id,
+    attributes: {
+      name: f.name ?? "",
+      status: f.status ?? "",
+      trigger_type: f.triggerType ?? "",
+    },
+  }));
+  const debug = emptyWalkDebug(flowMetas.length);
+  const out: WalkedFlow[] = [];
+
+  // Per-batch concurrency is intentionally lower than the legacy
+  // walkFlowsFromKlaviyo()'s LIMIT=8 because the client runs multiple
+  // batch requests in parallel — combined concurrency would otherwise
+  // hit Klaviyo's per-endpoint burst limits and cause cascading 429s.
+  // 4 here × 3 client batches ≈ 12 total walkers, comparable to the old
+  // single-stream design.
+  const LIMIT = 4;
+  let idx = 0;
+  async function worker() {
+    while (idx < flowMetas.length) {
+      const i = idx++;
+      const f = flowMetas[i]!;
+      const { walked } = await walkOneFlow(f, key, debug);
+      if (walked) out.push(walked);
+    }
+  }
+  try {
+    await Promise.all(Array.from({ length: LIMIT }, () => worker()));
+    json(res, 200, { walked: out, debug });
   } catch (e: any) {
     json(res, 500, { error: e.message ?? String(e) });
   }
@@ -2399,6 +2513,12 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && req.url === "/api/flows/stream") {
       return handleFlowsStream(req, res);
+    }
+    if (req.method === "POST" && req.url === "/api/flows/list") {
+      return handleFlowsList(req, res);
+    }
+    if (req.method === "POST" && req.url === "/api/flows/walk-batch") {
+      return handleFlowsWalkBatch(req, res);
     }
     if (req.method === "POST" && req.url === "/api/campaigns") {
       return handleCampaigns(req, res);

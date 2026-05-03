@@ -129,52 +129,122 @@ async function fetchStoreData(store, onProgress) {
     });
 
   const flowsPromise = (async () => {
-    let flows = [];
-    let debug = null;
-    // Track whether we received a terminal event ("done" or "error"). If
-    // the stream closes without one, the proxy / cloud-run timeout has
-    // killed the connection mid-walk — common for stores with 70+ flows
-    // where the catalog walk can take several minutes. Without this
-    // check, the UI silently rendered an empty catalog ("loaded 0
-    // flows") because the for-await loop just exits normally on socket
-    // close.
-    let sawTerminal = false;
-    let lastProgress = null;
     try {
-      for await (const ev of streamFlows(store.klaviyoKey)) {
-        if (ev.kind === "discovered") {
-          report({ section: "flows", status: "discovered", total: ev.total });
-        } else if (ev.kind === "progress") {
-          lastProgress = ev;
+      // Two-phase batched walk:
+      //   1. /api/flows/list — fast paginate of flow metadata (~1-3s).
+      //   2. /api/flows/walk-batch — walk N flows per request (~10-20s
+      //      each), parallelised client-side.
+      // We chunk the list and process several batches in parallel so
+      // wall time stays close to the old single-stream design while
+      // each individual HTTP request stays well under the proxy's hard
+      // request-duration cap that was killing the long-lived stream.
+      const listRes = await postJson("/api/flows/list", { klaviyoKey: store.klaviyoKey });
+      const listed = listRes?.flows ?? [];
+      report({ section: "flows", status: "discovered", total: listed.length });
+
+      const BATCH_SIZE = 10;
+      const PARALLEL_BATCHES = 3;
+      const batches = [];
+      for (let i = 0; i < listed.length; i += BATCH_SIZE) {
+        batches.push(listed.slice(i, i + BATCH_SIZE));
+      }
+
+      const walked = [];
+      const debugAgg = {
+        totalFlows: listed.length,
+        flowsWithActions: 0,
+        flowsWithNoActions: 0,
+        actionTypeCounts: {},
+        messagesSeen: 0,
+        messagesWithTemplate: 0,
+        messagesWithoutTemplate: 0,
+        failedActionFetches: 0,
+        failedMessageFetches: 0,
+        sampleFlowNames: [],
+        sampleMessageFetchErrors: [],
+      };
+      const mergeDebug = (d) => {
+        if (!d) return;
+        debugAgg.flowsWithActions += d.flowsWithActions ?? 0;
+        debugAgg.flowsWithNoActions += d.flowsWithNoActions ?? 0;
+        debugAgg.messagesSeen += d.messagesSeen ?? 0;
+        debugAgg.messagesWithTemplate += d.messagesWithTemplate ?? 0;
+        debugAgg.messagesWithoutTemplate += d.messagesWithoutTemplate ?? 0;
+        debugAgg.failedActionFetches += d.failedActionFetches ?? 0;
+        debugAgg.failedMessageFetches += d.failedMessageFetches ?? 0;
+        for (const [k, v] of Object.entries(d.actionTypeCounts ?? {})) {
+          debugAgg.actionTypeCounts[k] = (debugAgg.actionTypeCounts[k] ?? 0) + v;
+        }
+        for (const n of d.sampleFlowNames ?? []) {
+          if (debugAgg.sampleFlowNames.length < 10) debugAgg.sampleFlowNames.push(n);
+        }
+        for (const e of d.sampleMessageFetchErrors ?? []) {
+          if (debugAgg.sampleMessageFetchErrors.length < 6) debugAgg.sampleMessageFetchErrors.push(e);
+        }
+      };
+
+      // Walk a single batch with adaptive shrinking: on failure, split
+      // it in half and retry each half. This way an individual slow flow
+      // (or a transient 5xx) can't sink an otherwise-healthy 10-flow
+      // batch — we just halve the request size until the chunks get
+      // through, all the way down to single-flow requests if needed.
+      async function walkBatchWithRetry(batch) {
+        try {
+          const res = await postJson("/api/flows/walk-batch", {
+            klaviyoKey: store.klaviyoKey,
+            flows: batch,
+          });
+          for (const w of res?.walked ?? []) walked.push(w);
+          mergeDebug(res?.debug);
+          return;
+        } catch (e) {
+          if (batch.length === 1) {
+            // Single flow still failing — drop it but keep the rest of
+            // the catalog. Surface in debug rather than aborting.
+            debugAgg.failedActionFetches += 1;
+            if (debugAgg.sampleMessageFetchErrors.length < 6) {
+              debugAgg.sampleMessageFetchErrors.push(
+                `flow ${batch[0]?.id ?? "?"} failed: ${e?.message?.slice(0, 120) ?? String(e).slice(0, 120)}`,
+              );
+            }
+            return;
+          }
+          // Halve and recurse — keeps splitting until we either succeed
+          // or isolate the bad flow at size 1.
+          await new Promise(r => setTimeout(r, 800));
+          const mid = Math.ceil(batch.length / 2);
+          await walkBatchWithRetry(batch.slice(0, mid));
+          await walkBatchWithRetry(batch.slice(mid));
+        }
+      }
+
+      let scanned = 0;
+      let nextBatch = 0;
+      async function batchWorker() {
+        while (nextBatch < batches.length) {
+          const i = nextBatch++;
+          const batch = batches[i];
+          await walkBatchWithRetry(batch);
+          scanned += batch.length;
           report({
             section: "flows",
             status: "progress",
-            scanned: ev.scanned,
-            total: ev.total,
-            currentName: ev.currentName,
+            scanned: Math.min(scanned, listed.length),
+            total: listed.length,
+            currentName: batch[batch.length - 1]?.name ?? "",
           });
-        } else if (ev.kind === "heartbeat") {
-          // server-side keepalive — nothing to render, just keeps the
-          // connection alive past proxy idle timeouts.
-        } else if (ev.kind === "done") {
-          flows = ev.flows ?? [];
-          debug = ev.debug ?? null;
-          sawTerminal = true;
-        } else if (ev.kind === "error") {
-          sawTerminal = true;
-          throw new Error(ev.error || "flows stream failed");
         }
       }
-      if (!sawTerminal) {
-        const where = lastProgress
-          ? ` (got to ${lastProgress.scanned}/${lastProgress.total} before the connection dropped)`
-          : "";
-        throw new Error(
-          `flows stream ended without a result${where}. The proxy likely closed the connection mid-fetch — try again, and if it keeps failing on this store let us know so we can split the walk into smaller batches.`,
-        );
-      }
-      report({ section: "flows", status: "done", count: flows.length });
-      return { flows, debug };
+      await Promise.all(
+        Array.from({ length: Math.min(PARALLEL_BATCHES, batches.length) }, () => batchWorker()),
+      );
+
+      // Match server-side ordering: live → manual → draft → other, then by name
+      const rank = (s) => s === "live" ? 0 : s === "manual" ? 1 : s === "draft" ? 2 : 3;
+      walked.sort((a, b) => rank(a.flowStatus) - rank(b.flowStatus) || a.flowName.localeCompare(b.flowName));
+
+      report({ section: "flows", status: "done", count: walked.length });
+      return { flows: walked, debug: debugAgg };
     } catch (e) {
       report({ section: "flows", status: "error", error: e?.message ?? String(e) });
       throw e;
