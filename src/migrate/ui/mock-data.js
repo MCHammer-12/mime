@@ -131,11 +131,21 @@ async function fetchStoreData(store, onProgress) {
   const flowsPromise = (async () => {
     let flows = [];
     let debug = null;
+    // Track whether we received a terminal event ("done" or "error"). If
+    // the stream closes without one, the proxy / cloud-run timeout has
+    // killed the connection mid-walk — common for stores with 70+ flows
+    // where the catalog walk can take several minutes. Without this
+    // check, the UI silently rendered an empty catalog ("loaded 0
+    // flows") because the for-await loop just exits normally on socket
+    // close.
+    let sawTerminal = false;
+    let lastProgress = null;
     try {
       for await (const ev of streamFlows(store.klaviyoKey)) {
         if (ev.kind === "discovered") {
           report({ section: "flows", status: "discovered", total: ev.total });
         } else if (ev.kind === "progress") {
+          lastProgress = ev;
           report({
             section: "flows",
             status: "progress",
@@ -143,12 +153,25 @@ async function fetchStoreData(store, onProgress) {
             total: ev.total,
             currentName: ev.currentName,
           });
+        } else if (ev.kind === "heartbeat") {
+          // server-side keepalive — nothing to render, just keeps the
+          // connection alive past proxy idle timeouts.
         } else if (ev.kind === "done") {
           flows = ev.flows ?? [];
           debug = ev.debug ?? null;
+          sawTerminal = true;
         } else if (ev.kind === "error") {
+          sawTerminal = true;
           throw new Error(ev.error || "flows stream failed");
         }
+      }
+      if (!sawTerminal) {
+        const where = lastProgress
+          ? ` (got to ${lastProgress.scanned}/${lastProgress.total} before the connection dropped)`
+          : "";
+        throw new Error(
+          `flows stream ended without a result${where}. The proxy likely closed the connection mid-fetch — try again, and if it keeps failing on this store let us know so we can split the walk into smaller batches.`,
+        );
       }
       report({ section: "flows", status: "done", count: flows.length });
       return { flows, debug };
