@@ -266,11 +266,14 @@ function emptyWalkDebug(totalFlows = 0): WalkDebug {
   };
 }
 
-// Walk one flow's actions + messages. Mutates `debug` in place. Always
-// returns a walked row — flows with no email actions, no templates, or a
-// transient walker failure surface as `emails: []` so the user sees them
-// in the selection UI and can attempt import (which re-fetches the full
-// flow definition from Klaviyo).
+// Walk one flow via the embedded `definition` field. One Klaviyo call per
+// flow (vs. the prior 6–11 per flow that walked actions + per-action
+// messages + per-message template relationships) — same payload the import
+// path consumes, so `data.message.template_id` / `name` are inline.
+//
+// Always returns a walked row — flows with no email actions or a
+// transient fetch failure surface as `emails: []` so the user sees them
+// in the selection UI and can attempt import.
 async function walkOneFlow(
   f: FlowMeta,
   key: string,
@@ -279,101 +282,52 @@ async function walkOneFlow(
   if (debug.sampleFlowNames.length < 10) {
     debug.sampleFlowNames.push(f.attributes.name);
   }
+  const empty = (): WalkedFlow => ({
+    flowId: f.id,
+    flowName: f.attributes.name,
+    flowStatus: f.attributes.status,
+    triggerType: f.attributes.trigger_type,
+    emails: [],
+  });
   try {
-    const actionsBody: any = await klaviyo(`/flows/${f.id}/flow-actions/`, key);
-    const emails: WalkedFlow["emails"] = [];
-
-    const allActions = actionsBody.data ?? [];
-    if (allActions.length > 0) debug.flowsWithActions++;
+    const flowResp: any = await klaviyo(
+      `/flows/${f.id}/?additional-fields%5Bflow%5D=definition`,
+      key,
+    );
+    const actions = flowResp?.data?.attributes?.definition?.actions ?? [];
+    if (actions.length > 0) debug.flowsWithActions++;
     else debug.flowsWithNoActions++;
 
-    for (const a of allActions) {
-      const type = (a.attributes?.definition?.type ?? "").toLowerCase();
+    const emails: WalkedFlow["emails"] = [];
+    for (const a of actions) {
+      const type = (a.type ?? "").toLowerCase();
       debug.actionTypeCounts[type] = (debug.actionTypeCounts[type] ?? 0) + 1;
-    }
+      if (type !== "send-email") continue;
 
-    // Fetch flow-messages for each action. Klaviyo only returns
-    // messages for send-* actions (not time-delay / split / etc.);
-    // non-email actions return empty data or 404/400, so we ignore
-    // errors per-action. We probe both known endpoint shapes since
-    // Klaviyo's API has shifted between them and we've seen both
-    // in the wild:
-    //   1. /flow-actions/{id}/flow-messages/  (original)
-    //   2. /flow-messages/?filter=equals(flow-action.id,"<id>")
-    // Try #1 first, fall back to #2 on any failure.
-    for (const a of allActions) {
-      let msgs: any = null;
-      try {
-        msgs = await klaviyo(`/flow-actions/${a.id}/flow-messages/`, key);
-      } catch (e: any) {
-        if (debug.sampleMessageFetchErrors.length < 3) {
-          debug.sampleMessageFetchErrors.push(
-            `direct: ${e.message?.slice(0, 120) ?? String(e).slice(0, 120)}`,
-          );
-        }
-        try {
-          msgs = await klaviyo(
-            `/flow-messages/?filter=${encodeURIComponent(
-              `equals(flow-action.id,"${a.id}")`,
-            )}`,
-            key,
-          );
-        } catch (e2: any) {
-          debug.failedMessageFetches++;
-          if (debug.sampleMessageFetchErrors.length < 6) {
-            debug.sampleMessageFetchErrors.push(
-              `filter: ${e2.message?.slice(0, 120) ?? String(e2).slice(0, 120)}`,
-            );
-          }
-          continue;
-        }
-      }
-      for (const m of msgs?.data ?? []) {
-        debug.messagesSeen++;
-        let tplId: string | null = m.relationships?.template?.data?.id ?? null;
-        if (!tplId) {
-          try {
-            const rel: any = await klaviyo(
-              `/flow-messages/${m.id}/relationships/template/`,
-              key,
-            );
-            tplId = rel?.data?.id ?? null;
-          } catch (e) {
-            // no template attached; leave null
-          }
-        }
-        if (tplId) debug.messagesWithTemplate++;
-        else debug.messagesWithoutTemplate++;
-        emails.push({
-          templateId: tplId,
-          messageId: m.id,
-          actionId: a.id,
-          name: m.attributes?.name ?? null,
-        });
-      }
+      const msg = a.data?.message ?? {};
+      const tplId: string | null = msg.template_id ?? null;
+      debug.messagesSeen++;
+      if (tplId) debug.messagesWithTemplate++;
+      else debug.messagesWithoutTemplate++;
+      emails.push({
+        templateId: tplId,
+        messageId: msg.id != null ? String(msg.id) : String(a.id),
+        actionId: String(a.id),
+        name: msg.name ?? msg.label ?? msg.subject_line ?? null,
+      });
     }
     return {
-      walked: {
-        flowId: f.id,
-        flowName: f.attributes.name,
-        flowStatus: f.attributes.status,
-        triggerType: f.attributes.trigger_type,
-        emails,
-      },
+      walked: { ...empty(), emails },
       emailsForFlow: emails.length,
     };
-  } catch (e) {
+  } catch (e: any) {
     debug.failedActionFetches++;
-    return {
-      walked: {
-        flowId: f.id,
-        flowName: f.attributes.name,
-        flowStatus: f.attributes.status,
-        triggerType: f.attributes.trigger_type,
-        emails: [],
-      },
-      emailsForFlow: 0,
-    };
+    if (debug.sampleMessageFetchErrors.length < 6) {
+      debug.sampleMessageFetchErrors.push(
+        `definition: ${e?.message?.slice(0, 120) ?? String(e).slice(0, 120)}`,
+      );
+    }
+    return { walked: empty(), emailsForFlow: 0 };
   }
 }
 
