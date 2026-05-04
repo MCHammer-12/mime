@@ -244,7 +244,12 @@ async function fetchStoreData(store, onProgress) {
       walked.sort((a, b) => rank(a.flowStatus) - rank(b.flowStatus) || a.flowName.localeCompare(b.flowName));
 
       report({ section: "flows", status: "done", count: walked.length });
-      return { flows: walked, debug: debugAgg };
+      // flowsTotal = everything Klaviyo listed (including SMS-only,
+      // empty, and orphan-message flows). flows.length = the subset we
+      // could actually find email content for. The UI surfaces the
+      // delta so merchants understand why "77 discovered" can become
+      // "53 selectable".
+      return { flows: walked, flowsTotal: listed.length, debug: debugAgg };
     } catch (e) {
       report({ section: "flows", status: "error", error: e?.message ?? String(e) });
       throw e;
@@ -259,6 +264,7 @@ async function fetchStoreData(store, onProgress) {
     ]);
     const loaded = {
       flows: flowsRes?.flows ?? [],
+      flowsTotal: flowsRes?.flowsTotal ?? (flowsRes?.flows?.length ?? 0),
       templates: templatesRes?.templates ?? [],
       campaigns: campaignsRes?.campaigns ?? [],
       state: "loaded",

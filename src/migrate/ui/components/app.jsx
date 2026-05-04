@@ -102,6 +102,7 @@ function App() {
           [sid]: {
             ...(m[sid] || EMPTY_DATA),
             flows: res.flows ?? [],
+            flowsTotal: res.flowsTotal ?? (res.flows?.length ?? 0),
             templates: res.templates ?? [],
             campaigns: res.campaigns ?? [],
             loading: false,
@@ -813,6 +814,11 @@ function MigrationScreen({ store, data, state, updateState, imports, priorImport
             hideAlreadyImported={state.hideFlow} onHideAlreadyImportedChange={(v) => updateState({ hideFlow: v })}
             alreadyImportedCount={flowsAlreadyCount}
             countLabel={`${data.flows.length} flows`}
+            noContentNote={
+              !data.loading && (data.flowsTotal ?? 0) > data.flows.length
+                ? `${(data.flowsTotal ?? 0) - data.flows.length} hidden — Klaviyo listed them but no importable email content was found (SMS-only, empty, orphaned messages, or a transient fetch failure).`
+                : null
+            }
             emptyText={
               data.loading
                 ? "Loading flows from Klaviyo…"

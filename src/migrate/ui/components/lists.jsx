@@ -9,6 +9,7 @@ function ListShell({
   renderRow, countLabel,
   hideAlreadyImported, onHideAlreadyImportedChange,
   alreadyImportedCount,
+  noContentNote,
   emptyText,
 }) {
   const allSelected = items.length > 0 && items.every(i => selectedIds.has(getItemId(i)));
@@ -81,6 +82,13 @@ function ListShell({
         />
         <span className="ml-3">{items.length.toLocaleString()} shown</span>
       </div>
+
+      {noContentNote && (
+        <div className="px-4 py-1.5 border-b border-[#21262d] bg-[#0d1117] text-[11px] text-[#8b949e] flex items-start gap-1.5">
+          <Icon.alert width="12" height="12" className="text-[#6e7681] mt-0.5 shrink-0"/>
+          <span>{noContentNote}</span>
+        </div>
+      )}
 
       {/* Rows */}
       <div className="flex-1 overflow-y-auto">
