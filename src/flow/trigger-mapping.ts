@@ -1,15 +1,19 @@
 import type { MetricLookup } from "../extract-metrics.js";
 import {
   MarketingTriggerKey,
+  OrderTrackingTriggerKey,
   SchemaType,
+  type FlowCategory,
   type KlaviyoFlow,
   type KlaviyoTrigger,
   type ParseWarning,
+  type TriggerKey,
 } from "./types.js";
 
 export interface TriggerResolution {
-  key: MarketingTriggerKey;
+  key: TriggerKey;
   schemaType: SchemaType;
+  category: FlowCategory;
   // Auto-generated skip condition the importer will emit on the trigger step.
   // UI auto-inserts this on abandonment flows; repo create does not.
   autoSkipAbandonmentField?: "isCartAbandoned" | "isBrowseAbandoned" | "isCheckoutAbandoned";
@@ -18,18 +22,25 @@ export interface TriggerResolution {
 // Well-known Klaviyo metric names → Redo trigger. Keys are case-insensitive.
 // Merchants customize metric NAMES rarely but metric IDs always — the name is
 // the stable key. See reference PDF §2 and project_coverage_gaps memory.
+//
+// Includes one cross-category mapping: Klaviyo "Placed Order" lands on the
+// Order tracking ORDER_CREATED trigger (post-purchase emails, review asks,
+// cross-sell, winbacks). Redo doesn't expose post-purchase as a Marketing
+// trigger, so we drop into the order-tracking schema.
 const METRIC_NAME_MAP: Record<
   string,
-  { key: MarketingTriggerKey; schemaType: SchemaType }
+  { key: TriggerKey; schemaType: SchemaType; category: FlowCategory }
 > = {
-  "started checkout":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT },
-  "checkout started":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT },
-  "added to cart":      { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT },
-  "viewed product":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT },
-  "active on site":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT },
-  "back in stock":      { key: MarketingTriggerKey.BACK_IN_STOCK,      schemaType: SchemaType.MARKETING_BACK_IN_STOCK },
-  "low inventory":      { key: MarketingTriggerKey.LOW_INVENTORY,      schemaType: SchemaType.MARKETING_LOW_INVENTORY },
-  "warranty registration": { key: MarketingTriggerKey.WARRANTY_REGISTRATION, schemaType: SchemaType.MARKETING_WARRANTY_REGISTRATION },
+  "started checkout":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT, category: "Marketing" },
+  "checkout started":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT, category: "Marketing" },
+  "added to cart":      { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT,     category: "Marketing" },
+  "viewed product":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
+  "active on site":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
+  "back in stock":      { key: MarketingTriggerKey.BACK_IN_STOCK,      schemaType: SchemaType.MARKETING_BACK_IN_STOCK,        category: "Marketing" },
+  "low inventory":      { key: MarketingTriggerKey.LOW_INVENTORY,      schemaType: SchemaType.MARKETING_LOW_INVENTORY,        category: "Marketing" },
+  "warranty registration": { key: MarketingTriggerKey.WARRANTY_REGISTRATION, schemaType: SchemaType.MARKETING_WARRANTY_REGISTRATION, category: "Marketing" },
+  "placed order":       { key: OrderTrackingTriggerKey.ORDER_CREATED,  schemaType: SchemaType.ORDER_TRACKING,                 category: "Order tracking" },
+  "ordered product":    { key: OrderTrackingTriggerKey.ORDER_CREATED,  schemaType: SchemaType.ORDER_TRACKING,                 category: "Order tracking" },
 };
 
 const COMMENTSOLD_VARIANTS: Record<
@@ -114,11 +125,29 @@ function resolveMetricTrigger(
     return null;
   }
   // CommentSold detection — upgrade to CS variant if the trigger filter matches.
-  if (hasCommentSoldSourceFilter(t.trigger_filter) && COMMENTSOLD_VARIANTS[hit.key]) {
-    const cs = COMMENTSOLD_VARIANTS[hit.key]!;
-    return { key: cs.key, schemaType: cs.schemaType, autoSkipAbandonmentField: ABANDONMENT_SKIP_FIELD[cs.key] };
+  // CS variants only exist for the marketing abandonment triggers.
+  if (
+    hasCommentSoldSourceFilter(t.trigger_filter) &&
+    hit.category === "Marketing" &&
+    COMMENTSOLD_VARIANTS[hit.key as MarketingTriggerKey]
+  ) {
+    const cs = COMMENTSOLD_VARIANTS[hit.key as MarketingTriggerKey]!;
+    return {
+      key: cs.key,
+      schemaType: cs.schemaType,
+      category: "Marketing",
+      autoSkipAbandonmentField: ABANDONMENT_SKIP_FIELD[cs.key],
+    };
   }
-  return { key: hit.key, schemaType: hit.schemaType, autoSkipAbandonmentField: ABANDONMENT_SKIP_FIELD[hit.key] };
+  return {
+    key: hit.key,
+    schemaType: hit.schemaType,
+    category: hit.category,
+    autoSkipAbandonmentField:
+      hit.category === "Marketing"
+        ? ABANDONMENT_SKIP_FIELD[hit.key as MarketingTriggerKey]
+        : undefined,
+  };
 }
 
 function resolveListTrigger(flow: KlaviyoFlow): TriggerResolution {
@@ -128,8 +157,8 @@ function resolveListTrigger(flow: KlaviyoFlow): TriggerResolution {
   const name = flow.data.attributes.name.toLowerCase();
   const isSms = /\bsms\b/i.test(name);
   return isSms
-    ? { key: MarketingTriggerKey.SMS_SIGNUP, schemaType: SchemaType.SMS_MARKETING_SIGNUP }
-    : { key: MarketingTriggerKey.EMAIL_SIGNUP_SHOPIFY, schemaType: SchemaType.EMAIL_MARKETING_SIGNUP };
+    ? { key: MarketingTriggerKey.SMS_SIGNUP, schemaType: SchemaType.SMS_MARKETING_SIGNUP, category: "Marketing" }
+    : { key: MarketingTriggerKey.EMAIL_SIGNUP_SHOPIFY, schemaType: SchemaType.EMAIL_MARKETING_SIGNUP, category: "Marketing" };
 }
 
 export function resolveTrigger(
@@ -156,11 +185,12 @@ export function resolveTrigger(
       return {
         key: MarketingTriggerKey.CUSTOMER_GROUP_ENTERED,
         schemaType: SchemaType.MARKETING_SEGMENT_MEMBERSHIP_CHANGE,
+        category: "Marketing",
       };
     case "date":
-      return { key: MarketingTriggerKey.DATE, schemaType: SchemaType.MARKETING_DATE };
+      return { key: MarketingTriggerKey.DATE, schemaType: SchemaType.MARKETING_DATE, category: "Marketing" };
     case "price-drop":
-      return { key: MarketingTriggerKey.PRICE_DROP, schemaType: SchemaType.MARKETING_PRICE_DROP };
+      return { key: MarketingTriggerKey.PRICE_DROP, schemaType: SchemaType.MARKETING_PRICE_DROP, category: "Marketing" };
     default:
       warnings.push({
         kind: "unsupported-trigger",

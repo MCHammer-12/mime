@@ -391,7 +391,7 @@ export async function parseFlow(
     type: StepType.TRIGGER,
     id: TRIGGER_STEP_ID,
     schemaType: resolution.schemaType,
-    category: "Marketing",
+    category: resolution.category,
     key: resolution.key,
     nextId: terminate(firstActionId, state),
     ...(resolution.autoSkipAbandonmentField
@@ -457,7 +457,7 @@ export async function parseFlow(
     enabled,
     steps: treeifiedSteps,
     schemaType: resolution.schemaType,
-    category: "Marketing",
+    category: resolution.category,
     ...(opts.createdByUserId ? { createdByUserId: opts.createdByUserId } : {}),
     versionGroupId: new ObjectId().toString(),
   };
