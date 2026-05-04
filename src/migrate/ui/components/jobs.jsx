@@ -336,7 +336,11 @@ function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpe
 }
 
 function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
-  const [open, setOpen] = useStateJobs(false);
+  // Default-expanded so successfully-imported items are immediately visible
+  // for feedback. Failed items already get attention via the inline error
+  // display; the panel's main job is to capture notes on imports that
+  // technically succeeded but look wrong in Redo.
+  const [open, setOpen] = useStateJobs(true);
   const [selected, setSelected] = useStateJobs(() => new Set());
   // Local note buffers so typing doesn't lag while we debounce-save.
   const [localNotes, setLocalNotes] = useStateJobs(() => ({ ...(job.notes || {}) }));
@@ -400,7 +404,7 @@ function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
         {open
           ? <Icon.chevronDown width="10" height="10"/>
           : <Icon.chevronRight width="10" height="10"/>}
-        Troubleshoot · {items.length} item{items.length === 1 ? "" : "s"}
+        Add feedback · any item ({items.length})
         {Object.values(localNotes).filter(n => (n||"").trim()).length > 0 && (
           <span className="ml-auto text-[10px] text-[#58a6ff] normal-case tracking-normal">
             {Object.values(localNotes).filter(n => (n||"").trim()).length} noted
