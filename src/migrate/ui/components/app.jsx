@@ -16,6 +16,137 @@ function classifyWarning(text) {
 }
 window.classifyWarning = classifyWarning;
 
+// Pure event reducer — takes a job and an unwrapped event, returns the
+// next job state. Used by both the live applyEvent path (where additional
+// state setters fire as side effects) AND the hydration path that rebuilds
+// historical jobs from server-side event logs after a refresh. Keep this
+// in sync with applyEvent — both must process events the same way.
+function reduceJobEvent(j, evt) {
+  let items = j.items;
+  let currentStep = j.currentStep;
+  let warnings = j.warnings;
+  let infos = j.infos || [];
+  let fatalError = j.fatalError;
+  let fontsDone = j.fontsDone;
+  let exportSummary = j.exportSummary;
+  let status = j.status;
+  let endedAt = j.endedAt;
+  let importMethod = j.importMethod;
+  let pendingQid = j.pendingQid;
+
+  if (evt.kind === "step") currentStep = evt.label;
+  else if (evt.kind === "info") infos = [...infos, evt.text];
+  else if (evt.kind === "error") fatalError = evt.text;
+  else if (evt.kind === "needs_input") {
+    status = "waiting_input";
+    pendingQid = evt.qid;
+    items = items.map(i => i.id === evt.itemId ? { ...i, state: "waiting_input" } : i);
+  } else if (evt.kind === "exported") {
+    const parts = [`${evt.sectionCount} sections`];
+    if (evt.warnings) parts.push(`${evt.warnings} warn`);
+    if (evt.unsupported) parts.push(`${evt.unsupported} unsupported`);
+    if (evt.aiRewrites) parts.push(`${evt.aiRewrites} AI rewrite${evt.aiRewrites === 1 ? '' : 's'}`);
+    items = items.map(i => i.id === evt.id ? { ...i, name: evt.name ?? i.name, state: "running", detail: parts.join(" · ") } : i);
+    if (status === "waiting_input") status = "running";
+  } else if (evt.kind === "summary") {
+    exportSummary = { exported: evt.exported, failed: evt.failed };
+  } else if (evt.kind === "fonts_done") {
+    fontsDone = evt;
+  } else if (evt.kind === "imported") {
+    items = items.map(i => i.id === evt.id ? { ...i, state: "imported", name: evt.name ?? i.name, detail: evt.templateId ? `→ ${evt.templateId.slice(-8)}` : i.detail } : i);
+  } else if (evt.kind === "flow_imported") {
+    const parts = [`${evt.createdTemplateCount} email${evt.createdTemplateCount === 1 ? '' : 's'}`];
+    if (evt.blankTemplateCount) parts.push(`${evt.blankTemplateCount} blank`);
+    if (evt.warningCount) parts.push(`${evt.warningCount} warn`);
+    items = items.map(i => i.id === evt.id ? { ...i, state: "imported", name: evt.name ?? i.name, detail: parts.join(" · ") } : i);
+  } else if (evt.kind === "campaign_imported") {
+    const parts = [`${evt.createdTemplateCount} template${evt.createdTemplateCount === 1 ? '' : 's'}`];
+    if (evt.variantFailures) parts.push(`${evt.variantFailures} variant fail`);
+    items = items.map(i => i.id === evt.id ? { ...i, state: "imported", name: evt.name ?? i.name, detail: parts.join(" · ") } : i);
+  } else if (evt.kind === "fail") {
+    items = items.map(i => i.id === evt.id ? { ...i, state: "failed", name: evt.name ?? i.name, error: evt.error } : i);
+  } else if (evt.kind === "warn") {
+    if (evt.itemId) {
+      items = items.map(i => i.id === evt.itemId
+        ? { ...i, itemWarnings: [...(i.itemWarnings || []), { text: evt.text, category: classifyWarning(evt.text) }] }
+        : i);
+    } else {
+      warnings = [...warnings, evt.text];
+    }
+  } else if (evt.kind === "done") {
+    const totalFailed = (evt.importFailed ?? 0) + (evt.flowsFailed ?? 0) + (evt.campaignsFailed ?? 0);
+    status = totalFailed > 0 ? "partial" : "complete";
+    endedAt = Date.now();
+    currentStep = "";
+    importMethod = evt.importMethod;
+    items = items.map(i => i.state === "queued" || i.state === "running" ? { ...i, state: "imported" } : i);
+  }
+
+  return { ...j, items, currentStep, warnings, infos, fatalError, fontsDone, exportSummary, status, endedAt, importMethod, pendingQid };
+}
+window.reduceJobEvent = reduceJobEvent;
+
+// Hydrate a server-side JobState into the UI's job shape by replaying the
+// event log against an initial item list derived from the job's
+// templateIds / flowIds / campaignIds. Used to restore past jobs across
+// page reloads so the operator can come back later and add feedback.
+function buildJobFromServerState(srv) {
+  const initialItems = [
+    ...(srv.templateIds || []).map(id => ({ id, kind: "template", name: id, state: "queued" })),
+    ...(srv.flowIds || []).map(id => ({ id, kind: "flow", name: id, state: "queued" })),
+    ...(srv.campaignIds || []).map(id => ({ id, kind: "campaign", name: id, state: "queued" })),
+  ];
+
+  // Disabled abort + broker stubs — historical jobs aren't streamable.
+  const noopAbort = { signal: { aborted: true }, abort: () => {} };
+  const noopBroker = { waitFor: () => Promise.reject(new Error("historical job — broker disabled")), submit: () => {} };
+
+  let job = {
+    id: srv.id,
+    shortId: (srv.id || "").slice(0, 8),
+    storeId: srv.storeId,
+    storeName: srv.storeName,
+    merchantSlug: srv.merchantSlug,
+    startedAt: srv.startedAt ? Date.parse(srv.startedAt) : null,
+    endedAt: srv.completedAt ? Date.parse(srv.completedAt) : null,
+    status: srv.status || "complete",
+    items: initialItems,
+    templateCount: (srv.templateIds || []).length,
+    flowCount: (srv.flowIds || []).length,
+    campaignCount: (srv.campaignIds || []).length,
+    currentStep: "",
+    warnings: [],
+    infos: [],
+    fatalError: srv.error ?? null,
+    fontsDone: null,
+    exportSummary: null,
+    importMethod: null,
+    log: [],
+    abort: noopAbort,
+    broker: noopBroker,
+    notes: srv.notes ?? {},
+    pendingQid: null,
+    historical: true,
+  };
+
+  for (const env of (srv.events || [])) {
+    const evt = window.unwrapJobEvent ? window.unwrapJobEvent(env) : { ...env, ...(env.payload || {}) };
+    job = reduceJobEvent(job, evt);
+  }
+
+  // Items that never received a terminal event stay queued — for a hydrated
+  // historical job that's misleading. Mark them as failed with a synthesized
+  // reason so the troubleshoot panel still surfaces them.
+  job.items = job.items.map(i =>
+    i.state === "queued" || i.state === "running"
+      ? { ...i, state: "failed", error: i.error ?? "no terminal event recorded" }
+      : i
+  );
+
+  return job;
+}
+window.buildJobFromServerState = buildJobFromServerState;
+
 // Module-scope so both <App> and <MigrationScreen> reference the same
 // shape. Per-section status fields are filled in by the streaming progress
 // callback in fetchStoreData() — see mock-data.js.
@@ -180,6 +311,66 @@ function App() {
     tmpls: new Set(),
     campaigns: new Set(),
   };
+
+  // ─ Hydrate past jobs from the server on first mount ─
+  // Without this, every page refresh wipes the jobs panel — the operator
+  // can't come back later to add feedback on items that imported but look
+  // wrong in Redo. Fetch the job index, then pull each job's full event log
+  // and replay it through the same reducer the live applyEvent path uses.
+  // Skip jobs we already have in memory (running session) to avoid clobbering
+  // in-progress state.
+  useE(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const idxRes = await fetch("/api/jobs");
+        if (!idxRes.ok) return;
+        const { jobs: index = [] } = await idxRes.json();
+        if (cancelled || index.length === 0) return;
+
+        // Hydrate only terminal jobs — for running / awaiting_input ones the
+        // server still has the live stream open, so we'd need to reconnect
+        // (not just replay history). Out of scope for now.
+        const TERMINAL = new Set(["complete", "partial", "failed", "canceled"]);
+        const existingIds = new Set(jobs.map(j => j.id));
+        const toFetch = index.filter(j => !existingIds.has(j.id) && TERMINAL.has(j.status));
+        if (toFetch.length === 0) return;
+
+        const settled = await Promise.allSettled(
+          toFetch.map(meta => fetch(`/api/jobs/${encodeURIComponent(meta.id)}`).then(r => r.ok ? r.json() : null))
+        );
+        if (cancelled) return;
+
+        const built = [];
+        for (const s of settled) {
+          if (s.status !== "fulfilled" || !s.value) continue;
+          try {
+            built.push(buildJobFromServerState(s.value));
+          } catch (e) {
+            // Skip individual job rebuild failures — rest of the list still hydrates.
+            console.warn("hydrate job failed:", e?.message ?? e);
+          }
+        }
+        if (built.length === 0) return;
+
+        // Insert sorted oldest-first so the live `setJobs(js => [job, ...js])`
+        // pattern keeps the most-recent jobs at the top.
+        built.sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0));
+        setJobs(prev => {
+          const have = new Set(prev.map(j => j.id));
+          const merged = [...prev];
+          for (const j of built) if (!have.has(j.id)) merged.push(j);
+          // Re-sort newest first (matches startImport's prepend pattern)
+          merged.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+          return merged;
+        });
+      } catch (e) {
+        // Hydration is best-effort — failures shouldn't break the app
+        console.warn("job hydration failed:", e?.message ?? e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []); // run once on mount
 
   // ─ Hydrate prior imports from localStorage when a store is opened ─
   // Without this, the "already imported" badges + filters reset to empty

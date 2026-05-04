@@ -206,3 +206,4 @@ async function* retryStream({ id, name, kind, flow, store, storeName, answerBrok
 
 window.mockRunStream = runStream;
 window.mockRetryStream = retryStream;
+window.unwrapJobEvent = unwrapEvent;
