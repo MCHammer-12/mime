@@ -64,9 +64,9 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
   },
   {
     value: "email_signup",
-    label: "Email marketing sign-up",
+    label: "Marketing email signup",
     resolution: {
-      key: MarketingTriggerKey.EMAIL_SIGNUP_SHOPIFY,
+      key: MarketingTriggerKey.EMAIL_SIGNUP,
       schemaType: SchemaType.EMAIL_MARKETING_SIGNUP,
       category: "Marketing",
     },

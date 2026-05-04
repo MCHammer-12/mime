@@ -152,13 +152,17 @@ function resolveMetricTrigger(
 
 function resolveListTrigger(flow: KlaviyoFlow): TriggerResolution {
   // V1 heuristic: SMS-intent flows contain "SMS" in the name. Otherwise email.
+  // Default to the generic EMAIL_SIGNUP key ("Marketing email signup") rather
+  // than EMAIL_SIGNUP_SHOPIFY — Klaviyo list signups come from many sources
+  // (forms, popups, widgets), not just Shopify's native checkbox. Merchant
+  // can switch the source-specific variant in Redo if they want.
   // A more robust resolver would call Klaviyo's /lists/{id} to read list_type;
   // captured as a TODO in the V2 plan.
   const name = flow.data.attributes.name.toLowerCase();
   const isSms = /\bsms\b/i.test(name);
   return isSms
     ? { key: MarketingTriggerKey.SMS_SIGNUP, schemaType: SchemaType.SMS_MARKETING_SIGNUP, category: "Marketing" }
-    : { key: MarketingTriggerKey.EMAIL_SIGNUP_SHOPIFY, schemaType: SchemaType.EMAIL_MARKETING_SIGNUP, category: "Marketing" };
+    : { key: MarketingTriggerKey.EMAIL_SIGNUP, schemaType: SchemaType.EMAIL_MARKETING_SIGNUP, category: "Marketing" };
 }
 
 export function resolveTrigger(
