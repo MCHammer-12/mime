@@ -444,13 +444,16 @@ export async function parseFlow(
   // copy of the downstream subtree. flow_end stays shared.
   const treeifiedSteps = treeifyFlow(steps, warnings);
 
+  // Always import as inactive so the merchant can review the flow in Redo
+  // before it starts firing — even if the Klaviyo source was live. Original
+  // Klaviyo status is captured in the description for reference.
   const status = flow.data.attributes.status;
-  const enabled = status === "live";
+  const enabled = false;
 
   const automation: AdvancedFlow = {
     team: opts.teamId,
     name: flow.data.attributes.name,
-    description: `Imported from Klaviyo flow ${flow.data.id}`,
+    description: `Imported from Klaviyo flow ${flow.data.id} (Klaviyo status: ${status})`,
     enabled,
     steps: treeifiedSteps,
     schemaType: resolution.schemaType,
