@@ -125,6 +125,11 @@ async function* runStream({ templateIds, flowIds, campaignIds, signal, store, st
     return;
   }
   const jobId = created.jobId;
+  // Hand the server-assigned id back to the UI so it can swap out the
+  // temporary client id (`j_${Date.now()}`) used while waiting for the
+  // POST /api/jobs round trip. Without this the troubleshoot bundle and
+  // notes endpoints 404 because they look up jobs by server id only.
+  yield { kind: "_jobCreated", serverJobId: jobId };
   yield { kind: "info", text: `Job created: ${jobId.slice(0, 8)}…` };
 
   // 2. Open the stream. The server replays historical events + streams

@@ -462,7 +462,10 @@ function App() {
     const totalSel = ss.selectedFlowIds.size + ss.selectedTmplIds.size + ss.selectedCampaignIds.size;
     if (totalSel === 0) return;
 
-    const jobId = `j_${Date.now()}`;
+    // Temporary client id, replaced by the server-assigned id as soon as
+    // the stream's first `_jobCreated` event arrives. Using `let` so we
+    // can update it in place — applyEvent calls below capture this binding.
+    let jobId = `j_${Date.now()}`;
     const jobsInStore = jobs.filter(j => j.storeId === storeId).length;
     const shortId = `#${String(jobsInStore + 1).padStart(3, "0")}`;
     const abort = new AbortController();
@@ -518,7 +521,18 @@ function App() {
           merchantSlug: store.merchantSlug || store.name,
           answerBroker: broker,
         });
-        for await (const evt of stream) applyEvent(jobId, evt);
+        for await (const evt of stream) {
+          if (evt.kind === "_jobCreated" && evt.serverJobId) {
+            // Swap the temp client id for the server's. Safe: this fires
+            // before any other event from the stream, so applyEvent below
+            // always sees the final id.
+            const newId = evt.serverJobId;
+            setJobs(js => js.map(j => j.id === jobId ? { ...j, id: newId } : j));
+            jobId = newId;
+            continue;
+          }
+          applyEvent(jobId, evt);
+        }
       } catch (e) {
         applyEvent(jobId, { kind: "error", text: e?.message ?? String(e) });
       }
