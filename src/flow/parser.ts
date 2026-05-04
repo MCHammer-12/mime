@@ -50,6 +50,29 @@ function terminate(
   return FLOW_END_ID;
 }
 
+// Mid-flow placeholder for a Klaviyo action we can't translate (send-sms,
+// update-profile, ab-test, gnarly send-webhook, etc.). DO_NOTHING is
+// terminal-only in Redo's schema (no nextId field), so emitting one with a
+// nextId silently breaks the chain — the builder renders everything past
+// it as a disconnected island. A 0-duration WAIT keeps the chain intact
+// and shows the customTitle so the merchant still sees what was skipped.
+function skipStub(
+  id: string,
+  customTitle: string,
+  nextPointer: string | null | undefined,
+  state: ParseState,
+): WaitStep {
+  return {
+    type: StepType.WAIT,
+    id,
+    customTitle,
+    numDays: 0,
+    numSeconds: 0,
+    timeUnit: WaitTimeUnit.MINUTES,
+    nextId: terminate(nextPointer, state),
+  };
+}
+
 function mapWaitTimeUnit(unit: string): WaitTimeUnit {
   switch (unit) {
     case "days":
@@ -207,13 +230,12 @@ async function convertAction(
           message: `send-sms had image_id=${msg.image_id} (MMS); rebuild manually in Redo`,
         });
       }
-      const stub: DoNothingStep = {
-        type: StepType.DO_NOTHING,
+      return skipStub(
         id,
-        customTitle: `SKIPPED SMS: ${preview}${body.length > 60 ? "…" : ""}`,
-        nextId: terminate(next, state),
-      };
-      return stub;
+        `SKIPPED SMS: ${preview}${body.length > 60 ? "…" : ""}`,
+        next,
+        state,
+      );
     }
 
     case "send-webhook": {
@@ -238,15 +260,14 @@ async function convertAction(
         warnings.push({
           kind: "skipped-step",
           actionId: id,
-          message: `send-webhook to ${rawUrl} has ${totalUnmapped} unmapped tokens after rewrite — replaced with DO_NOTHING. Rebuild manually in Redo.`,
+          message: `send-webhook to ${rawUrl} has ${totalUnmapped} unmapped tokens after rewrite — replaced with WAIT stub. Rebuild manually in Redo.`,
         });
-        const stub: DoNothingStep = {
-          type: StepType.DO_NOTHING,
+        return skipStub(
           id,
-          customTitle: `SKIPPED: webhook to ${rawUrl.slice(0, 60)}`,
-          nextId: terminate(next, state),
-        };
-        return stub;
+          `SKIPPED: webhook to ${rawUrl.slice(0, 60)}`,
+          next,
+          state,
+        );
       }
 
       const headersObj = msg.headers ?? {};
@@ -330,21 +351,17 @@ async function convertAction(
       warnings.push({
         kind: "unsupported-action",
         actionId: id,
-        message: `action type "${action.type}" is not yet implemented — emitted DO_NOTHING stub`,
+        message: `action type "${action.type}" is not yet implemented — emitted WAIT stub (0 min) so the chain stays connected`,
       });
-      const stub: DoNothingStep = {
-        type: StepType.DO_NOTHING,
+      // ab-test links through main_action.next; update-profile / list-update
+      // always use plain next. Fall back to either branch pointer if we
+      // encounter an unexpected shape; terminate if all are absent.
+      return skipStub(
         id,
-        customTitle: `TODO: ${action.type} (rebuild manually)`,
-        // ab-test links through main_action.next; update-profile / list-update
-        // always use plain next. Fall back to either branch pointer if we
-        // encounter an unexpected shape; terminate if all are absent.
-        nextId: terminate(
-          next ?? action.links?.next_if_false ?? action.links?.next_if_true,
-          state,
-        ),
-      };
-      return stub;
+        `TODO: ${action.type} (rebuild manually)`,
+        next ?? action.links?.next_if_false ?? action.links?.next_if_true,
+        state,
+      );
     }
   }
 }
