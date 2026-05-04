@@ -134,6 +134,15 @@ function buildJobFromServerState(srv) {
     job = reduceJobEvent(job, evt);
   }
 
+  // Normalize server status names (`completed` / `cancelled`) to the UI's
+  // shape (`complete` / `canceled`) so panels that gate on terminal status
+  // — most importantly the feedback / Add feedback panel — render. If the
+  // event log included a `done` event, reduceJobEvent already set this to
+  // `complete` or `partial`; this only fires for jobs whose log is missing
+  // a done event.
+  if (job.status === "completed") job.status = "complete";
+  else if (job.status === "cancelled") job.status = "canceled";
+
   // Items that never received a terminal event stay queued — for a hydrated
   // historical job that's misleading. Mark them as failed with a synthesized
   // reason so the troubleshoot panel still surfaces them.
@@ -331,7 +340,10 @@ function App() {
         // Hydrate only terminal jobs — for running / awaiting_input ones the
         // server still has the live stream open, so we'd need to reconnect
         // (not just replay history). Out of scope for now.
-        const TERMINAL = new Set(["complete", "partial", "failed", "canceled"]);
+        // Status names are the server's (`completed` / `failed` / `cancelled`),
+        // not the UI's (`complete` / `partial` / `canceled`); buildJobFromServerState
+        // normalizes them to UI shape after replaying events.
+        const TERMINAL = new Set(["completed", "failed", "cancelled"]);
         const existingIds = new Set(jobs.map(j => j.id));
         const toFetch = index.filter(j => !existingIds.has(j.id) && TERMINAL.has(j.status));
         if (toFetch.length === 0) return;
@@ -523,11 +535,17 @@ function App() {
         });
         for await (const evt of stream) {
           if (evt.kind === "_jobCreated" && evt.serverJobId) {
-            // Swap the temp client id for the server's. Safe: this fires
-            // before any other event from the stream, so applyEvent below
-            // always sees the final id.
+            // Snapshot the old id into a const BEFORE queueing setJobs.
+            // The setJobs callback closes over `oldId` by value; if it
+            // closed over `jobId` directly, the synchronous `jobId = newId`
+            // below would mutate the variable before React invoked the
+            // callback, causing `j.id === jobId` to compare newId to newId
+            // and miss the existing job. Subsequent applyEvent calls would
+            // then fail to find the job by its new id and the UI would
+            // freeze at its initial state.
+            const oldId = jobId;
             const newId = evt.serverJobId;
-            setJobs(js => js.map(j => j.id === jobId ? { ...j, id: newId } : j));
+            setJobs(js => js.map(j => j.id === oldId ? { ...j, id: newId } : j));
             jobId = newId;
             continue;
           }
