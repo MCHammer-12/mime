@@ -1127,12 +1127,13 @@ async function runImport(
             continue;
           }
           const flowName = flowDetail?.data?.attributes?.name ?? flowId;
-          // Status diagnostics: surface the Klaviyo source status so we can
-          // verify enabled mapping in the importer log. Only `live` → enabled.
+          // Status diagnostics: surface the Klaviyo source status so the user
+          // knows which flows to flip on after reviewing. All imports land
+          // inactive in Redo regardless of Klaviyo status — see parser.ts.
           const klaviyoStatus = flowDetail?.data?.attributes?.status ?? "(unknown)";
           emit({
             kind: "info",
-            text: `${flowName}: Klaviyo status="${klaviyoStatus}" → Redo enabled=${klaviyoStatus === "live"}`,
+            text: `${flowName}: Klaviyo status="${klaviyoStatus}" → imported inactive (review before enabling)`,
           });
 
           emit({ kind: "step", label: `Parsing ${flowName}…` });
