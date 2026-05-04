@@ -1,15 +1,17 @@
 /**
- * Curated list of Redo marketing triggers a user can pick from when an
- * imported Klaviyo flow has an unresolvable trigger. Mirrors the
- * displayName + (key, schemaType) shape the Redo team uses in their flow
- * editor (see redo/model/src/advanced-flow/triggers.ts schemaTypeConfigs).
+ * Curated list of Redo flow triggers a user can pick from when an imported
+ * Klaviyo flow has an unresolvable trigger. Mostly Marketing-category, but
+ * includes the Order-tracking ORDER_CREATED trigger as the post-purchase
+ * landing spot (Redo doesn't expose post-purchase as a Marketing trigger).
  *
- * Order is curated for picker UX — most common pick types first, the rest
- * grouped by purpose. Don't add SchemaTypes the AdvancedFlow create API
- * rejects for marketing flows (e.g. order-tracking, returns, OMS).
+ * Mirrors the displayName + (key, schemaType, category) shape the Redo team
+ * uses in their flow editor (see redo/model/src/advanced-flow/triggers.ts
+ * schemaTypeConfigs).
+ *
+ * Order is curated for picker UX — most common pick types first.
  */
 
-import { MarketingTriggerKey, SchemaType } from "./types.js";
+import { MarketingTriggerKey, OrderTrackingTriggerKey, SchemaType } from "./types.js";
 import type { TriggerResolution } from "./trigger-mapping.js";
 
 export interface MarketingTriggerOption {
@@ -27,6 +29,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.CART_ABANDONED,
       schemaType: SchemaType.MARKETING_CART_ABANDONMENT,
+      category: "Marketing",
       autoSkipAbandonmentField: "isCartAbandoned",
     },
   },
@@ -36,6 +39,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.CHECKOUT_ABANDONED,
       schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT,
+      category: "Marketing",
       autoSkipAbandonmentField: "isCheckoutAbandoned",
     },
   },
@@ -45,7 +49,17 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.BROWSE_ABANDONED,
       schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,
+      category: "Marketing",
       autoSkipAbandonmentField: "isBrowseAbandoned",
+    },
+  },
+  {
+    value: "order_created",
+    label: "Order created (post-purchase)",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_CREATED,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
     },
   },
   {
@@ -54,6 +68,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.EMAIL_SIGNUP_SHOPIFY,
       schemaType: SchemaType.EMAIL_MARKETING_SIGNUP,
+      category: "Marketing",
     },
   },
   {
@@ -62,6 +77,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.SMS_SIGNUP,
       schemaType: SchemaType.SMS_MARKETING_SIGNUP,
+      category: "Marketing",
     },
   },
   {
@@ -70,6 +86,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.BACK_IN_STOCK,
       schemaType: SchemaType.MARKETING_BACK_IN_STOCK,
+      category: "Marketing",
     },
   },
   {
@@ -78,6 +95,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.LOW_INVENTORY,
       schemaType: SchemaType.MARKETING_LOW_INVENTORY,
+      category: "Marketing",
     },
   },
   {
@@ -86,6 +104,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.CUSTOMER_GROUP_ENTERED,
       schemaType: SchemaType.MARKETING_SEGMENT_MEMBERSHIP_CHANGE,
+      category: "Marketing",
     },
   },
   {
@@ -94,6 +113,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.WARRANTY_REGISTRATION,
       schemaType: SchemaType.MARKETING_WARRANTY_REGISTRATION,
+      category: "Marketing",
     },
   },
   {
@@ -102,6 +122,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.DATE,
       schemaType: SchemaType.MARKETING_DATE,
+      category: "Marketing",
     },
   },
   {
@@ -110,6 +131,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.PRICE_DROP,
       schemaType: SchemaType.MARKETING_PRICE_DROP,
+      category: "Marketing",
     },
   },
   {
@@ -118,6 +140,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.REFUND_RETURN_SUBMITTED,
       schemaType: SchemaType.REFUND_RETURN_SUBMITTED,
+      category: "Marketing",
     },
   },
   {
@@ -126,6 +149,7 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     resolution: {
       key: MarketingTriggerKey.EXCHANGE_PROCESSED_WITH_CREDIT,
       schemaType: SchemaType.EXCHANGE_PROCESSED_WITH_CREDIT,
+      category: "Marketing",
     },
   },
 ];

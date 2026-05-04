@@ -33,7 +33,16 @@ export enum SchemaType {
   MARKETING_CAMPAIGN = "marketing_campaign",
   REFUND_RETURN_SUBMITTED = "refund_return_submitted",
   EXCHANGE_PROCESSED_WITH_CREDIT = "exchange_processed_with_credit",
+  ORDER_TRACKING = "order_tracking",
 }
+
+export enum OrderTrackingTriggerKey {
+  ORDER_CREATED = "order_created",
+}
+
+export type FlowCategory = "Marketing" | "Order tracking";
+
+export type TriggerKey = MarketingTriggerKey | OrderTrackingTriggerKey;
 
 export enum MarketingTriggerKey {
   EMAIL_SIGNUP = "email_signup",
@@ -71,8 +80,8 @@ export interface BaseStep {
 export interface TriggerStep extends BaseStep {
   type: StepType.TRIGGER;
   schemaType: SchemaType;
-  category: "Marketing";
-  key: MarketingTriggerKey;
+  category: FlowCategory;
+  key: TriggerKey;
   nextId: string;
   skipConditions?: {
     conjunctionMode: "OR";
@@ -143,7 +152,7 @@ export interface AdvancedFlow {
   enabled: boolean;
   steps: Step[];
   schemaType: SchemaType;
-  category: "Marketing";
+  category: FlowCategory;
   createdByUserId?: string;
   versionGroupId: string;
 }
