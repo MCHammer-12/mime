@@ -136,6 +136,18 @@ export interface ConditionStep extends BaseStep {
   nextFalseId: string;
 }
 
+export interface AbTestStep extends BaseStep {
+  type: StepType.AB_TEST;
+  name?: string;
+  description?: string;
+  variants: Array<{
+    id: string;
+    name: string;
+    weight: number;
+    nextId: string;
+  }>;
+}
+
 export type Step =
   | TriggerStep
   | WaitStep
@@ -143,7 +155,8 @@ export type Step =
   | SendSmsStep
   | SendWebhookStep
   | DoNothingStep
-  | ConditionStep;
+  | ConditionStep
+  | AbTestStep;
 
 export interface AdvancedFlow {
   team: string;

@@ -12,6 +12,7 @@ import {
   SchemaType,
   StepType,
   WaitTimeUnit,
+  type AbTestStep,
   type AdvancedFlow,
   type ConditionStep,
   type DoNothingStep,
@@ -48,6 +49,22 @@ function terminate(
   if (pointer && pointer.length > 0) return pointer;
   state.needsTerminal = true;
   return FLOW_END_ID;
+}
+
+// Detect Klaviyo's random/weighted split primitive — represented as a
+// conditional-split whose first condition_group has a single `profile-sample`
+// condition with a `percentage`. Returns that condition (with the percentage)
+// when present, otherwise null. Caller emits an AB_TEST step in lieu of a
+// regular CONDITION.
+function findProfileSample(action: KlaviyoAction): { percentage: number } | null {
+  const groups = action.data?.profile_filter?.condition_groups ?? [];
+  if (groups.length === 0) return null;
+  const conditions = groups[0]?.conditions ?? [];
+  if (conditions.length !== 1) return null;
+  const c = conditions[0];
+  if (c?.type !== "profile-sample") return null;
+  const pct = typeof c.percentage === "number" ? c.percentage : Number(c.percentage);
+  return { percentage: Number.isFinite(pct) ? pct : 50 };
 }
 
 // Mid-flow placeholder for a Klaviyo action we can't translate (send-sms,
@@ -291,13 +308,35 @@ async function convertAction(
     }
 
     case "conditional-split": {
-      // Emit a real CONDITION step. Translate profile-metric conditions into
-      // Redo's InlineSegment format (customer_activity with count + timeframe).
-      // Unmapped condition types stay as warnings and omit from the expression.
-      // Both nextTrueId and nextFalseId are mongoose-required; route "end path"
+      // Both branch pointers are mongoose-required; route "end path"
       // branches to the shared flow_end terminal.
       const nextTrueId = terminate(action.links?.next_if_true, state);
       const nextFalseId = terminate(action.links?.next_if_false, state);
+
+      // Klaviyo represents random/weighted splits as a conditional-split
+      // whose only condition is `profile-sample` with a `percentage`. That's
+      // the same primitive Redo calls AB_TEST (UI: "Weighted branch"). Map
+      // directly so the merchant gets a usable random split instead of a
+      // TODO condition.
+      const sample = findProfileSample(action);
+      if (sample) {
+        const truePct = Math.max(0, Math.min(100, Math.round(sample.percentage ?? 50)));
+        const falsePct = 100 - truePct;
+        const step: AbTestStep = {
+          type: StepType.AB_TEST,
+          id,
+          variants: [
+            { id: `${id}-v1`, name: `Variant A (${truePct}%)`, weight: truePct, nextId: nextTrueId },
+            { id: `${id}-v2`, name: `Variant B (${falsePct}%)`, weight: falsePct, nextId: nextFalseId },
+          ],
+        };
+        return step;
+      }
+
+      // Otherwise emit a real CONDITION step. Translate profile-metric
+      // conditions into Redo's InlineSegment format (customer_activity with
+      // count + timeframe). Unmapped condition types stay as warnings and
+      // omit from the expression.
       const expression = translateConditionalSplitExpression(action, metrics, warnings);
       const conditionCount =
         (expression as any)?.inlineSegment?.conditions?.length ?? 0;

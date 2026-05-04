@@ -9,6 +9,7 @@
 
 import {
   StepType,
+  type AbTestStep,
   type ConditionStep,
   type DoNothingStep,
   type ParseWarning,
@@ -87,6 +88,12 @@ export function treeifyFlow(
         step.nextTrueId = nextClonedId(step.nextTrueId);
         step.nextFalseId = nextClonedId(step.nextFalseId);
         return;
+      case StepType.AB_TEST:
+        step.variants = step.variants.map(v => ({
+          ...v,
+          nextId: nextClonedId(v.nextId),
+        }));
+        return;
     }
   }
 
@@ -128,5 +135,12 @@ function cloneStepWithNewId(step: Step, newId: string): Step {
       return { ...(step as DoNothingStep), id: newId };
     case StepType.CONDITION:
       return { ...(step as ConditionStep), id: newId };
+    case StepType.AB_TEST: {
+      const ab = step as AbTestStep;
+      // Clone the variants array too — treeify will mutate variant[].nextId
+      // in place via rewritePointers, so each cloned step needs its own
+      // variant objects.
+      return { ...ab, id: newId, variants: ab.variants.map(v => ({ ...v })) };
+    }
   }
 }
