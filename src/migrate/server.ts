@@ -266,15 +266,16 @@ function emptyWalkDebug(totalFlows = 0): WalkDebug {
   };
 }
 
-// Walk one flow's actions + messages. Mutates `debug` in place. Returns
-// the walked flow row (or null if the flow had no email send-actions).
-// Extracted from walkFlowsFromKlaviyo so the same per-flow logic can be
-// reused by the batch endpoint without duplication.
+// Walk one flow's actions + messages. Mutates `debug` in place. Always
+// returns a walked row — flows with no email actions, no templates, or a
+// transient walker failure surface as `emails: []` so the user sees them
+// in the selection UI and can attempt import (which re-fetches the full
+// flow definition from Klaviyo).
 async function walkOneFlow(
   f: FlowMeta,
   key: string,
   debug: WalkDebug,
-): Promise<{ walked: WalkedFlow | null; emailsForFlow: number }> {
+): Promise<{ walked: WalkedFlow; emailsForFlow: number }> {
   if (debug.sampleFlowNames.length < 10) {
     debug.sampleFlowNames.push(f.attributes.name);
   }
@@ -351,22 +352,28 @@ async function walkOneFlow(
         });
       }
     }
-    if (emails.length > 0) {
-      return {
-        walked: {
-          flowId: f.id,
-          flowName: f.attributes.name,
-          flowStatus: f.attributes.status,
-          triggerType: f.attributes.trigger_type,
-          emails,
-        },
-        emailsForFlow: emails.length,
-      };
-    }
-    return { walked: null, emailsForFlow: 0 };
+    return {
+      walked: {
+        flowId: f.id,
+        flowName: f.attributes.name,
+        flowStatus: f.attributes.status,
+        triggerType: f.attributes.trigger_type,
+        emails,
+      },
+      emailsForFlow: emails.length,
+    };
   } catch (e) {
     debug.failedActionFetches++;
-    return { walked: null, emailsForFlow: 0 };
+    return {
+      walked: {
+        flowId: f.id,
+        flowName: f.attributes.name,
+        flowStatus: f.attributes.status,
+        triggerType: f.attributes.trigger_type,
+        emails: [],
+      },
+      emailsForFlow: 0,
+    };
   }
 }
 
