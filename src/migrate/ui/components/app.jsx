@@ -157,7 +157,7 @@ function App() {
   const getStoreState = (storeId) => perStore[storeId] || {
     tab: "flows",
     flowFilter: "", tmplFilter: "", campaignFilter: "",
-    flowStatus: "all",
+    flowStatus: "live",
     campaignStatus: "all",
     hideFlow: true, hideTmpl: true, hideCampaign: true,
     selectedFlowIds: new Set(), selectedTmplIds: new Set(), selectedCampaignIds: new Set(),
