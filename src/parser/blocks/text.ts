@@ -11,7 +11,7 @@ import {
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
-import { normalizeFontFamilyName, weightedFamilyName } from "../../fonts.js";
+import { normalizeFontFamilyName, substituteSystemFontsInHtml, weightedFamilyName } from "../../fonts.js";
 import type * as cheerio from "cheerio";
 
 const BLOCK_ELEMENT_RE = /<(h[1-6]|div|table|ul|ol|blockquote|hr|pre)[\s>]/i;
@@ -329,6 +329,7 @@ export function parseTextBlock(
   textHtml = stripEmptyTables(textHtml);
   textHtml = stripStandaloneCoupons(textHtml);
   textHtml = suppressUrlAutolink(textHtml);
+  textHtml = substituteSystemFontsInHtml(textHtml);
   textHtml = rewriteWeightedCustomFontSpans(textHtml);
   textHtml = wrapText(textHtml);
 

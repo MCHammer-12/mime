@@ -8,6 +8,7 @@ import {
 import {
   detectSocialIconColor,
   detectSocialPlatform,
+  findAncestorBackgroundColor,
   parseInlineStyles,
   parsePadding,
   parsePx,
@@ -70,7 +71,10 @@ export function parseSocialsBlock(
     type: EmailBlockType.SOCIALS,
     blockId: nextId(),
     sectionPadding: parsePadding(tdStyle),
-    sectionColor: tdStyle["background-color"] || "#ffffff",
+    sectionColor:
+      tdStyle["background-color"] ||
+      findAncestorBackgroundColor($td.length ? $td : $wrapper) ||
+      "#ffffff",
     socialLinks,
     iconColor: mapIconColor(detectedColor),
     iconPadding: iconPadding ?? DEFAULT_ICON_PADDING,

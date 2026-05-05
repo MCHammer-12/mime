@@ -3,6 +3,7 @@
  */
 
 import { Padding } from "../renderer/types.js";
+import { substituteSystemFont } from "../fonts.js";
 
 export function parseInlineStyles(
   style: string | undefined,
@@ -73,7 +74,8 @@ export function parseColor(value: string | undefined): string {
 
 export function parseFontFamily(value: string | undefined): string {
   if (!value) return "Arial";
-  return value.replace(/['"]/g, "").split(",")[0].trim();
+  const primary = value.replace(/['"]/g, "").split(",")[0].trim();
+  return substituteSystemFont(primary);
 }
 
 export function parseFontSize(value: string | undefined): number {
@@ -122,22 +124,26 @@ export function detectSocialPlatform(url: string): string | null {
 }
 
 /**
- * Walk up from a block's content td through ancestor tds looking for
+ * Walk up from a block's content element through ALL ancestors looking for
  * `background-color` / `background`. Klaviyo sometimes puts the section
  * background on the OUTER wrapper td (e.g. footer `#f2f2f2`) while the
- * inner content td has no background — reading the inner td alone makes
- * the imported block white instead of gray. Walks until it either finds
- * a bg color or runs out of td ancestors.
+ * inner content td has no background — but it also commonly puts the
+ * section/email-level bg on a wrapping <div> or <table> (e.g. dark-mode
+ * email templates with a body-level black wrapper). Walking only tds
+ * misses those, so we walk every parent element until we find a bg color
+ * or hit the document root. `transparent` is ignored — it's an explicit
+ * "no background here" marker, keep walking.
  */
 export function findAncestorBackgroundColor(
-  $td: cheerio.Cheerio<any>,
+  $el: cheerio.Cheerio<any>,
 ): string | null {
-  let current = $td;
-  while (current.length > 0) {
+  let current = $el;
+  let guard = 0;
+  while (current.length > 0 && guard++ < 50) {
     const style = parseInlineStyles(current.attr("style"));
     const bg = style["background-color"] || style["background"];
-    if (bg) return bg;
-    const parent = current.parent().closest("td");
+    if (bg && bg !== "transparent") return bg;
+    const parent = current.parent();
     if (parent.length === 0 || parent[0] === current[0]) break;
     current = parent;
   }

@@ -15,6 +15,7 @@ import {
   VerticalAlignment,
 } from "../../renderer/types.js";
 import {
+  findAncestorBackgroundColor,
   parseColor,
   parseFontFamily,
   parseFontSize,
@@ -225,7 +226,10 @@ function parseDynamicProductBlock(
   const $sectionTd = $wrapper.children("table").find("> tbody > tr > td").first();
   const outerStyle = parseInlineStyles($sectionTd.attr("style"));
   const sectionPadding = parsePadding(outerStyle);
-  const sectionColor = outerStyle["background-color"] || "#ffffff";
+  const sectionColor =
+    outerStyle["background-color"] ||
+    findAncestorBackgroundColor($sectionTd.length ? $sectionTd : $wrapper) ||
+    "#ffffff";
 
   // Cart vs Best Sellers
   const cartContext = detectCartContext($);
@@ -422,7 +426,10 @@ export function parseLineItemsUcbBlock(
   const $sectionTd = $wrapper.children("table").find("> tbody > tr > td").first();
   const outerStyle = parseInlineStyles($sectionTd.attr("style"));
   const sectionPadding = parsePadding(outerStyle);
-  const sectionColor = outerStyle["background-color"] || "#ffffff";
+  const sectionColor =
+    outerStyle["background-color"] ||
+    findAncestorBackgroundColor($sectionTd.length ? $sectionTd : $wrapper) ||
+    "#ffffff";
 
   ctx.warnings.push(
     `Cart items UCB (event.extra.line_items loop) → Products block with Cart Item filter. Verify styling in Redo editor.`,
@@ -516,6 +523,11 @@ function parseStaticProductBlock(
     `Static product block (${n} product${n === 1 ? "" : "s"}) — rendered as image + title columns (no price/button). Shopify product IDs aren't in the HTML, so this isn't a native Redo Products block. For click-to-cart / price / add-to-cart button, replace in Redo by inserting a Products block and picking the same products from the Shopify picker.`,
   );
 
+  // All cells in a single product grid share the same enclosing section,
+  // so resolve the section bg once from the first cell's ancestors.
+  const sectionColor =
+    findAncestorBackgroundColor($cells.first()) || "#ffffff";
+
   const imageCells: (NonRecursiveBlock | null)[] = [];
   const titleCells: (NonRecursiveBlock | null)[] = [];
   const widths: number[] = [];
@@ -534,7 +546,7 @@ function parseStaticProductBlock(
         type: EmailBlockType.IMAGE,
         blockId: nextId(),
         sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
-        sectionColor: "#ffffff",
+        sectionColor,
         imageUrl: $img.attr("src") || "",
         altText: $img.attr("alt") || undefined,
         clickthroughUrl: $link.length > 0 ? $link.attr("href") : undefined,
@@ -565,7 +577,7 @@ function parseStaticProductBlock(
         type: EmailBlockType.TEXT,
         blockId: nextId(),
         sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
-        sectionColor: "#ffffff",
+        sectionColor,
         text: `<p style="text-align:center;line-height:1.3;margin:0">${escapeHtml(titleText)}</p>`,
         textColor: parseColor(titleStyle["color"]),
         fontSize: parseFontSize(titleStyle["font-size"]) || 14,
@@ -581,7 +593,7 @@ function parseStaticProductBlock(
     type: EmailBlockType.COLUMN,
     blockId: nextId(),
     sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
-    sectionColor: "#ffffff",
+    sectionColor,
     columns: imageCells,
     columnCount: n,
     gap: 0,
@@ -597,7 +609,7 @@ function parseStaticProductBlock(
     type: EmailBlockType.COLUMN,
     blockId: nextId(),
     sectionPadding: { top: 4, right: 0, bottom: 8, left: 0 },
-    sectionColor: "#ffffff",
+    sectionColor,
     columns: titleCells,
     columnCount: n,
     gap: 0,

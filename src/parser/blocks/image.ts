@@ -1,6 +1,6 @@
 import type { ImageBlock } from "../../renderer/types.js";
 import { EmailBlockType, EMAIL_MAX_WIDTH_PX, Size } from "../../renderer/types.js";
-import { parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
+import { findAncestorBackgroundColor, parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
 import { type $, type El, nextId, sel } from "../helpers.js";
 import { classifyKlaviyoUrl } from "../url-mapping.js";
 import type { ParseContext } from "../index.js";
@@ -90,6 +90,7 @@ export function parseImageBlock(
     sectionColor:
       outerStyle["background-color"] ||
       wrapperStyle["background-color"] ||
+      findAncestorBackgroundColor($outerTd.length ? $outerTd : $wrapper) ||
       "#ffffff",
     imageUrl: src,
     altText: alt || undefined,

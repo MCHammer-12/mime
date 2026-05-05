@@ -233,6 +233,68 @@ export function normalizeFontFamilyName(family: string): string {
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
 }
 
+/**
+ * Map of system-only fonts to a Redo-allowed web-safe substitute.
+ * Klaviyo's font picker offers Apple/Linotype system fonts (New York,
+ * Baskerville) that aren't on Google Fonts and can't be auto-uploaded.
+ * Klaviyo templates reference them as either the primary font or in
+ * fallback chains — but the originals only render on Apple devices,
+ * leaving the email looking inconsistent across Gmail / Outlook.
+ *
+ * Substituting to a Redo system font (web-safe, no brand-kit upload)
+ * makes the email render consistently everywhere. Georgia is the
+ * screen-optimized closest match of Redo's allowed system serifs.
+ *
+ * Keys are normalized (post-CamelCase-split, post-quote-strip).
+ */
+const SYSTEM_FONT_SUBSTITUTIONS: Record<string, string> = {
+  baskerville: "Georgia",
+  "new york": "Georgia",
+};
+
+/** Look up a font family in SYSTEM_FONT_SUBSTITUTIONS, returning original if no match. */
+export function substituteSystemFont(family: string): string {
+  const key = normalizeFontFamilyName(family).toLowerCase();
+  return SYSTEM_FONT_SUBSTITUTIONS[key] ?? family;
+}
+
+/**
+ * Rewrite every `font-family:` declaration in HTML, swapping system-only
+ * fonts (New York, Baskerville) for their web-safe substitutes. Operates
+ * on raw HTML so inline `<span style="font-family: 'New York', ...">` ends
+ * up with `font-family: 'Georgia', ...` before any other parsing runs.
+ *
+ * Substitutes the primary AND any fallback occurrences (so the system
+ * font name doesn't survive in the chain at all). Quoting is normalized
+ * to single quotes around any name with whitespace.
+ */
+export function substituteSystemFontsInHtml(html: string): string {
+  const FONT_FAMILY_DECL_RE = /font-family:\s*([^;}"]+)/gi;
+  return html.replace(FONT_FAMILY_DECL_RE, (full, families: string) => {
+    const list = families.split(",").map((f) => f.trim());
+    let changed = false;
+    const seen = new Set<string>();
+    const newList: string[] = [];
+    for (const raw of list) {
+      const stripped = raw.replace(/^['"]|['"]$/g, "");
+      const key = normalizeFontFamilyName(stripped).toLowerCase();
+      const sub = SYSTEM_FONT_SUBSTITUTIONS[key];
+      if (sub) {
+        changed = true;
+        if (seen.has(sub.toLowerCase())) continue;
+        seen.add(sub.toLowerCase());
+        newList.push(/\s/.test(sub) ? `'${sub}'` : sub);
+      } else {
+        if (seen.has(stripped.toLowerCase())) continue;
+        seen.add(stripped.toLowerCase());
+        newList.push(raw);
+      }
+    }
+    if (!changed) return full;
+    return `font-family: ${newList.join(", ")}`;
+  });
+}
+
 // ─── Fallback font resolver ──────────────────────────────────────
 //
 // Custom fonts don't render in most email apps (only Apple Mail); the

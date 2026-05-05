@@ -1,6 +1,6 @@
 import type { LineBlock } from "../../renderer/types.js";
 import { EmailBlockType, Size } from "../../renderer/types.js";
-import { parseBorderTop, parseInlineStyles, parsePadding } from "../style-utils.js";
+import { findAncestorBackgroundColor, parseBorderTop, parseInlineStyles, parsePadding } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
@@ -25,7 +25,10 @@ export function parseLineBlock(
     type: EmailBlockType.LINE,
     blockId: nextId(),
     sectionPadding: parsePadding(outerStyle),
-    sectionColor: outerStyle["background-color"] || "#ffffff",
+    sectionColor:
+      outerStyle["background-color"] ||
+      findAncestorBackgroundColor($outerTd.length ? $outerTd : $wrapper) ||
+      "#ffffff",
     color: border.color,
     padding: innerPadding,
     horizontalPadding: Size.CUSTOM,
