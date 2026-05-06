@@ -1,13 +1,14 @@
 import type { TextBlock } from "../../renderer/types.js";
 import { EmailBlockType } from "../../renderer/types.js";
 import {
+  contrastRatio,
   findAncestorBackgroundColor,
   parseColor,
   parseFontFamily,
   parseFontSize,
   parseInlineStyles,
   parsePadding,
-  relativeLuminance,
+  pickContrastingColor,
   sumAncestorPadding,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
@@ -17,9 +18,16 @@ import type * as cheerio from "cheerio";
 
 const BLOCK_ELEMENT_RE = /<(h[1-6]|div|table|ul|ol|blockquote|hr|pre)[\s>]/i;
 
-function isDarkColor(color: string): boolean {
-  const lum = relativeLuminance(color);
-  return lum !== null && lum < 0.5;
+/**
+ * If `fg` has poor contrast against `bg` (below `floor`, default 3:1 = below
+ * WCAG AA Large), swap to whichever of black/white reads better against bg.
+ * Otherwise return `fg` unchanged. Used for text + link defaults so dark-mode
+ * Klaviyo templates don't import with invisible black-on-black text.
+ */
+function applyContrastFloor(fg: string, bg: string, floor: number): string {
+  const ratio = contrastRatio(fg, bg);
+  if (ratio === null || ratio >= floor) return fg;
+  return pickContrastingColor(bg, { dark: "#000000", light: "#ffffff" });
 }
 
 /**
@@ -418,20 +426,21 @@ export function parseTextBlock(
     findAncestorBackgroundColor($td) ||
     "#ffffff";
 
-  // Default text color contrast: when the source HTML didn't set a divStyle
-  // color (parseColor falls back to #000000) and the section bg is dark,
-  // swap to #ffffff so the text reads. Prevents black-on-black invisible
-  // text in dark-mode templates. Inline span colors override per-segment.
+  // Contrast guard for text + link colors. Klaviyo emits text blocks where
+  // the resolved color (block-level div, browser-default link, etc.) has
+  // very poor contrast against a dark section bg — black-on-black text or
+  // Klaviyo's CSS-default `#15c` blue link on a black bg. The block reads
+  // unreadable in Redo. Below a 3:1 ratio (universally unreadable, well
+  // under WCAG AA) we swap to the bg-contrasting fill. Inline span colors
+  // override per-segment so this only fires for the block-level default,
+  // and only when the existing source value would actually fail to render.
   const rawTextColor = parseColor(divStyle["color"]);
-  const textColor =
-    !divStyle["color"] && isDarkColor(sectionColor) ? "#ffffff" : rawTextColor;
   const rawLinkColor = parseColor(
     linkStyle["color"] || inheritedLinkColor || divStyle["color"],
   );
-  const linkColor =
-    !linkStyle["color"] && !inheritedLinkColor && !divStyle["color"] && isDarkColor(sectionColor)
-      ? "#ffffff"
-      : rawLinkColor;
+  const contrastFloor = 3;
+  const textColor = applyContrastFloor(rawTextColor, sectionColor, contrastFloor);
+  const linkColor = applyContrastFloor(rawLinkColor, sectionColor, contrastFloor);
 
   return {
     type: EmailBlockType.TEXT,
