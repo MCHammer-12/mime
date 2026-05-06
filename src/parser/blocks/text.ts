@@ -19,6 +19,22 @@ import type * as cheerio from "cheerio";
 const BLOCK_ELEMENT_RE = /<(h[1-6]|div|table|ul|ol|blockquote|hr|pre)[\s>]/i;
 
 /**
+ * Parse a line-height value to its unitless multiplier. Returns null if
+ * missing, px-based (can't normalize without font-size context), or
+ * non-numeric. Used to gate the `line-height ≥ 1.7 → double-up <br>`
+ * heuristic; unitless / em / percent values map to a comparable scalar.
+ */
+function parseLineHeightUnitless(value: string | undefined): number | null {
+  if (!value) return null;
+  const v = value.trim().toLowerCase();
+  const m = v.match(/^(\d+(?:\.\d+)?)(?:em)?$/);
+  if (m) return parseFloat(m[1]!);
+  const pct = v.match(/^(\d+(?:\.\d+)?)\s*%$/);
+  if (pct) return parseFloat(pct[1]!) / 100;
+  return null;
+}
+
+/**
  * If `fg` has poor contrast against `bg` (below `floor`, default 3:1 = below
  * WCAG AA Large), swap to whichever of black/white reads better against bg.
  * Otherwise return `fg` unchanged. Used for text + link defaults so dark-mode
@@ -389,7 +405,20 @@ export function parseTextBlock(
     uniqueInner[0] !== outerAlign
       ? uniqueInner[0]
       : outerAlign;
-  const lineHeight = divStyle["line-height"];
+  let lineHeight = divStyle["line-height"];
+
+  // Klaviyo merchants often set `line-height: 2` (or higher) for visual
+  // double-spacing. Redo's renderer doesn't honor arbitrary line-height in
+  // the same way, so the imported text reads single-spaced and feels
+  // cramped. When the source line-height suggests double-spacing or more,
+  // simulate it with literal break tags: each `<br>` becomes `<br><br>`,
+  // and we drop the inline line-height to avoid stacking effects in any
+  // client that DOES honor it.
+  const lineHeightMultiplier = parseLineHeightUnitless(lineHeight);
+  if (lineHeightMultiplier !== null && lineHeightMultiplier >= 1.7) {
+    textHtml = textHtml.replace(/<br\s*\/?>/gi, "<br><br>");
+    lineHeight = undefined;
+  }
 
   // Bake alignment + line-height into the HTML since Redo's TextBlock schema
   // has no textAlign/lineHeight fields — they'd be stripped on import.

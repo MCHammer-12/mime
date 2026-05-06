@@ -106,37 +106,54 @@ export function parseKlaviyoHtml(html: string): ParseResult {
 }
 
 /**
- * Merge consecutive static ProductsBlocks of the same shape into a single
- * block. Klaviyo merchants commonly stack multiple "bestsellers" / hand-picked
- * grids vertically (e.g. two 3-col rows shown as separate blocks). In Redo
- * the equivalent is one Products block with `numberOfProducts = sum` and the
- * same column count — Redo wraps to multiple rows automatically.
+ * Merge ProductsBlocks of the same shape into a single block, even when
+ * they're separated by purely-decorative sections (spacers, dividers).
+ * Klaviyo merchants commonly stack multiple hand-picked product grids
+ * vertically with small spacers / dividers between them; in Redo the
+ * equivalent is one Products block whose row gap is built into the block
+ * itself, so the intervening decorative sections become redundant.
  *
- * Merge criteria: both adjacent sections are ProductsBlocks, both are
- * `productSelectionType: "static"`, and `columns` matches. Dynamic blocks are
- * NOT merged — each carries its own `_pendingFilter` / `schemaFieldName` and
- * combining them would lose semantics.
+ * Merge criteria: both ProductsBlocks are `productSelectionType: "static"`
+ * and have matching `columns`. Intervening sections must all be SPACER or
+ * LINE — anything else (text, image, etc.) signals a logical break in the
+ * merchant's grouping and breaks the merge. The intervening decorative
+ * sections are dropped when a merge happens.
+ *
+ * Dynamic blocks are NOT merged — each carries its own `_pendingFilter` /
+ * `schemaFieldName` and combining them would lose semantics.
  */
 function mergeAdjacentProductBlocks(sections: Section[]): Section[] {
   const out: Section[] = [];
   for (const s of sections) {
-    const prev = out[out.length - 1];
+    if (s.type !== EmailBlockType.PRODUCTS) {
+      out.push(s);
+      continue;
+    }
+    // Find the most recent ProductsBlock in `out`, walking back over only
+    // SPACER / LINE sections. A non-decorative block (text, image, button,
+    // column, etc.) breaks the chain.
+    let prevIdx = out.length - 1;
+    while (
+      prevIdx >= 0 &&
+      (out[prevIdx]!.type === EmailBlockType.SPACER ||
+        out[prevIdx]!.type === EmailBlockType.LINE)
+    ) {
+      prevIdx--;
+    }
+    const prev = prevIdx >= 0 ? out[prevIdx] : undefined;
     if (
       prev &&
       prev.type === EmailBlockType.PRODUCTS &&
-      s.type === EmailBlockType.PRODUCTS &&
       (prev as any).productSelectionType === "static" &&
       (s as any).productSelectionType === "static" &&
       (prev as any).columns === (s as any).columns
     ) {
       const prevPending = (prev as any)._pendingProducts ?? [];
       const sPending = (s as any)._pendingProducts ?? [];
-      // Dedupe by case-insensitive name. Klaviyo "static product block"
-      // grids commonly carry the same product across multiple cells (e.g.
-      // an image-row cell + a title-row cell for the same product, or
-      // overflow slots for responsive layouts). Without dedup the importer
-      // would resolve the same product N times into manuallySelectedProducts,
-      // and the rendered email would show the same item repeated.
+      // Dedupe by case-insensitive name. Klaviyo grids occasionally repeat
+      // the same product across cells (responsive overflow slots, image-
+      // row + title-row pairs), and the importer would otherwise resolve
+      // the same product multiple times into manuallySelectedProducts.
       const seen = new Set<string>();
       const merged: { name: string }[] = [];
       for (const p of [...prevPending, ...sPending]) {
@@ -147,6 +164,9 @@ function mergeAdjacentProductBlocks(sections: Section[]): Section[] {
       }
       (prev as any)._pendingProducts = merged;
       (prev as any).numberOfProducts = merged.length;
+      // Drop any intervening decorative sections — they were Klaviyo's
+      // visual gap between grid rows, redundant inside the merged block.
+      out.length = prevIdx + 1;
       continue;
     }
     out.push(s);
