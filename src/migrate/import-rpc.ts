@@ -555,6 +555,20 @@ export interface FlowImportBundle {
     fullTemplate: Record<string, any> | null;
     templateWarnings: string[];
   }>;
+  /** Klaviyo `send-sms` actions converted to placeholder SmsTemplates.
+   *  importFlowRpc creates each via createSmsTemplate then swaps the
+   *  sentinel on the matching SendSmsStep with the real ObjectId. */
+  placeholderSmsTemplates?: Array<{
+    sentinelId: string;
+    klaviyoActionId: string;
+    name: string;
+    content: string;
+    schemaType: string;
+    category: string;
+    autoShortenLinks?: boolean;
+    smsImageId?: string;
+    templateWarnings: string[];
+  }>;
 }
 
 export interface FlowImportResult {
@@ -638,9 +652,54 @@ export async function importFlowRpc(
     }
   }
 
-  // 2. Swap sentinel templateIds in the automation.
+  // 1b. Same loop for SMS placeholders. createSmsTemplate is on /marketing-rpc
+  //     and follows the same pattern as createEmailTemplate. Each placeholder
+  //     becomes one SmsTemplate; sentinel → real id swap shares the email
+  //     map so the step-rewrite step below handles both types uniformly.
+  for (const ph of bundle.placeholderSmsTemplates ?? []) {
+    const teamId = await resolveTeamId(options);
+    const template: Record<string, any> = {
+      team: teamId,
+      name: `${bundle.automation.name} — ${ph.name}`.slice(0, 200),
+      content: ph.content,
+      templateType: "marketing",
+      category: ph.category,
+      schemaType: ph.schemaType,
+    };
+    if (ph.autoShortenLinks === true) template.autoShortenLinks = true;
+
+    try {
+      const created = await postMarketingRpc(
+        "createSmsTemplate",
+        { template },
+        options,
+      );
+      const realId = String(created._id ?? created.id ?? "");
+      sentinelToRealId.set(ph.sentinelId, realId);
+      options.onProgress?.({
+        kind: "template_created",
+        templateName: template.name,
+        templateId: realId,
+      });
+    } catch (e: any) {
+      if (e instanceof RedoAuthExpiredError) throw e;
+      // SMS template create failed. Bubble the error up — unlike email we
+      // don't have a "blank fallback" pattern, and the failed SMS would
+      // leave the SendSmsStep with a sentinel templateId that the create-
+      // advanced-flow RPC would reject. Better to fail the flow visibly.
+      options.onProgress?.({
+        kind: "template_failed",
+        templateName: template.name,
+        error: e.message ?? String(e),
+      });
+      throw e;
+    }
+  }
+
+  // 2. Swap sentinel templateIds in the automation. Both send_email and
+  //    send_sms steps use the same sentinel→real map.
   const steps = bundle.automation.steps.map((step) => {
-    if (step.type !== "send_email") return step;
+    if (step.type !== "send_email" && step.type !== "send_sms") return step;
     const real = sentinelToRealId.get(String(step.templateId ?? ""));
     if (!real) return step; // leave as-is; server will reject, caller sees the error
     return { ...step, templateId: real };

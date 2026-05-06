@@ -1258,6 +1258,7 @@ async function runImport(
                 automation: parsed.automation as any,
                 warnings: parsed.warnings as any,
                 placeholderTemplates: parsed.placeholderTemplates as any,
+                placeholderSmsTemplates: parsed.placeholderSmsTemplates as any,
               },
               {
                 jwt,
