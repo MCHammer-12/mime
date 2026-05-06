@@ -198,3 +198,60 @@ export function detectSocialIconColor(imgSrc: string): string {
   if (imgSrc.includes("/solid/")) return "black";
   return "original";
 }
+
+/**
+ * Parse a CSS color value (`#fff`, `#ffffff`, `rgb(0,0,0)`, `rgba(...)`)
+ * to relative luminance per WCAG. Returns null when parsing fails so the
+ * caller can fall back. Range 0 (black) to 1 (white).
+ */
+export function relativeLuminance(color: string): number | null {
+  const c = color.trim().toLowerCase();
+  let r: number, g: number, b: number;
+
+  if (c.startsWith("#")) {
+    const hex = c.slice(1);
+    if (hex.length === 3) {
+      r = parseInt(hex[0]! + hex[0]!, 16);
+      g = parseInt(hex[1]! + hex[1]!, 16);
+      b = parseInt(hex[2]! + hex[2]!, 16);
+    } else if (hex.length === 6 || hex.length === 8) {
+      r = parseInt(hex.slice(0, 2), 16);
+      g = parseInt(hex.slice(2, 4), 16);
+      b = parseInt(hex.slice(4, 6), 16);
+    } else {
+      return null;
+    }
+  } else if (c.startsWith("rgb")) {
+    const m = c.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (!m) return null;
+    r = parseInt(m[1]!, 10);
+    g = parseInt(m[2]!, 10);
+    b = parseInt(m[3]!, 10);
+  } else {
+    return null;
+  }
+  if (![r, g, b].every((v) => Number.isFinite(v) && v >= 0 && v <= 255)) return null;
+
+  // sRGB → linear, then weighted sum (Rec. 709 / WCAG)
+  const lin = (v: number): number => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+/**
+ * Pick black or white as the contrasting fill against `bgColor`. Used to
+ * decide social icon / link colors when the source HTML doesn't carry an
+ * explicit color and we need a sensible default for a custom-uploaded asset.
+ * Threshold matches the WCAG-suggested 0.179 cutoff for a small visual
+ * element on a flat background.
+ */
+export function pickContrastingColor(
+  bgColor: string,
+  options: { dark: string; light: string } = { dark: "#000000", light: "#ffffff" },
+): string {
+  const lum = relativeLuminance(bgColor);
+  if (lum === null) return options.dark;
+  return lum < 0.5 ? options.light : options.dark;
+}

@@ -27,6 +27,10 @@ const CHECKOUT_URL_PATTERNS: RegExp[] = [
   /^\s*\{\{\s*event\.CheckoutURL\s*(\|[^}]*)?\s*\}\}\s*$/,
   // {{ event.extra.checkout_url }} (optional Liquid filter)
   /^\s*\{\{\s*event\.extra\.checkout_url\s*(\|[^}]*)?\s*\}\}\s*$/,
+  // {{ event.extra.responsive_checkout_url }} — Klaviyo Shopify
+  // abandoned-checkout responsive variant. Same destination as
+  // event.URL when the abandonment fires.
+  /^\s*\{\{\s*event\.extra\.responsive_checkout_url\s*(\|[^}]*)?\s*\}\}\s*$/,
 ];
 
 export const KLAVIYO_VAR_RE = /\{\{[^}]+\}\}|\{%[^%]+%\}/;
