@@ -60,11 +60,26 @@ export function rewriteKlaviyoLiquid(
     const parsed = parseLiquidVar(inside);
     if (!parsed) return full;
 
-    // Handle `person|lookup:'$X'` and `event|lookup:'X'` — these pull
-    // Klaviyo-specific profile/event properties that don't exist in Redo.
-    // Keep them as empty-string literals; warn per-unique token.
+    // Klaviyo's `person|lookup:"first_name"` syntax is equivalent to
+    // `person.first_name` — they're how Klaviyo's older Liquid dialect
+    // accesses profile fields that aren't always present. Translate by
+    // stripping the lookup filter and routing through the standard
+    // person.X map; preserve any remaining filters (default, upcase, etc.).
+    // Both `lookup:"X"` and `lookup:"$X"` (legacy $-prefixed) are seen.
     if (parsed.varPath === "person" || parsed.varPath === "event") {
-      if (parsed.filters.includes("|lookup:")) {
+      const lookupMatch = parsed.filters.match(
+        /^\s*\|\s*lookup\s*:\s*["']\$?([\w.]+)["']/,
+      );
+      if (lookupMatch) {
+        const field = lookupMatch[1]!;
+        const remaining = parsed.filters.slice(lookupMatch[0].length);
+        const mapped = KLAVIYO_TO_REDO_VAR_MAP[`${parsed.varPath}.${field}`];
+        if (mapped) {
+          return `{{ ${mapped}${remaining} }}`;
+        }
+        // Lookup target we don't recognize — keep current "drop to empty
+        // string + warn" behaviour so AI / event-specific properties
+        // don't leak through unrendered.
         unmappedTokens.push(`${parsed.varPath}${parsed.filters}`);
         return '""';
       }
