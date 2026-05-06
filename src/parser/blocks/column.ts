@@ -373,6 +373,15 @@ function parseSplitSubblock(
   const $img = $subblock.find("img").first();
   if ($img.length > 0 && $img.attr("src")) {
     const $link = $img.closest("a");
+    // Image padding inside a split: prefer a `td.spacer` (Klaviyo's older
+    // split layout), then fall back to summing padding on the chain of tds
+    // wrapping the <img> inside the subblock. Without the fallback, splits
+    // that lay images out in plain `<td style="padding:...">` cells lose
+    // their per-image padding entirely (visible as images touching the
+    // column edge / each other in the rendered output).
+    const imgPadding = subblockPadding.top + subblockPadding.right + subblockPadding.bottom + subblockPadding.left > 0
+      ? subblockPadding
+      : sumPaddingFromImgToSubblock($img, $subblock);
     return {
       type: EmailBlockType.IMAGE,
       blockId: nextId(),
@@ -381,7 +390,7 @@ function parseSplitSubblock(
       imageUrl: $img.attr("src") || "",
       altText: $img.attr("alt") || undefined,
       clickthroughUrl: $link.length > 0 ? $link.attr("href") : undefined,
-      padding: subblockPadding,
+      padding: imgPadding,
       horizontalPadding: Size.CUSTOM,
       verticalPadding: Size.CUSTOM,
       showCaption: false,
@@ -415,4 +424,30 @@ function parsePaddingFromSpacer(
     return parsePadding(parseInlineStyles($spacer.attr("style")));
   }
   return { top: 0, right: 0, bottom: 0, left: 0 };
+}
+
+/**
+ * Sum padding on every `<td>` from the image's immediate container up to
+ * (but not including) the kl-split-subblock div. Klaviyo's newer split
+ * dialect doesn't always emit a `td.spacer` — instead it pads the image's
+ * own container td. Walking the td chain captures both that and any
+ * intermediate wrapper tds.
+ */
+function sumPaddingFromImgToSubblock(
+  $img: cheerio.Cheerio<El>,
+  $subblock: cheerio.Cheerio<El>,
+): { top: number; right: number; bottom: number; left: number } {
+  const total = { top: 0, right: 0, bottom: 0, left: 0 };
+  let cur: cheerio.Cheerio<El> = $img.parent("td") as cheerio.Cheerio<El>;
+  let guard = 0;
+  while (cur.length > 0 && guard++ < 8) {
+    if ((cur[0] as any) === ($subblock[0] as any)) break;
+    const p = parsePadding(parseInlineStyles(cur.attr("style")));
+    total.top += p.top;
+    total.right += p.right;
+    total.bottom += p.bottom;
+    total.left += p.left;
+    cur = cur.parent().closest("td");
+  }
+  return total;
 }

@@ -255,3 +255,18 @@ export function pickContrastingColor(
   if (lum === null) return options.dark;
   return lum < 0.5 ? options.light : options.dark;
 }
+
+/**
+ * WCAG contrast ratio between two colors. Returns null if either color
+ * fails to parse (caller treats unknown contrast as "fine" and skips).
+ * Range 1 (no contrast) to 21 (max). Values below 3 are universally
+ * unreadable; AA requires 4.5 for normal text.
+ */
+export function contrastRatio(fg: string, bg: string): number | null {
+  const fLum = relativeLuminance(fg);
+  const bLum = relativeLuminance(bg);
+  if (fLum === null || bLum === null) return null;
+  const lighter = Math.max(fLum, bLum);
+  const darker = Math.min(fLum, bLum);
+  return (lighter + 0.05) / (darker + 0.05);
+}

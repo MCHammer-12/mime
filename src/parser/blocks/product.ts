@@ -10,6 +10,7 @@ import {
   EmailBlockType,
 } from "../../renderer/types.js";
 import {
+  contrastRatio,
   findAncestorBackgroundColor,
   parseColor,
   parseFontFamily,
@@ -17,7 +18,7 @@ import {
   parseInlineStyles,
   parsePadding,
   parsePx,
-  relativeLuminance,
+  pickContrastingColor,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
@@ -597,11 +598,15 @@ function parseStaticProductBlock(
     : maxHeight <= 150 ? "medium"
     : "large";
 
-  // Pick textColor; if the source didn't set one (parseColor falls back to
-  // #000000) and the section bg is dark, swap to #ffffff so titles read.
+  // Pick textColor; swap to bg-contrasting fill when the source value
+  // would render with very poor contrast against the section bg
+  // (Klaviyo's default `#000000` titles on a dark section bg, etc.).
   const rawTextColor = parseColor(titleStyle["color"]);
+  const ratio = contrastRatio(rawTextColor, sectionColor);
   const textColor =
-    rawTextColor === "#000000" && isDarkBg(sectionColor) ? "#ffffff" : rawTextColor;
+    ratio !== null && ratio < 3
+      ? pickContrastingColor(sectionColor, { dark: "#000000", light: "#ffffff" })
+      : rawTextColor;
 
   if (cartContext) {
     ctx.warnings.push(
@@ -673,8 +678,4 @@ function parseStaticProductBlock(
   return [block];
 }
 
-function isDarkBg(color: string): boolean {
-  const lum = relativeLuminance(color);
-  return lum !== null && lum < 0.5;
-}
 
