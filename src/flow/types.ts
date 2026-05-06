@@ -109,9 +109,21 @@ export interface SendEmailStep extends BaseStep {
 
 export interface SendSmsStep extends BaseStep {
   type: StepType.SEND_SMS;
-  body: string;
+  /** ObjectId of the SmsTemplate created via createSmsTemplate RPC, or a
+   *  `__PLACEHOLDER_X__` sentinel to be swapped at import time (mirrors
+   *  the email-step pattern). */
+  templateId: string;
+  /** Schema-instance field name carrying the recipient's phone, in
+   *  camelCase. Canonical for Marketing schemas: `customerPhone`. */
+  phoneNumberFieldName: string;
+  /** Schema-instance field name for the recipient's first name, used by
+   *  Liquid in the SMS body. Canonical: `customerFirstName`. */
+  recipientNameFieldName: string;
   nextId?: string;
   disabled?: boolean;
+  /** Marker tying this SMS step to its A/B variant when multi-variant
+   *  send-sms eventually lands. Optional in v1. */
+  splitId?: string;
 }
 
 export interface SendWebhookStep extends BaseStep {
@@ -243,6 +255,10 @@ export interface ParseResult {
   // Map of placeholder templateId sentinels we emitted → metadata the
   // downstream importer uses to create a real blank template.
   placeholderTemplates: PlaceholderTemplate[];
+  // Klaviyo send-sms actions translated to placeholder SMS templates.
+  // Importer calls createSmsTemplate for each, then swaps the sentinel
+  // on the matching SendSmsStep with the real ObjectId.
+  placeholderSmsTemplates: PlaceholderSmsTemplate[];
   skipped?: {
     reason: string;
     /** When true the caller can recover by re-running parseFlow with a
@@ -274,5 +290,39 @@ export interface PlaceholderTemplate {
    */
   fullTemplate: Record<string, any> | null;
   /** Warnings produced by the template parser (separate from flow warnings). */
+  templateWarnings: string[];
+}
+
+/**
+ * Klaviyo `send-sms` action → metadata for createSmsTemplate. The mime parser
+ * emits one of these per send-sms (with `sentinelId` matching the bogus
+ * templateId on the corresponding SendSmsStep). The importer creates a real
+ * SmsTemplate on the team and rewrites the step's templateId to the real
+ * ObjectId, then strips this entry from the bundle.
+ *
+ * `schemaType` and `category` are populated from the parent flow at
+ * emission time so the importer can pass them straight through to the RPC
+ * (Redo's createSmsTemplate handler validates schemaType matches an
+ * existing trigger config and uses it to attach an aiConfig).
+ */
+export interface PlaceholderSmsTemplate {
+  sentinelId: string;
+  klaviyoActionId: string;
+  /** Display name for the SmsTemplate. Klaviyo `data.message.name`
+   *  ("SMS #1") or a body-preview fallback. */
+  name: string;
+  /** SMS body, after Liquid rewrite (Klaviyo → Redo schema-instance vars). */
+  content: string;
+  /** From the parent flow's resolved trigger. */
+  schemaType: SchemaType;
+  category: FlowCategory;
+  /** True when Klaviyo's `shorten_links` was set. */
+  autoShortenLinks?: boolean;
+  /** Klaviyo's image_id (MMS) — informational only in v1; the importer
+   *  warns and skips the attachment because rehosting + the Redo
+   *  attachments[] schema are out of scope for v1. */
+  smsImageId?: string;
+  /** Per-step warnings (same shape as templateWarnings on the email
+   *  placeholder). Includes Liquid rewrite tokens we couldn't map. */
   templateWarnings: string[];
 }

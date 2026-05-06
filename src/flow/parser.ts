@@ -18,12 +18,15 @@ import {
   type AdvancedFlow,
   type ConditionStep,
   type DoNothingStep,
+  type FlowCategory,
   type KlaviyoAction,
   type KlaviyoFlow,
   type ParseResult,
   type ParseWarning,
+  type PlaceholderSmsTemplate,
   type PlaceholderTemplate,
   type SendEmailStep,
+  type SendSmsStep,
   type SendWebhookStep,
   type Step,
   type TriggerStep,
@@ -134,10 +137,12 @@ async function convertAction(
   action: KlaviyoAction,
   metrics: MetricLookup,
   flowSchemaType: SchemaType,
+  flowCategory: FlowCategory,
   templateResolver: TemplateResolver | null,
   account: KlaviyoAccount | null,
   warnings: ParseWarning[],
   placeholderTemplates: PlaceholderTemplate[],
+  placeholderSmsTemplates: PlaceholderSmsTemplate[],
   state: ParseState,
 ): Promise<Step | DropResult | null> {
   const id = action.id;
@@ -264,32 +269,90 @@ async function convertAction(
     }
 
     case "send-sms": {
-      // Redo's SendSmsStep requires a real SMS templateId (ObjectId string);
-      // we'd need a createSmsTemplate RPC + SMS template construction to
-      // emit a valid SendSmsStep. Until that's built, emit a DO_NOTHING stub
-      // with the body preserved in customTitle so the merchant can rebuild
-      // the SMS manually in Redo.
+      // Klaviyo send-sms → real Redo SendSmsStep + a placeholder SmsTemplate
+      // queued for createSmsTemplate at import time. Body Liquid is rewritten
+      // through the same translator we use for webhooks (Klaviyo customer /
+      // event vars → Redo schema-instance vars).
       const msg = action.data?.message ?? {};
-      const body = String(msg.body ?? "");
-      const preview = body.slice(0, 60).replace(/\s+/g, " ");
-      warnings.push({
-        kind: "skipped-step",
-        actionId: id,
-        message: `send-sms step skipped: Redo SMS requires a pre-built template (not yet supported by migration). Body: "${body.slice(0, 200)}"`,
-      });
+      const rawBody = String(msg.body ?? "");
+      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id);
+      const content = bodyResult.output;
+
+      // No body at all is unusual but happens for Klaviyo AI-content templates
+      // where the body is generated at send time. The merchant has to rebuild
+      // those manually — fall back to a WAIT stub with a clear message so the
+      // chain stays connected.
+      if (!content.trim()) {
+        warnings.push({
+          kind: "skipped-step",
+          actionId: id,
+          message: `send-sms has no body content (likely a Klaviyo AI-content template). Emitted WAIT stub; merchant must rebuild the SMS manually.`,
+        });
+        return skipStub(
+          id,
+          `SKIPPED SMS: empty body (Klaviyo AI content?)`,
+          next,
+          state,
+        );
+      }
+
+      const sentinelId = new ObjectId().toString();
+      const previewName = msg.name && String(msg.name).trim()
+        ? String(msg.name).trim()
+        : `SMS — ${rawBody.slice(0, 40).replace(/\s+/g, " ")}${rawBody.length > 40 ? "…" : ""}`;
+
+      const templateWarnings: string[] = [];
+      if (bodyResult.unmappedTokens.length > 0) {
+        templateWarnings.push(
+          `Liquid tokens we couldn't map: ${bodyResult.unmappedTokens.join(", ")} — verify in Redo SMS editor.`,
+        );
+      }
       if (msg.image_id) {
+        templateWarnings.push(
+          `Klaviyo image_id=${msg.image_id} (MMS attachment) dropped — Redo SMS attachments are out of scope for v1.`,
+        );
         warnings.push({
           kind: "requires-review",
           actionId: id,
-          message: `send-sms had image_id=${msg.image_id} (MMS); rebuild manually in Redo`,
+          message: `send-sms had image_id=${msg.image_id} (MMS); attachment dropped, body content kept`,
         });
       }
-      return skipStub(
+      if (msg.transactional === true) {
+        warnings.push({
+          kind: "requires-review",
+          actionId: id,
+          message: `send-sms marked transactional — Redo coerces SmsTemplate.templateType to "marketing"; verify intended audience`,
+        });
+      }
+      if (msg.smart_sending_enabled === false) {
+        warnings.push({
+          kind: "requires-review",
+          actionId: id,
+          message: `send-sms has smart_sending_enabled: false; Redo only supports this flow-wide via trigger.shouldSkipSmartSending — review before enabling`,
+        });
+      }
+
+      placeholderSmsTemplates.push({
+        sentinelId,
+        klaviyoActionId: id,
+        name: previewName,
+        content,
+        schemaType: flowSchemaType,
+        category: flowCategory,
+        ...(msg.shorten_links === true ? { autoShortenLinks: true } : {}),
+        ...(msg.image_id ? { smsImageId: String(msg.image_id) } : {}),
+        templateWarnings,
+      });
+
+      const step: SendSmsStep = {
+        type: StepType.SEND_SMS,
         id,
-        `SKIPPED SMS: ${preview}${body.length > 60 ? "…" : ""}`,
-        next,
-        state,
-      );
+        templateId: sentinelId,
+        phoneNumberFieldName: "customerPhone",
+        recipientNameFieldName: "customerFirstName",
+        nextId: terminate(next, state),
+      };
+      return step;
     }
 
     case "send-webhook": {
@@ -434,10 +497,12 @@ async function convertAction(
           synthetic,
           metrics,
           flowSchemaType,
+          flowCategory,
           templateResolver,
           account,
           warnings,
           placeholderTemplates,
+          placeholderSmsTemplates,
           state,
         );
       }
@@ -489,6 +554,7 @@ export async function parseFlow(
 ): Promise<ParseResult> {
   const warnings: ParseWarning[] = [];
   const placeholderTemplates: PlaceholderTemplate[] = [];
+  const placeholderSmsTemplates: PlaceholderSmsTemplate[] = [];
 
   const resolution = opts.forcedTrigger ?? resolveTrigger(flow, metrics, warnings);
   if (!resolution) {
@@ -497,6 +563,7 @@ export async function parseFlow(
       automation: null,
       warnings,
       placeholderTemplates: [],
+      placeholderSmsTemplates: [],
       // recoverable: caller can prompt the user, then re-call parseFlow with
       // opts.forcedTrigger to produce a usable AdvancedFlow.
       skipped: {
@@ -548,10 +615,12 @@ export async function parseFlow(
       action,
       metrics,
       resolution.schemaType,
+      resolution.category,
       opts.templateResolver ?? null,
       opts.account ?? null,
       warnings,
       placeholderTemplates,
+      placeholderSmsTemplates,
       state,
     );
     if (!result) continue;
@@ -634,5 +703,5 @@ export async function parseFlow(
     versionGroupId: new ObjectId().toString(),
   };
 
-  return { automation, warnings, placeholderTemplates };
+  return { automation, warnings, placeholderTemplates, placeholderSmsTemplates };
 }
