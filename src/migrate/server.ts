@@ -1142,6 +1142,7 @@ async function runImport(
             parsed = await parseFlow(flowDetail as KlaviyoFlow, metrics, {
               teamId: storeId,
               templateResolver,
+              account,
             });
           } catch (e: any) {
             flowImportFail++;
@@ -1204,6 +1205,7 @@ async function runImport(
               parsed = await parseFlow(flowDetail as KlaviyoFlow, metrics, {
                 teamId: storeId,
                 templateResolver,
+                account,
                 forcedTrigger: picked.resolution,
               });
             } catch (e: any) {

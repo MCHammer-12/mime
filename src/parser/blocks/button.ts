@@ -1,6 +1,6 @@
 import type { Section } from "../../renderer/types.js";
 import { Alignment, ButtonLinkType, EmailBlockType } from "../../renderer/types.js";
-import { parseColor, parseFontFamily, parseFontSize, parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
+import { findAncestorBackgroundColor, parseColor, parseFontFamily, parseFontSize, parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import { classifyKlaviyoUrl } from "../url-mapping.js";
 import type { ParseContext } from "../index.js";
@@ -71,7 +71,10 @@ export function parseButtonBlock(
     type: EmailBlockType.BUTTON,
     blockId: nextId(),
     sectionPadding: parsePadding(outerStyle),
-    sectionColor: outerStyle["background-color"] || "#ffffff",
+    sectionColor:
+      outerStyle["background-color"] ||
+      findAncestorBackgroundColor($outerTd.length ? $outerTd : $td) ||
+      "#ffffff",
     buttonText: $textEl.text().trim(),
     fillColor: bgColor,
     textColor: parseColor(aStyle["color"]),

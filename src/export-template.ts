@@ -21,7 +21,8 @@ import { ObjectId } from "bson";
 import { parseKlaviyoHtml } from "./parser/index.js";
 import { parseCodeTemplateHtml } from "./parser/code-template.js";
 import { fetchAccount, type KlaviyoAccount } from "./fetch-account.js";
-import { transformSections } from "./transform.js";
+import { transformSections, substituteStringVars } from "./transform.js";
+import { formatAddress } from "./fetch-account.js";
 import { buildFontPlan } from "./fonts.js";
 
 export interface ExportResult {
@@ -100,6 +101,19 @@ export async function exportTemplateFromHtml(
 
   const fontPlan = await buildFontPlan(sections);
 
+  // Apply org / shop / customer-profile substitutions to the subject line
+  // and (eventually) preview text. Klaviyo subjects routinely use
+  // {{ organization.name }} / {{ first_name }} which Redo's runtime doesn't
+  // resolve — substitute at import.
+  const subVarCtx = {
+    orgName: opts.account?.organizationName ?? "",
+    orgAddress: opts.account ? formatAddress(opts.account) : "",
+    orgUrl: opts.account?.websiteUrl ?? "",
+  };
+  const transformedSubject = meta.subject
+    ? substituteStringVars(meta.subject, subVarCtx, substitutions)
+    : "";
+
   const name = meta.name || "Imported Template";
 
   // If the template references the `checkoutUrl` schema field (via image
@@ -112,7 +126,7 @@ export async function exportTemplateFromHtml(
   const template = {
     _id: new ObjectId().toString(),
     name,
-    subject: meta.subject || "",
+    subject: transformedSubject,
     templateType: "marketing",
     category: "Marketing",
     schemaType,

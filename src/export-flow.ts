@@ -67,7 +67,7 @@ async function main() {
   let skipped = 0;
   for (const f of files) {
     const flow: KlaviyoFlow = JSON.parse(await readFile(join(flowsDir, f), "utf8"));
-    const result = await parseFlow(flow, metrics, { teamId, templateResolver });
+    const result = await parseFlow(flow, metrics, { teamId, templateResolver, account });
     const slug = f.replace(/\.json$/, "");
 
     if (result.automation) {

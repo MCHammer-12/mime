@@ -1,6 +1,6 @@
 import type { SpacerBlock } from "../../renderer/types.js";
 import { EmailBlockType } from "../../renderer/types.js";
-import { parseInlineStyles, parsePx } from "../style-utils.js";
+import { findAncestorBackgroundColor, parseInlineStyles, parsePx } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
@@ -36,6 +36,7 @@ export function parseSpacerBlock(
     innerStyle["background"] ||
     outerStyle["background-color"] ||
     outerStyle["background"] ||
+    findAncestorBackgroundColor(outerTd.length ? outerTd : $wrapper) ||
     "#ffffff";
 
   return {

@@ -8,9 +8,11 @@ import {
 import {
   detectSocialIconColor,
   detectSocialPlatform,
+  findAncestorBackgroundColor,
   parseInlineStyles,
   parsePadding,
   parsePx,
+  pickContrastingColor,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import { classifyKlaviyoUrl } from "../url-mapping.js";
@@ -61,18 +63,33 @@ export function parseSocialsBlock(
 
   const $td = $wrapper.find("td").first();
   const tdStyle = parseInlineStyles($td.attr("style"));
+  const sectionColor =
+    tdStyle["background-color"] ||
+    findAncestorBackgroundColor($td.length ? $td : $wrapper) ||
+    "#ffffff";
 
   const $alignDiv = $wrapper.find("div[style*='text-align']").first();
   const alignStyle = parseInlineStyles($alignDiv.attr("style"));
   const alignment = mapTextAlign(alignStyle["text-align"]);
 
+  // Custom-uploaded icons have URLs that don't encode the variant color
+  // (Klaviyo only encodes color in its stock /white/, /subtle/, /solid/
+  // paths). For those, "original" is a guess that lands wrong on dark
+  // backgrounds. Pick black/white based on section bg luminance instead.
+  const iconColor =
+    detectedColor === "original"
+      ? pickContrastingColor(sectionColor, { dark: "black", light: "white" }) === "white"
+        ? "white"
+        : "black"
+      : detectedColor;
+
   return {
     type: EmailBlockType.SOCIALS,
     blockId: nextId(),
     sectionPadding: parsePadding(tdStyle),
-    sectionColor: tdStyle["background-color"] || "#ffffff",
+    sectionColor,
     socialLinks,
-    iconColor: mapIconColor(detectedColor),
+    iconColor: mapIconColor(iconColor),
     iconPadding: iconPadding ?? DEFAULT_ICON_PADDING,
     alignment,
   };

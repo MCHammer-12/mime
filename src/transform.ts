@@ -282,6 +282,49 @@ const TEXT_VAR_MAP: Record<string, string> = {
   "person.id":           "redo_customer_id",
 };
 
+/**
+ * Variable substitution for plain-text strings (subject lines, preview text).
+ * Same org / shop / customer-profile substitutions as `substituteTextVars` but
+ * skips the HTML anchor wrapping (no `<a>` to drop or rewrite). Returns the
+ * substituted string and pushes a description to `subs`.
+ */
+export function substituteStringVars(
+  text: string,
+  ctx: { orgName: string; orgAddress: string; orgUrl: string },
+  subs?: string[],
+): string {
+  let result = text;
+  const note = (s: string): void => {
+    if (subs) subs.push(s);
+  };
+
+  if (ctx.orgName && /\{\{\s*organization\.name\s*\}\}/.test(result)) {
+    result = result.replace(/\{\{\s*organization\.name\s*\}\}/g, ctx.orgName);
+    note(`{{ organization.name }} → ${ctx.orgName}`);
+  }
+  if (ctx.orgAddress && /\{\{\s*organization\.full_address\s*\}\}/.test(result)) {
+    result = result.replace(/\{\{\s*organization\.full_address\s*\}\}/g, ctx.orgAddress);
+    note(`{{ organization.full_address }} → ${ctx.orgAddress}`);
+  }
+  if (ctx.orgName) {
+    const shopRe = /\{\{\s*shop(?:\.name|_name)\s*\}\}/g;
+    if (shopRe.test(result)) {
+      result = result.replace(shopRe, ctx.orgName);
+      note(`{{ shop.name|shop_name }} → ${ctx.orgName}`);
+    }
+  }
+  // Customer profile shortcuts: {{ first_name }} / {{ person.X }} → Redo equivalents.
+  for (const [klaviyoVar, redoVar] of Object.entries(TEXT_VAR_MAP)) {
+    const escaped = klaviyoVar.replace(/\./g, "\\.");
+    const re = new RegExp(`\\{\\{\\s*${escaped}\\s*\\}\\}`, "g");
+    if (re.test(result)) {
+      result = result.replace(re, `{{ ${redoVar} }}`);
+      note(`{{ ${klaviyoVar} }} → {{ ${redoVar} }}`);
+    }
+  }
+  return result;
+}
+
 function substituteTextVars(html: string, ctx: Ctx): string {
   let result = html;
 

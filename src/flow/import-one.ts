@@ -97,6 +97,7 @@ async function main() {
   const parsed = await parseFlow(flow, metrics, {
     teamId: audTeamId ?? "__TEAM_ID__",
     templateResolver,
+    account,
   });
 
   if (!parsed.automation) {

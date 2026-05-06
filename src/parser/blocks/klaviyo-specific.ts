@@ -14,7 +14,7 @@
 import type * as cheerio from "cheerio";
 import type { ImageBlock, Section } from "../../renderer/types.js";
 import { EmailBlockType, Size } from "../../renderer/types.js";
-import { parseInlineStyles, parsePadding } from "../style-utils.js";
+import { findAncestorBackgroundColor, parseInlineStyles, parsePadding } from "../style-utils.js";
 import { type $, type El, nextId, sel } from "../helpers.js";
 import type { ParseContext } from "../index.js";
 
@@ -128,6 +128,7 @@ function buildDropShadowImageBlock(
     sectionColor:
       outerStyle["background-color"] ||
       wrapperStyle["background-color"] ||
+      findAncestorBackgroundColor($outerTd.length ? $outerTd : $wrapper) ||
       "#ffffff",
     imageUrl: DROP_SHADOW_URL,
     altText: "Shadow",

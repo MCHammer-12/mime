@@ -100,7 +100,58 @@ export function parseKlaviyoHtml(html: string): ParseResult {
     }
   });
 
-  return { sections, ...ctx, bodyBackgroundColor };
+  const merged = mergeAdjacentProductBlocks(sections);
+
+  return { sections: merged, ...ctx, bodyBackgroundColor };
+}
+
+/**
+ * Merge consecutive static ProductsBlocks of the same shape into a single
+ * block. Klaviyo merchants commonly stack multiple "bestsellers" / hand-picked
+ * grids vertically (e.g. two 3-col rows shown as separate blocks). In Redo
+ * the equivalent is one Products block with `numberOfProducts = sum` and the
+ * same column count — Redo wraps to multiple rows automatically.
+ *
+ * Merge criteria: both adjacent sections are ProductsBlocks, both are
+ * `productSelectionType: "static"`, and `columns` matches. Dynamic blocks are
+ * NOT merged — each carries its own `_pendingFilter` / `schemaFieldName` and
+ * combining them would lose semantics.
+ */
+function mergeAdjacentProductBlocks(sections: Section[]): Section[] {
+  const out: Section[] = [];
+  for (const s of sections) {
+    const prev = out[out.length - 1];
+    if (
+      prev &&
+      prev.type === EmailBlockType.PRODUCTS &&
+      s.type === EmailBlockType.PRODUCTS &&
+      (prev as any).productSelectionType === "static" &&
+      (s as any).productSelectionType === "static" &&
+      (prev as any).columns === (s as any).columns
+    ) {
+      const prevPending = (prev as any)._pendingProducts ?? [];
+      const sPending = (s as any)._pendingProducts ?? [];
+      // Dedupe by case-insensitive name. Klaviyo "static product block"
+      // grids commonly carry the same product across multiple cells (e.g.
+      // an image-row cell + a title-row cell for the same product, or
+      // overflow slots for responsive layouts). Without dedup the importer
+      // would resolve the same product N times into manuallySelectedProducts,
+      // and the rendered email would show the same item repeated.
+      const seen = new Set<string>();
+      const merged: { name: string }[] = [];
+      for (const p of [...prevPending, ...sPending]) {
+        const k = p.name.trim().toLowerCase();
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+        merged.push(p);
+      }
+      (prev as any)._pendingProducts = merged;
+      (prev as any).numberOfProducts = merged.length;
+      continue;
+    }
+    out.push(s);
+  }
+  return out;
 }
 
 // ─── Single column content extraction (dispatcher) ──────────────

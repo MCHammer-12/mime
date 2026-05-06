@@ -1,6 +1,6 @@
 import type { ImageBlock, Section } from "../../renderer/types.js";
 import { EmailBlockType, EMAIL_MAX_WIDTH_PX, Size } from "../../renderer/types.js";
-import { parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
+import { findAncestorBackgroundColor, parseInlineStyles, parsePadding, parsePx } from "../style-utils.js";
 import { type $, type El, findCls, nextId } from "../helpers.js";
 import { classifyKlaviyoUrl } from "../url-mapping.js";
 import type { ParseContext } from "../index.js";
@@ -24,6 +24,7 @@ export function parseHeaderLogoAsImage(
   const sectionColor =
     settingsStyle["background-color"] ||
     settingsStyle["background"] ||
+    findAncestorBackgroundColor($settingsTd.length ? $settingsTd : $wrapper) ||
     "#ffffff";
   const sectionPadding = parsePadding(settingsStyle);
 

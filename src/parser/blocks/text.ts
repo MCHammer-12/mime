@@ -7,14 +7,20 @@ import {
   parseFontSize,
   parseInlineStyles,
   parsePadding,
+  relativeLuminance,
   sumAncestorPadding,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
-import { normalizeFontFamilyName, weightedFamilyName } from "../../fonts.js";
+import { normalizeFontFamilyName, substituteSystemFontsInHtml, weightedFamilyName } from "../../fonts.js";
 import type * as cheerio from "cheerio";
 
 const BLOCK_ELEMENT_RE = /<(h[1-6]|div|table|ul|ol|blockquote|hr|pre)[\s>]/i;
+
+function isDarkColor(color: string): boolean {
+  const lum = relativeLuminance(color);
+  return lum !== null && lum < 0.5;
+}
 
 /**
  * Wrap plain text in <p> tags. Block-level elements (h1-h6, table, etc.)
@@ -325,10 +331,30 @@ export function parseTextBlock(
 
   const $firstLink = $div.find("a").first();
   const linkStyle = parseInlineStyles($firstLink.attr("style"));
+  // Klaviyo often nests <a> inside a colored <span> while leaving the <a>
+  // unstyled. The rendered color is the span's, not the link's, but
+  // reading only $firstLink misses that — the imported link color falls
+  // back to the outer div's color (or browser default blue) and shows up
+  // wrong against a dark background. Walk up from the link until we hit
+  // an ancestor with an inline `color`, stopping at the text td.
+  let inheritedLinkColor: string | undefined;
+  if ($firstLink.length > 0) {
+    let cur: cheerio.Cheerio<El> = $firstLink.parent() as cheerio.Cheerio<El>;
+    let guard = 0;
+    while (cur.length > 0 && guard++ < 10 && (cur[0] as any) !== ($td[0] as any)) {
+      const style = parseInlineStyles((cur as any).attr("style"));
+      if (style["color"]) {
+        inheritedLinkColor = style["color"];
+        break;
+      }
+      cur = cur.parent() as cheerio.Cheerio<El>;
+    }
+  }
 
   textHtml = stripEmptyTables(textHtml);
   textHtml = stripStandaloneCoupons(textHtml);
   textHtml = suppressUrlAutolink(textHtml);
+  textHtml = substituteSystemFontsInHtml(textHtml);
   textHtml = rewriteWeightedCustomFontSpans(textHtml);
   textHtml = wrapText(textHtml);
 
@@ -386,6 +412,27 @@ export function parseTextBlock(
   const inlineCustomFont = extractDominantCustomFont(textHtml);
   const fontFamily = inlineCustomFont ?? divFontFamily;
 
+  const sectionColor =
+    tdStyle["background-color"] ||
+    tdStyle["background"] ||
+    findAncestorBackgroundColor($td) ||
+    "#ffffff";
+
+  // Default text color contrast: when the source HTML didn't set a divStyle
+  // color (parseColor falls back to #000000) and the section bg is dark,
+  // swap to #ffffff so the text reads. Prevents black-on-black invisible
+  // text in dark-mode templates. Inline span colors override per-segment.
+  const rawTextColor = parseColor(divStyle["color"]);
+  const textColor =
+    !divStyle["color"] && isDarkColor(sectionColor) ? "#ffffff" : rawTextColor;
+  const rawLinkColor = parseColor(
+    linkStyle["color"] || inheritedLinkColor || divStyle["color"],
+  );
+  const linkColor =
+    !linkStyle["color"] && !inheritedLinkColor && !divStyle["color"] && isDarkColor(sectionColor)
+      ? "#ffffff"
+      : rawLinkColor;
+
   return {
     type: EmailBlockType.TEXT,
     blockId: nextId(),
@@ -394,16 +441,12 @@ export function parseTextBlock(
     // while keeping the inner kl-text td at zero — reading the inner
     // alone drops the outer 18px left/right.
     sectionPadding: sumAncestorPadding($td),
-    sectionColor:
-      tdStyle["background-color"] ||
-      tdStyle["background"] ||
-      findAncestorBackgroundColor($td) ||
-      "#ffffff",
+    sectionColor,
     text: textHtml,
-    textColor: parseColor(divStyle["color"]),
+    textColor,
     fontSize: parseFontSize(divStyle["font-size"]),
     fontFamily,
-    linkColor: parseColor(linkStyle["color"] || divStyle["color"]),
+    linkColor,
     ...(textAlign ? { textAlign } : {}),
     ...(lineHeight ? { lineHeight } : {}),
   };

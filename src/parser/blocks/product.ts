@@ -1,8 +1,5 @@
 import type {
-  ColumnBlock,
-  ImageBlock,
   InlineButton,
-  NonRecursiveBlock,
   ProductFilterDoc,
   ProductImageSize,
   ProductsBlock,
@@ -11,16 +8,16 @@ import type {
 import {
   Alignment,
   EmailBlockType,
-  Size,
-  VerticalAlignment,
 } from "../../renderer/types.js";
 import {
+  findAncestorBackgroundColor,
   parseColor,
   parseFontFamily,
   parseFontSize,
   parseInlineStyles,
   parsePadding,
   parsePx,
+  relativeLuminance,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
@@ -225,7 +222,10 @@ function parseDynamicProductBlock(
   const $sectionTd = $wrapper.children("table").find("> tbody > tr > td").first();
   const outerStyle = parseInlineStyles($sectionTd.attr("style"));
   const sectionPadding = parsePadding(outerStyle);
-  const sectionColor = outerStyle["background-color"] || "#ffffff";
+  const sectionColor =
+    outerStyle["background-color"] ||
+    findAncestorBackgroundColor($sectionTd.length ? $sectionTd : $wrapper) ||
+    "#ffffff";
 
   // Cart vs Best Sellers
   const cartContext = detectCartContext($);
@@ -422,7 +422,10 @@ export function parseLineItemsUcbBlock(
   const $sectionTd = $wrapper.children("table").find("> tbody > tr > td").first();
   const outerStyle = parseInlineStyles($sectionTd.attr("style"));
   const sectionPadding = parsePadding(outerStyle);
-  const sectionColor = outerStyle["background-color"] || "#ffffff";
+  const sectionColor =
+    outerStyle["background-color"] ||
+    findAncestorBackgroundColor($sectionTd.length ? $sectionTd : $wrapper) ||
+    "#ffffff";
 
   ctx.warnings.push(
     `Cart items UCB (event.extra.line_items loop) → Products block with Cart Item filter. Verify styling in Redo editor.`,
@@ -512,43 +515,34 @@ function parseStaticProductBlock(
   const n = $cells.length;
   if (n === 0) return [];
 
-  ctx.warnings.push(
-    `Static product block (${n} product${n === 1 ? "" : "s"}) — rendered as image + title columns (no price/button). Shopify product IDs aren't in the HTML, so this isn't a native Redo Products block. For click-to-cart / price / add-to-cart button, replace in Redo by inserting a Products block and picking the same products from the Shopify picker.`,
-  );
+  // Each cell is one merchant-picked product. Extract the product names from
+  // the cell text — they're the visible titles and serve as Shopify search
+  // input on the import side. The redoapp importer (`import-klaviyo-templates`)
+  // resolves each name → {productId, variantId} via Shopify search and fills
+  // `manuallySelectedProducts`, then strips `_pendingProducts`.
+  const pendingProducts: { name: string }[] = [];
+  const $firstCell = $cells.first();
 
-  const imageCells: (NonRecursiveBlock | null)[] = [];
-  const titleCells: (NonRecursiveBlock | null)[] = [];
-  const widths: number[] = [];
-  let titlesFound = 0;
+  // Look at the first cell for styling defaults shared across the grid.
+  const $firstImg = $firstCell.find("img").first();
+  const $firstTitleTd = $firstCell
+    .find("td")
+    .filter(
+      (_, td) =>
+        $(td).find("img").length === 0 && $(td).text().trim().length > 0,
+    )
+    .first();
+  const titleStyle = parseInlineStyles($firstTitleTd.attr("style"));
+  const imgStyle = parseInlineStyles($firstImg.attr("style"));
 
+  // Klaviyo static grids occasionally split a product across multiple cells
+  // (image-only cell + title-only cell, or duplicated cells for responsive
+  // layouts). Dedupe by case-insensitive name so the importer resolves each
+  // product once — multiple resolutions would emit the same Shopify product
+  // multiple times in `manuallySelectedProducts`.
+  const seenNames = new Set<string>();
   $cells.each((_, cell) => {
     const $cell = $(cell);
-    const cellStyle = parseInlineStyles($cell.attr("style"));
-    const width = parseFloat(cellStyle["width"] || `${100 / n}`);
-    widths.push(width);
-
-    const $img = $cell.find("img").first();
-    if ($img.length > 0 && $img.attr("src")) {
-      const $link = $img.closest("a");
-      imageCells.push({
-        type: EmailBlockType.IMAGE,
-        blockId: nextId(),
-        sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
-        sectionColor: "#ffffff",
-        imageUrl: $img.attr("src") || "",
-        altText: $img.attr("alt") || undefined,
-        clickthroughUrl: $link.length > 0 ? $link.attr("href") : undefined,
-        padding: { top: 0, right: 0, bottom: 0, left: 0 },
-        horizontalPadding: Size.CUSTOM,
-        verticalPadding: Size.CUSTOM,
-        showCaption: false,
-      } satisfies ImageBlock);
-    } else {
-      imageCells.push(null);
-    }
-
-    // Title = first non-image text td in the cell. Klaviyo wraps it
-    // after the image row, sometimes nested in additional tables.
     const $titleTd = $cell
       .find("td")
       .filter(
@@ -556,63 +550,131 @@ function parseStaticProductBlock(
           $(td).find("img").length === 0 && $(td).text().trim().length > 0,
       )
       .first();
-
-    if ($titleTd.length > 0) {
-      titlesFound++;
-      const titleText = $titleTd.text().trim();
-      const titleStyle = parseInlineStyles($titleTd.attr("style"));
-      titleCells.push({
-        type: EmailBlockType.TEXT,
-        blockId: nextId(),
-        sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
-        sectionColor: "#ffffff",
-        text: `<p style="text-align:center;line-height:1.3;margin:0">${escapeHtml(titleText)}</p>`,
-        textColor: parseColor(titleStyle["color"]),
-        fontSize: parseFontSize(titleStyle["font-size"]) || 14,
-        fontFamily: parseFontFamily(titleStyle["font-family"]) || "Arial",
-        linkColor: parseColor(titleStyle["color"]),
-      });
-    } else {
-      titleCells.push(null);
-    }
+    const name = $titleTd.text().trim();
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (seenNames.has(key)) return;
+    seenNames.add(key);
+    pendingProducts.push({ name });
   });
 
-  const imageColumn: ColumnBlock = {
-    type: EmailBlockType.COLUMN,
+  // Columns: width % on cell → columns count = round(100 / width)
+  const firstCellStyle = parseInlineStyles($firstCell.attr("style"));
+  const cellWidth = parseFloat(firstCellStyle["width"] || "0");
+  const columns =
+    cellWidth > 0 ? Math.max(1, Math.round(100 / cellWidth)) : Math.min(n, 3);
+
+  // Section padding + color from the wrapper td (same pattern as
+  // parseDynamicProductBlock — mirrors the block-level outer wrapper).
+  const $wrapper = $cells.first().closest(".component-wrapper");
+  const $sectionTd = $wrapper.children("table").find("> tbody > tr > td").first();
+  const outerStyle = parseInlineStyles($sectionTd.attr("style"));
+  const sectionPadding = parsePadding(outerStyle);
+  const sectionColor =
+    outerStyle["background-color"] ||
+    findAncestorBackgroundColor($sectionTd.length ? $sectionTd : $wrapper) ||
+    "#ffffff";
+
+  // Abandonment context override: if the global doc shows AC / cart signals
+  // (event.extra.line_items loop, feeds.CART, etc.), upgrade the block to
+  // dynamic Cart Item even though the source HTML happens to use the static
+  // grid shape. The static-shaped HTML in an AC email is a placeholder /
+  // styling preview — the runtime cart items take over at send time. Without
+  // this upgrade the imported block stays pinned to merchant-picked products
+  // and ignores what's actually in the recipient's cart.
+  const cartContext = detectCartContext($);
+  if (cartContext && pendingProducts.length > 0) {
+    ctx.warnings.push(
+      `Static product block in AC context — upgraded to dynamic Cart Item filter. The merchant-picked product names ([${pendingProducts.map((p) => p.name).slice(0, 3).join(", ")}...]) are dropped; runtime cart items will populate at send time.`,
+    );
+  }
+
+  const imageCornerRadius = parsePx(imgStyle["border-radius"]) ?? 0;
+  const maxHeight = parsePx(imgStyle["max-height"]);
+  const imageSize: ProductImageSize =
+    maxHeight == null ? "medium"
+    : maxHeight <= 100 ? "small"
+    : maxHeight <= 150 ? "medium"
+    : "large";
+
+  // Pick textColor; if the source didn't set one (parseColor falls back to
+  // #000000) and the section bg is dark, swap to #ffffff so titles read.
+  const rawTextColor = parseColor(titleStyle["color"]);
+  const textColor =
+    rawTextColor === "#000000" && isDarkBg(sectionColor) ? "#ffffff" : rawTextColor;
+
+  if (cartContext) {
+    ctx.warnings.push(
+      `AC dynamic product block (${columns} cols) → Cart Item filter. Verify in Redo editor after import.`,
+    );
+    const block: ProductsBlock = {
+      type: EmailBlockType.PRODUCTS,
+      blockId: nextId(),
+      sectionPadding,
+      sectionColor,
+      textColor,
+      fontFamily: parseFontFamily(titleStyle["font-family"]) || "Arial",
+      titleFontSize: parsePx(titleStyle["font-size"]),
+      imageCornerRadius,
+      checkoutButton: defaultLineItemButton(),
+      lineItemButtons: defaultLineItemButton(),
+      numberOfProducts: Math.max(1, Math.min(pendingProducts.length, columns)),
+      imageSize,
+      productSelectionType: "dynamic",
+      showPrice: true,
+      showTitle: true,
+      showImage: true,
+      showButton: false,
+      layoutType: columns === 1 ? "rows" : "columns",
+      alignment: Alignment.CENTER,
+      columns,
+      stackOnMobile: true,
+      manuallySelectedProducts: [],
+      imageObjectFit: "cover",
+      provider: "shopify",
+      schemaFieldName: "cartContext",
+      _pendingFilter: CART_ITEM_FILTER,
+    };
+    return [block];
+  }
+
+  ctx.warnings.push(
+    `Static product block (${pendingProducts.length} product${pendingProducts.length === 1 ? "" : "s"}) — emitted as Products block with names ["${pendingProducts.map((p) => p.name).slice(0, 3).join('", "')}"...] for the importer to resolve via Shopify search. Verify in Redo editor after import; ambiguous names may need manual picker selection.`,
+  );
+
+  const block: ProductsBlock = {
+    type: EmailBlockType.PRODUCTS,
     blockId: nextId(),
-    sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
-    sectionColor: "#ffffff",
-    columns: imageCells,
-    columnCount: n,
-    gap: 0,
-    // Keep 2-wide on mobile so title aligns directly under image.
+    sectionPadding,
+    sectionColor,
+    textColor,
+    fontFamily: parseFontFamily(titleStyle["font-family"]) || "Arial",
+    titleFontSize: parsePx(titleStyle["font-size"]),
+    imageCornerRadius,
+    checkoutButton: defaultLineItemButton(),
+    lineItemButtons: defaultLineItemButton(),
+    numberOfProducts: pendingProducts.length,
+    imageSize,
+    productSelectionType: "static",
+    showPrice: false,
+    showTitle: true,
+    showImage: true,
+    showButton: false,
+    layoutType: columns === 1 ? "rows" : "columns",
+    alignment: Alignment.CENTER,
+    columns,
     stackOnMobile: false,
-    alignment: VerticalAlignment.TOP,
-    columnWidths: widths,
+    manuallySelectedProducts: [],
+    imageObjectFit: "cover",
+    provider: "shopify",
+    _pendingProducts: pendingProducts,
   };
 
-  if (titlesFound === 0) return [imageColumn];
-
-  const titleColumn: ColumnBlock = {
-    type: EmailBlockType.COLUMN,
-    blockId: nextId(),
-    sectionPadding: { top: 4, right: 0, bottom: 8, left: 0 },
-    sectionColor: "#ffffff",
-    columns: titleCells,
-    columnCount: n,
-    gap: 0,
-    stackOnMobile: false,
-    alignment: VerticalAlignment.TOP,
-    columnWidths: widths,
-  };
-
-  return [imageColumn, titleColumn];
+  return [block];
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+function isDarkBg(color: string): boolean {
+  const lum = relativeLuminance(color);
+  return lum !== null && lum < 0.5;
 }
+

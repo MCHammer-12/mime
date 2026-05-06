@@ -14,6 +14,7 @@ import {
   VerticalAlignment,
 } from "../../renderer/types.js";
 import {
+  findAncestorBackgroundColor,
   parseColor,
   parseFontFamily,
   parseFontSize,
@@ -271,17 +272,8 @@ function extractRowContext(
   _$: $,
   $columns: cheerio.Cheerio<El>,
 ): { sectionColor: string } {
-  let sectionColor = "#ffffff";
-  let $cur: cheerio.Cheerio<El> = $columns.first().parent();
-  for (let i = 0; i < 6 && $cur.length > 0; i++) {
-    const s = parseInlineStyles($cur.attr("style"));
-    const bg = s["background-color"] || s["background"];
-    if (bg && bg !== "transparent") {
-      sectionColor = bg;
-      break;
-    }
-    $cur = $cur.parent();
-  }
+  const sectionColor =
+    findAncestorBackgroundColor($columns.first().parent()) || "#ffffff";
   return { sectionColor };
 }
 
@@ -308,21 +300,10 @@ export function parseSplitBlock(
   if (valign === "middle" || valign === "center") alignment = VerticalAlignment.CENTER;
   else if (valign === "bottom") alignment = VerticalAlignment.BOTTOM;
 
-  const leftBlock = parseSplitSubblock($, $left, ctx);
-  const rightBlock = parseSplitSubblock($, $right, ctx);
+  const sectionColor = findAncestorBackgroundColor($td) || "#ffffff";
 
-  // Section color from the outer wrapping td (kl-split's parent chain)
-  let sectionColor = "#ffffff";
-  let $cur: cheerio.Cheerio<El> = $td;
-  for (let i = 0; i < 6 && $cur.length > 0; i++) {
-    const s = parseInlineStyles($cur.attr("style"));
-    const bg = s["background-color"] || s["background"];
-    if (bg && bg !== "transparent") {
-      sectionColor = bg;
-      break;
-    }
-    $cur = $cur.parent();
-  }
+  const leftBlock = parseSplitSubblock($, $left, ctx, sectionColor);
+  const rightBlock = parseSplitSubblock($, $right, ctx, sectionColor);
 
   // The kl-split td itself almost always has padding:0; the surrounding
   // section padding lives on the wrapping td(s). Sum across the chain so
@@ -344,11 +325,15 @@ export function parseSplitBlock(
 /**
  * Extract the primary content of a kl-split subblock into a single nestable block.
  * Priority: button > image > text. Images without src return null (placeholder).
+ *
+ * `sectionColor` is the surrounding section's background, threaded down so the
+ * slot block inherits it (matches the outer ColumnBlock).
  */
 function parseSplitSubblock(
   $: $,
   $subblock: cheerio.Cheerio<El>,
   _ctx: ParseContext,
+  sectionColor: string,
 ): NonRecursiveBlock | null {
   const subblockPadding = parsePaddingFromSpacer($subblock);
 
@@ -364,7 +349,7 @@ function parseSplitSubblock(
         type: EmailBlockType.BUTTON,
         blockId: nextId(),
         sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
-        sectionColor: "#ffffff",
+        sectionColor,
         alignment: ("center" as ButtonBlock["alignment"]),
         cornerRadius: 0,
         buttonText: $a.text().trim(),
@@ -392,7 +377,7 @@ function parseSplitSubblock(
       type: EmailBlockType.IMAGE,
       blockId: nextId(),
       sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
-      sectionColor: "#ffffff",
+      sectionColor,
       imageUrl: $img.attr("src") || "",
       altText: $img.attr("alt") || undefined,
       clickthroughUrl: $link.length > 0 ? $link.attr("href") : undefined,
@@ -413,7 +398,7 @@ function parseSplitSubblock(
     type: EmailBlockType.TEXT,
     blockId: nextId(),
     sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
-    sectionColor: "#ffffff",
+    sectionColor,
     text: text.includes("<p") ? text : `<p>${text}</p>`,
     textColor: parseColor(divStyle["color"]),
     fontSize: parseFontSize(divStyle["font-size"]),

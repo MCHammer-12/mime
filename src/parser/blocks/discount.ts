@@ -6,6 +6,7 @@ import {
   type Padding,
 } from "../../renderer/types.js";
 import {
+  findAncestorBackgroundColor,
   parseColor,
   parseFontFamily,
   parseFontSize,
@@ -63,6 +64,11 @@ export function tryParseDiscountFromText(
 
   const tdStyle = parseInlineStyles($td.attr("style"));
   const divStyle = parseInlineStyles($div.attr("style"));
+  const sectionColor =
+    tdStyle["background-color"] ||
+    tdStyle["background"] ||
+    findAncestorBackgroundColor($td) ||
+    "#ffffff";
 
   const blocks: Section[] = [];
   let cursor = 0;
@@ -76,7 +82,7 @@ export function tryParseDiscountFromText(
 
     const inherited = findInheritedStyles(html, match.index);
     blocks.push(
-      buildDiscountBlock(match.span, match.name, tdStyle, divStyle, inherited),
+      buildDiscountBlock(match.span, match.name, tdStyle, divStyle, inherited, sectionColor),
     );
 
     cursor = match.index + match.length;
@@ -208,6 +214,7 @@ function buildDiscountBlock(
   tdStyle: Record<string, string>,
   divStyle: Record<string, string>,
   inherited: Record<string, string>,
+  sectionColor: string,
 ): DiscountBlock {
   const spanStyle = spanTag
     ? parseInlineStyles(extractStyleAttr(spanTag))
@@ -224,8 +231,6 @@ function buildDiscountBlock(
   const alignment = normalizeAlignment(pick("text-align"));
 
   const sectionPadding = parsePaddingFromTd(tdStyle);
-  const sectionColor =
-    tdStyle["background-color"] || tdStyle["background"] || "#ffffff";
 
   return {
     type: EmailBlockType.DISCOUNT,

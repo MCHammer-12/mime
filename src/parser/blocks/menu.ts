@@ -1,6 +1,6 @@
 import type { MenuBlock, Section } from "../../renderer/types.js";
 import { Alignment, EmailBlockType } from "../../renderer/types.js";
-import { parseColor, parseFontFamily, parseFontSize, parseInlineStyles, parsePadding } from "../style-utils.js";
+import { findAncestorBackgroundColor, parseColor, parseFontFamily, parseFontSize, parseInlineStyles, parsePadding } from "../style-utils.js";
 import { type $, type El, findCls, nextId } from "../helpers.js";
 import { classifyKlaviyoUrl } from "../url-mapping.js";
 import type { ParseContext } from "../index.js";
@@ -20,6 +20,7 @@ export function parseMenuFromHeader(
   const sectionColor =
     settingsStyle["background-color"] ||
     settingsStyle["background"] ||
+    findAncestorBackgroundColor($settingsTd.length ? $settingsTd : $wrapper) ||
     "#ffffff";
   const settingsPadding = parsePadding(settingsStyle);
 

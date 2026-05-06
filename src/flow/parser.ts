@@ -8,6 +8,8 @@ import type { TemplateResolver } from "./template-resolver.js";
 import { treeifyFlow } from "./treeify.js";
 import { resolveTrigger, type TriggerResolution } from "./trigger-mapping.js";
 import { rewriteKlaviyoLiquid } from "./variable-mapping.js";
+import { substituteStringVars } from "../transform.js";
+import { formatAddress, type KlaviyoAccount } from "../fetch-account.js";
 import {
   SchemaType,
   StepType,
@@ -103,7 +105,29 @@ function mapWaitTimeUnit(unit: string): WaitTimeUnit {
   }
 }
 
-// Per-action dispatcher. Emits exactly one Redo Step (or skips with a warning).
+/**
+ * Sentinel returned by convertAction when the action should be dropped from
+ * the flow entirely (no WAIT stub, no placeholder). The caller stitches the
+ * predecessor's nextId past the dropped id by recording {droppedId → next}
+ * in `dropRedirects` and rewriting all step pointers in a post-pass.
+ *
+ * Used for actions that have no Redo equivalent and would otherwise leave
+ * dead "TODO" placeholders cluttering the imported flow (update-profile,
+ * list-update, target-date, etc.). Per merchant feedback (2026-05-05),
+ * dropping is preferable to a 0-minute WAIT stub the merchant has to clean
+ * up by hand.
+ */
+const DROP = Symbol("drop");
+type DropResult = { [DROP]: true; redirectTo: string };
+function dropAction(redirectTo: string): DropResult {
+  return { [DROP]: true, redirectTo };
+}
+function isDropResult(r: unknown): r is DropResult {
+  return typeof r === "object" && r !== null && (r as any)[DROP] === true;
+}
+
+// Per-action dispatcher. Emits exactly one Redo Step, drops the action with
+// re-stitching info, or returns null on hard skip.
 // Async because the send-email handler may need to resolve + parse the
 // referenced Klaviyo template (HTML → full Redo EmailTemplate JSON).
 async function convertAction(
@@ -111,10 +135,11 @@ async function convertAction(
   metrics: MetricLookup,
   flowSchemaType: SchemaType,
   templateResolver: TemplateResolver | null,
+  account: KlaviyoAccount | null,
   warnings: ParseWarning[],
   placeholderTemplates: PlaceholderTemplate[],
   state: ParseState,
-): Promise<Step | null> {
+): Promise<Step | DropResult | null> {
   const id = action.id;
   const next = action.links?.next ?? undefined;
 
@@ -173,9 +198,21 @@ async function convertAction(
           templateWarnings.push(...resolved.warnings);
           // Carry through per-step metadata onto the template so the
           // importer uses Klaviyo's subject/from/preview instead of the
-          // HTML parser's defaults.
-          if (msg.subject_line) fullTemplate.subject = msg.subject_line;
-          if (msg.preview_text) fullTemplate.emailPreview = msg.preview_text;
+          // HTML parser's defaults. Run org / shop / customer-profile
+          // substitutions on subject + preview — Klaviyo subjects routinely
+          // use {{ organization.name }} / {{ first_name }} which Redo's
+          // runtime doesn't resolve.
+          const subVarCtx = {
+            orgName: account?.organizationName ?? "",
+            orgAddress: account ? formatAddress(account) : "",
+            orgUrl: account?.websiteUrl ?? "",
+          };
+          if (msg.subject_line) {
+            fullTemplate.subject = substituteStringVars(msg.subject_line, subVarCtx);
+          }
+          if (msg.preview_text) {
+            fullTemplate.emailPreview = substituteStringVars(msg.preview_text, subVarCtx);
+          }
         } else {
           warnings.push({
             kind: "requires-review",
@@ -277,14 +314,9 @@ async function convertAction(
         warnings.push({
           kind: "skipped-step",
           actionId: id,
-          message: `send-webhook to ${rawUrl} has ${totalUnmapped} unmapped tokens after rewrite — replaced with WAIT stub. Rebuild manually in Redo.`,
+          message: `send-webhook to ${rawUrl} has ${totalUnmapped} unmapped tokens after rewrite — dropped, chain re-stitched past it. Rebuild manually in Redo if needed.`,
         });
-        return skipStub(
-          id,
-          `SKIPPED: webhook to ${rawUrl.slice(0, 60)}`,
-          next,
-          state,
-        );
+        return dropAction(terminate(next, state));
       }
 
       const headersObj = msg.headers ?? {};
@@ -380,9 +412,47 @@ async function convertAction(
       return step;
     }
 
-    // Remaining unsupported actions — emit DO_NOTHING. These don't have
-    // branch links, so a single nextId preserves the main path.
-    case "ab-test":
+    case "ab-test": {
+      // Klaviyo ab-test wraps a real send-email inside `data.main_action` —
+      // that's the "winning" / default email the test serves. Per merchant
+      // feedback (2026-05-05), we drop the split entirely and emit just
+      // that email as a normal SendEmail step. Variant data isn't a separate
+      // top-level action (it's embedded in the ab-test), so dropping the
+      // wrapper preserves the email content with no orphans.
+      const mainAction = action.data?.main_action;
+      if (mainAction?.type === "send-email") {
+        // Re-dispatch as a synthetic send-email action sharing the ab-test's
+        // id and merge-point next pointer. The embedded action's own next is
+        // null (it's a leaf inside the test); we route to ab-test.links.next.
+        const synthetic: KlaviyoAction = {
+          id,
+          type: "send-email",
+          data: mainAction.data,
+          links: { next },
+        };
+        return convertAction(
+          synthetic,
+          metrics,
+          flowSchemaType,
+          templateResolver,
+          account,
+          warnings,
+          placeholderTemplates,
+          state,
+        );
+      }
+      // Unexpected ab-test shape — fall through to drop policy below.
+      warnings.push({
+        kind: "unsupported-action",
+        actionId: id,
+        message: `ab-test action ${id} has no embedded send-email main_action — dropped`,
+      });
+      return dropAction(terminate(next, state));
+    }
+
+    // Drop policy: actions with no Redo equivalent that would otherwise leave
+    // a "TODO" WAIT stub for the merchant to clean up. Re-stitch chain past
+    // them using the drop sentinel.
     case "update-profile":
     case "list-update":
     case "target-date":
@@ -390,16 +460,10 @@ async function convertAction(
       warnings.push({
         kind: "unsupported-action",
         actionId: id,
-        message: `action type "${action.type}" is not yet implemented — emitted WAIT stub (0 min) so the chain stays connected`,
+        message: `action type "${action.type}" has no Redo equivalent — dropped, chain re-stitched past it`,
       });
-      // ab-test links through main_action.next; update-profile / list-update
-      // always use plain next. Fall back to either branch pointer if we
-      // encounter an unexpected shape; terminate if all are absent.
-      return skipStub(
-        id,
-        `TODO: ${action.type} (rebuild manually)`,
-        next ?? action.links?.next_if_false ?? action.links?.next_if_true,
-        state,
+      return dropAction(
+        terminate(next ?? action.links?.next_if_false ?? action.links?.next_if_true, state),
       );
     }
   }
@@ -412,6 +476,11 @@ export async function parseFlow(
     teamId: string;
     createdByUserId?: string;
     templateResolver?: TemplateResolver | null;
+    /** Klaviyo account for org-variable substitution in subject + preview
+     *  text on flow-attached templates. Same role as the account in
+     *  exportTemplateFromHtml; passed through here because flow's
+     *  subject_line override happens after the resolver returns. */
+    account?: KlaviyoAccount | null;
     /** When provided, bypass auto-resolution and use this trigger. Caller
      *  uses this to recover from an "unresolvable trigger" skip by asking
      *  the user to pick a Redo trigger and re-running parseFlow. */
@@ -470,17 +539,64 @@ export async function parseFlow(
   };
 
   const steps: Step[] = [triggerStep];
+  // {droppedActionId → its replacement target} so we can re-stitch chain
+  // pointers in a post-pass. Resolved transitively: if A drops to B and B
+  // drops to C, references to A become C.
+  const dropRedirects = new Map<string, string>();
   for (const action of defn?.actions ?? []) {
-    const step = await convertAction(
+    const result = await convertAction(
       action,
       metrics,
       resolution.schemaType,
       opts.templateResolver ?? null,
+      opts.account ?? null,
       warnings,
       placeholderTemplates,
       state,
     );
-    if (step) steps.push(step);
+    if (!result) continue;
+    if (isDropResult(result)) {
+      dropRedirects.set(action.id, result.redirectTo);
+      continue;
+    }
+    steps.push(result);
+  }
+
+  // Resolve transitive drops so a single hop replacement always lands on a
+  // surviving step id. Bounded loop in case of pathological data.
+  const resolveRedirect = (id: string): string => {
+    let cur = id;
+    for (let i = 0; i < 32 && dropRedirects.has(cur); i++) {
+      cur = dropRedirects.get(cur)!;
+    }
+    return cur;
+  };
+
+  // Re-stitch every pointer field on every surviving step. Without this the
+  // chain would still reference the dropped ids, leaving disconnected steps
+  // in Redo's flow editor.
+  for (const step of steps) {
+    const s = step as any;
+    if (typeof s.nextId === "string" && dropRedirects.has(s.nextId)) {
+      s.nextId = resolveRedirect(s.nextId);
+    }
+    if (typeof s.nextTrueId === "string" && dropRedirects.has(s.nextTrueId)) {
+      s.nextTrueId = resolveRedirect(s.nextTrueId);
+    }
+    if (typeof s.nextFalseId === "string" && dropRedirects.has(s.nextFalseId)) {
+      s.nextFalseId = resolveRedirect(s.nextFalseId);
+    }
+    if (Array.isArray(s.variants)) {
+      for (const v of s.variants) {
+        if (typeof v.nextId === "string" && dropRedirects.has(v.nextId)) {
+          v.nextId = resolveRedirect(v.nextId);
+        }
+      }
+    }
+  }
+  // Trigger step's nextId also needs re-stitching (it points at firstActionId).
+  if (typeof triggerStep.nextId === "string" && dropRedirects.has(triggerStep.nextId)) {
+    triggerStep.nextId = resolveRedirect(triggerStep.nextId);
   }
 
   // Append the shared terminal step if any branch/pointer pointed at it.
