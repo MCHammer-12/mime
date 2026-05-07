@@ -1146,7 +1146,18 @@ async function runImport(
             });
           } catch (e: any) {
             flowImportFail++;
-            emit({ kind: "fail", id: flowId, name: flowName, error: `parse flow: ${e.message ?? e}` });
+            const errMsg = e?.message ?? String(e);
+            emit({
+              kind: "flow_failed",
+              id: flowId,
+              name: flowName,
+              klaviyoStatus,
+              error: `parse flow: ${errMsg}`,
+              warningList: [],
+              parsedAutomation: null,
+              klaviyoFlow: flowDetail,
+            });
+            emit({ kind: "fail", id: flowId, name: flowName, error: `parse flow: ${errMsg}` });
             continue;
           }
           // Recoverable skip: the auto-resolver couldn't map this Klaviyo
@@ -1304,7 +1315,25 @@ async function runImport(
             });
           } catch (e: any) {
             flowImportFail++;
-            emit({ kind: "fail", id: flowId, name: flowName, error: `import: ${e.message ?? e}` });
+            const errMsg = e?.message ?? String(e);
+            // Capture EVERYTHING needed to debug a failed import in the
+            // troubleshoot bundle: the parsed automation we tried to send,
+            // the Klaviyo source flow, and the full error string. Without
+            // this the bundle for a failed flow has nothing useful in it.
+            // Emit a `flow_failed` alongside the user-facing `fail` so the
+            // bundle builder can find the data; the `fail` event drives the
+            // UI's red-row indicator and stays compact.
+            emit({
+              kind: "flow_failed",
+              id: flowId,
+              name: flowName,
+              klaviyoStatus,
+              error: errMsg,
+              warningList: parsed.warnings,
+              parsedAutomation: parsed.automation,
+              klaviyoFlow: flowDetail,
+            });
+            emit({ kind: "fail", id: flowId, name: flowName, error: `import: ${errMsg}` });
           }
         }
       }
