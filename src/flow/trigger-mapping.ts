@@ -41,6 +41,51 @@ const METRIC_NAME_MAP: Record<
   "warranty registration": { key: MarketingTriggerKey.WARRANTY_REGISTRATION, schemaType: SchemaType.MARKETING_WARRANTY_REGISTRATION, category: "Marketing" },
   "placed order":       { key: OrderTrackingTriggerKey.ORDER_CREATED,  schemaType: SchemaType.ORDER_TRACKING,                 category: "Order tracking" },
   "ordered product":    { key: OrderTrackingTriggerKey.ORDER_CREATED,  schemaType: SchemaType.ORDER_TRACKING,                 category: "Order tracking" },
+
+  // ─── Yotpo Loyalty (Klaviyo integration) ──────────────────────────
+  // Yotpo's Klaviyo integration emits events under both the legacy "Swell"
+  // brand name and the current "Loyalty" name; merchant accounts vintage
+  // varies, so we map both prefixes to the same Redo trigger. Source
+  // names compiled from Yotpo Loyalty's Klaviyo integration documentation;
+  // confirm exact names via `extract-metrics.ts` for any new Yotpo merchant.
+  "yotpo swell loyalty: tier reached":     { key: SchemaType.YOTPO_LOYALTY_TIER_EARNED,           schemaType: SchemaType.YOTPO_LOYALTY_TIER_EARNED,           category: "Integration" },
+  "yotpo loyalty: tier reached":           { key: SchemaType.YOTPO_LOYALTY_TIER_EARNED,           schemaType: SchemaType.YOTPO_LOYALTY_TIER_EARNED,           category: "Integration" },
+  "yotpo loyalty tier earned":             { key: SchemaType.YOTPO_LOYALTY_TIER_EARNED,           schemaType: SchemaType.YOTPO_LOYALTY_TIER_EARNED,           category: "Integration" },
+  "yotpo swell loyalty: tier downgraded":  { key: SchemaType.YOTPO_LOYALTY_TIER_LOST,             schemaType: SchemaType.YOTPO_LOYALTY_TIER_LOST,             category: "Integration" },
+  "yotpo loyalty: tier downgraded":        { key: SchemaType.YOTPO_LOYALTY_TIER_LOST,             schemaType: SchemaType.YOTPO_LOYALTY_TIER_LOST,             category: "Integration" },
+  "yotpo loyalty tier lost":               { key: SchemaType.YOTPO_LOYALTY_TIER_LOST,             schemaType: SchemaType.YOTPO_LOYALTY_TIER_LOST,             category: "Integration" },
+  "yotpo swell loyalty: earned points":    { key: SchemaType.YOTPO_LOYALTY_POINTS_EARNED,         schemaType: SchemaType.YOTPO_LOYALTY_POINTS_EARNED,         category: "Integration" },
+  "yotpo loyalty: earned points":          { key: SchemaType.YOTPO_LOYALTY_POINTS_EARNED,         schemaType: SchemaType.YOTPO_LOYALTY_POINTS_EARNED,         category: "Integration" },
+  "yotpo loyalty points earned":           { key: SchemaType.YOTPO_LOYALTY_POINTS_EARNED,         schemaType: SchemaType.YOTPO_LOYALTY_POINTS_EARNED,         category: "Integration" },
+  "yotpo swell loyalty: points expiration reminder": { key: SchemaType.YOTPO_LOYALTY_EXPIRATION_REMINDER, schemaType: SchemaType.YOTPO_LOYALTY_EXPIRATION_REMINDER, category: "Integration" },
+  "yotpo loyalty: points expiration reminder":       { key: SchemaType.YOTPO_LOYALTY_EXPIRATION_REMINDER, schemaType: SchemaType.YOTPO_LOYALTY_EXPIRATION_REMINDER, category: "Integration" },
+  "yotpo loyalty expiration reminder":               { key: SchemaType.YOTPO_LOYALTY_EXPIRATION_REMINDER, schemaType: SchemaType.YOTPO_LOYALTY_EXPIRATION_REMINDER, category: "Integration" },
+  "yotpo swell loyalty: points reminder":  { key: SchemaType.YOTPO_LOYALTY_POINTS_REMINDER,       schemaType: SchemaType.YOTPO_LOYALTY_POINTS_REMINDER,       category: "Integration" },
+  "yotpo loyalty: points reminder":        { key: SchemaType.YOTPO_LOYALTY_POINTS_REMINDER,       schemaType: SchemaType.YOTPO_LOYALTY_POINTS_REMINDER,       category: "Integration" },
+  "yotpo loyalty points reminder":         { key: SchemaType.YOTPO_LOYALTY_POINTS_REMINDER,       schemaType: SchemaType.YOTPO_LOYALTY_POINTS_REMINDER,       category: "Integration" },
+  "yotpo swell loyalty: redemption reminder": { key: SchemaType.YOTPO_LOYALTY_REDEMPTION_REMINDER, schemaType: SchemaType.YOTPO_LOYALTY_REDEMPTION_REMINDER, category: "Integration" },
+  "yotpo loyalty: redemption reminder":       { key: SchemaType.YOTPO_LOYALTY_REDEMPTION_REMINDER, schemaType: SchemaType.YOTPO_LOYALTY_REDEMPTION_REMINDER, category: "Integration" },
+  "yotpo loyalty redemption reminder":        { key: SchemaType.YOTPO_LOYALTY_REDEMPTION_REMINDER, schemaType: SchemaType.YOTPO_LOYALTY_REDEMPTION_REMINDER, category: "Integration" },
+  "yotpo swell loyalty: redemption created":  { key: SchemaType.YOTPO_LOYALTY_REDEMPTION_CREATED, schemaType: SchemaType.YOTPO_LOYALTY_REDEMPTION_CREATED, category: "Integration" },
+  "yotpo loyalty: redemption created":        { key: SchemaType.YOTPO_LOYALTY_REDEMPTION_CREATED, schemaType: SchemaType.YOTPO_LOYALTY_REDEMPTION_CREATED, category: "Integration" },
+  "yotpo loyalty redemption created":         { key: SchemaType.YOTPO_LOYALTY_REDEMPTION_CREATED, schemaType: SchemaType.YOTPO_LOYALTY_REDEMPTION_CREATED, category: "Integration" },
+  "yotpo swell loyalty: referral completed":  { key: SchemaType.YOTPO_LOYALTY_REFERRAL_COMPLETED, schemaType: SchemaType.YOTPO_LOYALTY_REFERRAL_COMPLETED, category: "Integration" },
+  "yotpo loyalty: referral completed":        { key: SchemaType.YOTPO_LOYALTY_REFERRAL_COMPLETED, schemaType: SchemaType.YOTPO_LOYALTY_REFERRAL_COMPLETED, category: "Integration" },
+  "yotpo loyalty referral completed":         { key: SchemaType.YOTPO_LOYALTY_REFERRAL_COMPLETED, schemaType: SchemaType.YOTPO_LOYALTY_REFERRAL_COMPLETED, category: "Integration" },
+  "yotpo swell loyalty: referral shared":     { key: SchemaType.YOTPO_LOYALTY_REFERRAL_SHARED,    schemaType: SchemaType.YOTPO_LOYALTY_REFERRAL_SHARED,    category: "Integration" },
+  "yotpo loyalty: referral shared":           { key: SchemaType.YOTPO_LOYALTY_REFERRAL_SHARED,    schemaType: SchemaType.YOTPO_LOYALTY_REFERRAL_SHARED,    category: "Integration" },
+  "yotpo loyalty referral shared":            { key: SchemaType.YOTPO_LOYALTY_REFERRAL_SHARED,    schemaType: SchemaType.YOTPO_LOYALTY_REFERRAL_SHARED,    category: "Integration" },
+  "yotpo swell loyalty: customer birthday":   { key: SchemaType.YOTPO_LOYALTY_CUSTOMER_BIRTHDAY,  schemaType: SchemaType.YOTPO_LOYALTY_CUSTOMER_BIRTHDAY,  category: "Integration" },
+  "yotpo loyalty: customer birthday":         { key: SchemaType.YOTPO_LOYALTY_CUSTOMER_BIRTHDAY,  schemaType: SchemaType.YOTPO_LOYALTY_CUSTOMER_BIRTHDAY,  category: "Integration" },
+  "yotpo loyalty customer birthday":          { key: SchemaType.YOTPO_LOYALTY_CUSTOMER_BIRTHDAY,  schemaType: SchemaType.YOTPO_LOYALTY_CUSTOMER_BIRTHDAY,  category: "Integration" },
+  "yotpo swell loyalty: customer opt in":     { key: SchemaType.YOTPO_LOYALTY_OPT_IN,             schemaType: SchemaType.YOTPO_LOYALTY_OPT_IN,             category: "Integration" },
+  "yotpo loyalty: customer opt in":           { key: SchemaType.YOTPO_LOYALTY_OPT_IN,             schemaType: SchemaType.YOTPO_LOYALTY_OPT_IN,             category: "Integration" },
+  "yotpo loyalty opt in":                     { key: SchemaType.YOTPO_LOYALTY_OPT_IN,             schemaType: SchemaType.YOTPO_LOYALTY_OPT_IN,             category: "Integration" },
+
+  // ─── Yotpo Reviews (Klaviyo integration) ──────────────────────────
+  "submitted review":      { key: SchemaType.YOTPO_REVIEW_CREATED, schemaType: SchemaType.YOTPO_REVIEW_CREATED, category: "Integration" },
+  "yotpo review created":  { key: SchemaType.YOTPO_REVIEW_CREATED, schemaType: SchemaType.YOTPO_REVIEW_CREATED, category: "Integration" },
+  "yotpo: submitted review": { key: SchemaType.YOTPO_REVIEW_CREATED, schemaType: SchemaType.YOTPO_REVIEW_CREATED, category: "Integration" },
 };
 
 const COMMENTSOLD_VARIANTS: Record<

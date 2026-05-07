@@ -34,15 +34,60 @@ export enum SchemaType {
   REFUND_RETURN_SUBMITTED = "refund_return_submitted",
   EXCHANGE_PROCESSED_WITH_CREDIT = "exchange_processed_with_credit",
   ORDER_TRACKING = "order_tracking",
+  // Yotpo Integration triggers — `key` and `schemaType` strings happen to be
+  // identical for every Yotpo trigger; defined once here and reused as both.
+  // Source: redo/model/src/advanced-flow/integration-triggers.ts.
+  YOTPO_LOYALTY_EXPIRATION_REMINDER = "yotpo_loyalty_expiration_reminder",
+  YOTPO_LOYALTY_POINTS_REMINDER = "yotpo_loyalty_points_reminder",
+  YOTPO_LOYALTY_REDEMPTION_REMINDER = "yotpo_loyalty_redemption_reminder",
+  YOTPO_LOYALTY_REDEMPTION_CREATED = "yotpo_loyalty_redemption_created",
+  YOTPO_LOYALTY_REFERRAL_COMPLETED = "yotpo_loyalty_referral_completed",
+  YOTPO_LOYALTY_REFERRAL_SHARED = "yotpo_loyalty_referral_shared",
+  YOTPO_LOYALTY_CUSTOMER_BIRTHDAY = "yotpo_loyalty_customer_birthday",
+  YOTPO_LOYALTY_OPT_IN = "yotpo_loyalty_opt_in",
+  YOTPO_LOYALTY_TIER_EARNED = "yotpo_loyalty_tier_earned",
+  YOTPO_LOYALTY_TIER_LOST = "yotpo_loyalty_tier_lost",
+  YOTPO_LOYALTY_POINTS_EARNED = "yotpo_loyalty_points_earned",
+  YOTPO_REVIEW_CREATED = "yotpo_review_created",
 }
 
 export enum OrderTrackingTriggerKey {
   ORDER_CREATED = "order_created",
 }
 
-export type FlowCategory = "Marketing" | "Order tracking";
+/**
+ * Integration triggers — Yotpo Loyalty + Yotpo Reviews. Each Klaviyo flow
+ * triggered by a Yotpo metric (when the merchant has Yotpo's Klaviyo
+ * integration enabled) maps to one of these via `METRIC_NAME_MAP`. Per
+ * `redo/model/src/advanced-flow/advanced-flow-db-parser.ts:618-625` the
+ * trigger step has no `eventName` / `triggerSpecificFields` requirements —
+ * just the standard base trigger fields plus `category: "Integration"`.
+ *
+ * The `key` and `schemaType` enum values share the same string per trigger,
+ * so the same enum doubles as both. Defined inline on `SchemaType` above
+ * for that reason; this type alias is just for readability at call sites
+ * that emit Integration triggers specifically.
+ */
+export type IntegrationTriggerKey =
+  | SchemaType.YOTPO_LOYALTY_EXPIRATION_REMINDER
+  | SchemaType.YOTPO_LOYALTY_POINTS_REMINDER
+  | SchemaType.YOTPO_LOYALTY_REDEMPTION_REMINDER
+  | SchemaType.YOTPO_LOYALTY_REDEMPTION_CREATED
+  | SchemaType.YOTPO_LOYALTY_REFERRAL_COMPLETED
+  | SchemaType.YOTPO_LOYALTY_REFERRAL_SHARED
+  | SchemaType.YOTPO_LOYALTY_CUSTOMER_BIRTHDAY
+  | SchemaType.YOTPO_LOYALTY_OPT_IN
+  | SchemaType.YOTPO_LOYALTY_TIER_EARNED
+  | SchemaType.YOTPO_LOYALTY_TIER_LOST
+  | SchemaType.YOTPO_LOYALTY_POINTS_EARNED
+  | SchemaType.YOTPO_REVIEW_CREATED;
 
-export type TriggerKey = MarketingTriggerKey | OrderTrackingTriggerKey;
+export type FlowCategory = "Marketing" | "Order tracking" | "Integration";
+
+export type TriggerKey =
+  | MarketingTriggerKey
+  | OrderTrackingTriggerKey
+  | IntegrationTriggerKey;
 
 export enum MarketingTriggerKey {
   EMAIL_SIGNUP = "email_signup",

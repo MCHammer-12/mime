@@ -152,6 +152,119 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
       category: "Marketing",
     },
   },
+
+  // ─── Yotpo Integration triggers ──────────────────────────────────
+  // Yotpo Loyalty + Yotpo Reviews. Each is its own (key, schemaType)
+  // pair — strings happen to match. category is "Integration" not
+  // "Marketing" so the imported flow lands in Redo's Integration tab.
+  {
+    value: "yotpo_loyalty_tier_earned",
+    label: "Yotpo loyalty tier earned",
+    resolution: {
+      key: SchemaType.YOTPO_LOYALTY_TIER_EARNED,
+      schemaType: SchemaType.YOTPO_LOYALTY_TIER_EARNED,
+      category: "Integration",
+    },
+  },
+  {
+    value: "yotpo_loyalty_tier_lost",
+    label: "Yotpo loyalty tier lost",
+    resolution: {
+      key: SchemaType.YOTPO_LOYALTY_TIER_LOST,
+      schemaType: SchemaType.YOTPO_LOYALTY_TIER_LOST,
+      category: "Integration",
+    },
+  },
+  {
+    value: "yotpo_loyalty_points_earned",
+    label: "Yotpo loyalty points earned",
+    resolution: {
+      key: SchemaType.YOTPO_LOYALTY_POINTS_EARNED,
+      schemaType: SchemaType.YOTPO_LOYALTY_POINTS_EARNED,
+      category: "Integration",
+    },
+  },
+  {
+    value: "yotpo_loyalty_expiration_reminder",
+    label: "Yotpo loyalty expiration reminder",
+    resolution: {
+      key: SchemaType.YOTPO_LOYALTY_EXPIRATION_REMINDER,
+      schemaType: SchemaType.YOTPO_LOYALTY_EXPIRATION_REMINDER,
+      category: "Integration",
+    },
+  },
+  {
+    value: "yotpo_loyalty_points_reminder",
+    label: "Yotpo loyalty points reminder",
+    resolution: {
+      key: SchemaType.YOTPO_LOYALTY_POINTS_REMINDER,
+      schemaType: SchemaType.YOTPO_LOYALTY_POINTS_REMINDER,
+      category: "Integration",
+    },
+  },
+  {
+    value: "yotpo_loyalty_redemption_reminder",
+    label: "Yotpo loyalty redemption reminder",
+    resolution: {
+      key: SchemaType.YOTPO_LOYALTY_REDEMPTION_REMINDER,
+      schemaType: SchemaType.YOTPO_LOYALTY_REDEMPTION_REMINDER,
+      category: "Integration",
+    },
+  },
+  {
+    value: "yotpo_loyalty_redemption_created",
+    label: "Yotpo loyalty redemption created",
+    resolution: {
+      key: SchemaType.YOTPO_LOYALTY_REDEMPTION_CREATED,
+      schemaType: SchemaType.YOTPO_LOYALTY_REDEMPTION_CREATED,
+      category: "Integration",
+    },
+  },
+  {
+    value: "yotpo_loyalty_referral_completed",
+    label: "Yotpo loyalty referral completed",
+    resolution: {
+      key: SchemaType.YOTPO_LOYALTY_REFERRAL_COMPLETED,
+      schemaType: SchemaType.YOTPO_LOYALTY_REFERRAL_COMPLETED,
+      category: "Integration",
+    },
+  },
+  {
+    value: "yotpo_loyalty_referral_shared",
+    label: "Yotpo loyalty referral shared",
+    resolution: {
+      key: SchemaType.YOTPO_LOYALTY_REFERRAL_SHARED,
+      schemaType: SchemaType.YOTPO_LOYALTY_REFERRAL_SHARED,
+      category: "Integration",
+    },
+  },
+  {
+    value: "yotpo_loyalty_customer_birthday",
+    label: "Yotpo loyalty customer birthday",
+    resolution: {
+      key: SchemaType.YOTPO_LOYALTY_CUSTOMER_BIRTHDAY,
+      schemaType: SchemaType.YOTPO_LOYALTY_CUSTOMER_BIRTHDAY,
+      category: "Integration",
+    },
+  },
+  {
+    value: "yotpo_loyalty_opt_in",
+    label: "Yotpo loyalty opt in",
+    resolution: {
+      key: SchemaType.YOTPO_LOYALTY_OPT_IN,
+      schemaType: SchemaType.YOTPO_LOYALTY_OPT_IN,
+      category: "Integration",
+    },
+  },
+  {
+    value: "yotpo_review_created",
+    label: "Yotpo review created",
+    resolution: {
+      key: SchemaType.YOTPO_REVIEW_CREATED,
+      schemaType: SchemaType.YOTPO_REVIEW_CREATED,
+      category: "Integration",
+    },
+  },
 ];
 
 export function findOptionByValue(value: string): MarketingTriggerOption | null {
