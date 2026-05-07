@@ -51,6 +51,16 @@ interface FlowImportedEventPayload {
   parsedAutomation?: unknown;
 }
 
+interface FlowFailedEventPayload {
+  id?: string;
+  name?: string;
+  klaviyoStatus?: string;
+  error?: string;
+  warningList?: unknown[];
+  parsedAutomation?: unknown;
+  klaviyoFlow?: unknown;
+}
+
 /**
  * Write the bundle to res. Caller is responsible for HTTP status + headers
  * before calling (so an error before the first write can still surface as
@@ -152,6 +162,17 @@ function lastFlowImportedFor(job: JobState, flowId: string): FlowImportedEventPa
   return null;
 }
 
+function lastFlowFailedFor(job: JobState, flowId: string): FlowFailedEventPayload | null {
+  for (let i = job.events.length - 1; i >= 0; i--) {
+    const ev = job.events[i];
+    if (ev.kind === "flow_failed") {
+      const p = ev.payload as FlowFailedEventPayload;
+      if (p.id === flowId) return p;
+    }
+  }
+  return null;
+}
+
 function addTemplateToBundle(
   job: JobState,
   templateId: string,
@@ -201,6 +222,8 @@ function addFlowToBundle(
     archive.file(join(dir, f), { name: `${folder}/klaviyo-flow.json` });
   }
 
+  // Successful import path: flow_imported has the parsed automation tree
+  // and the per-flow warnings.
   const flowEvent = lastFlowImportedFor(job, flowId);
   if (flowEvent) {
     const parseResult = {
@@ -213,6 +236,34 @@ function addFlowToBundle(
     archive.append(JSON.stringify(parseResult, null, 2), {
       name: `${folder}/parse-result.json`,
     });
+    return;
+  }
+
+  // Failed import path: flow_failed carries the parsed automation we tried
+  // to send + the Klaviyo source flow + the full error string. Without this
+  // the bundle for a failed flow has nothing useful in it (was only the
+  // case for Replit-deployed migrate-server, where the migrations/<merchant>
+  // dir on disk is empty).
+  const failedEvent = lastFlowFailedFor(job, flowId);
+  if (failedEvent) {
+    const parseResult = {
+      status: "failed",
+      error: failedEvent.error ?? null,
+      klaviyoStatus: failedEvent.klaviyoStatus ?? null,
+      warnings: failedEvent.warningList ?? [],
+      parsedAutomation: failedEvent.parsedAutomation ?? null,
+    };
+    archive.append(JSON.stringify(parseResult, null, 2), {
+      name: `${folder}/parse-result.json`,
+    });
+    if (failedEvent.klaviyoFlow) {
+      archive.append(JSON.stringify(failedEvent.klaviyoFlow, null, 2), {
+        name: `${folder}/klaviyo-flow.json`,
+      });
+    }
+    if (failedEvent.error) {
+      archive.append(failedEvent.error, { name: `${folder}/error.txt` });
+    }
   }
 }
 
