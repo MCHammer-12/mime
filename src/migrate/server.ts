@@ -1076,6 +1076,11 @@ async function runImport(
                   jwt,
                   serverBase,
                   account,
+                  // Standalone templates land in the merchant's "Saved
+                  // templates" library tab, NOT "Previous emails". Per
+                  // redoapp's split (SavedEmailTemplate vs EmailTemplate
+                  // collections), this is just a different RPC.
+                  asSavedTemplate: true,
                   onProgress: (ev: ImportProgressEvent) => {
                     if (ev.kind === "filter_created") {
                       emit({ kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
@@ -1468,6 +1473,11 @@ async function runImport(
                   jwt,
                   serverBase: bodyRedoServerBase,
                   account,
+                  // Campaigns are standalone email sends; they belong in
+                  // the merchant's "Saved templates" library, not in the
+                  // "Previous emails" timeline of past sends. Same RPC
+                  // switch as the standalone template-import phase above.
+                  asSavedTemplate: true,
                   onProgress: (ev: ImportProgressEvent) => {
                     if (ev.kind === "filter_created") {
                       emit({

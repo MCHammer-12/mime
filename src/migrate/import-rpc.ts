@@ -137,14 +137,48 @@ export interface ImportResult {
 
 // ─── Template import ───────────────────────────────────────────────────────
 
+export interface ImportTemplateOptions extends ImportOptions {
+  /**
+   * When true, write the template into Redo's SavedEmailTemplate collection
+   * (it shows up in the "Saved templates" library tab). When false (default),
+   * write into EmailTemplate (shows up in "Previous emails").
+   *
+   * Use `true` for standalone template imports + campaign imports — the
+   * merchant browses these as a library. Use `false` (default) for flow-
+   * attached template placeholders — flow steps reference EmailTemplate `_id`s
+   * by value, and a SavedEmailTemplate isn't a valid reference target.
+   *
+   * Source: redoapp `redo/marketing/db/util/src/saved-email-template-repo.ts`
+   * + `redo/merchant/marketing/rpc/src/schema/saved-templates/...`.
+   */
+  asSavedTemplate?: boolean;
+}
+
 export async function importTemplateRpc(
   template: Record<string, any>,
-  options: ImportOptions,
+  options: ImportTemplateOptions,
 ): Promise<ImportResult> {
   const prepared = await preparePayload(template, options);
   let created: any;
   try {
-    created = await postMarketingRpc("createEmailTemplate", prepared, options);
+    if (options.asSavedTemplate) {
+      // Wrap the EmailTemplate inside a SavedEmailTemplate envelope. The
+      // saved-template handler embeds the `template` payload as-is, then
+      // adds `templateName`, `source`, `team`, `lastUsed` etc. on the
+      // outer doc. Source = "saved" places it in the library tab; the
+      // other source values ("forwarded", "uploaded") are filtered out.
+      created = await postMarketingRpc(
+        "createSavedEmailTemplate",
+        {
+          template: prepared,
+          name: String(prepared.name ?? template.name ?? "Imported Template"),
+          source: "saved",
+        },
+        options,
+      );
+    } else {
+      created = await postMarketingRpc("createEmailTemplate", prepared, options);
+    }
   } catch (e: any) {
     options.onProgress?.({
       kind: "template_failed",
