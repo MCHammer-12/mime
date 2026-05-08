@@ -76,7 +76,9 @@ export async function exportTemplateFromHtml(
     reviewItems,
     skippedBlocks,
     bodyBackgroundColor,
-  } = useCodeParser ? parseCodeTemplateHtml(html) : parseKlaviyoHtml(html);
+  } = useCodeParser
+    ? parseCodeTemplateHtml(html)
+    : parseKlaviyoHtml(html, { storeUrl: opts.account?.websiteUrl ?? null });
 
   let sections = rawSections;
   let substitutions: string[] = [];
@@ -116,9 +118,15 @@ export async function exportTemplateFromHtml(
 
   const name = meta.name || "Imported Template";
 
-  // If the template references the `checkoutUrl` schema field (via image
-  // clickthrough or button link), it's an abandoned-checkout flow email.
-  // Set schemaType so Redo can resolve the dynamic variable.
+  // Historically: if any block referenced the `checkoutUrl` dynamic var,
+  // we marked the template as `marketing_checkout_abandonment` so the
+  // schema-instance resolver knew what to do at send time. We no longer
+  // emit `checkoutUrl` dynamic vars (Redo eng confirmed they resolve to
+  // a Storefront URL that's silently null on cart-fetch failure — see
+  // url-mapping.ts), so this never fires anymore. Templates land as
+  // plain `marketing_email`, which is the more reusable schema. Left
+  // the helper in place in case product blocks reintroduce
+  // `clickthroughSchemaFieldName: "checkoutUrl"` later.
   const schemaType = referencesCheckoutUrl(sections)
     ? "marketing_checkout_abandonment"
     : "marketing_email";

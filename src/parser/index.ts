@@ -50,6 +50,13 @@ export interface ParseContext {
   unsupportedFeatures: UnsupportedFeature[];
   reviewItems: ReviewItem[];
   skippedBlocks: SkippedBlock[];
+  /** Merchant's website URL (e.g. https://defiancebeauty.com), no trailing
+   *  slash. Used by url-mapping to generate static /cart links — Redo's
+   *  schemaInstance.checkoutUrl resolves to a Storefront cart URL that is
+   *  silently null when the cart fetch fails (no Storefront token, etc.),
+   *  and a hidden button is worse than a generic /cart link. Confirmed
+   *  with Redo eng 2026-05-08. */
+  storeUrl?: string | null;
 }
 
 export interface ParseResult extends ParseContext {
@@ -57,7 +64,19 @@ export interface ParseResult extends ParseContext {
   bodyBackgroundColor: string;
 }
 
-export function parseKlaviyoHtml(html: string): ParseResult {
+/** Strip trailing slashes; reject obviously-empty / non-http URLs. The
+ *  url-mapping fallback only fires when this returns a non-empty string. */
+function normalizeStoreUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = String(raw).trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(trimmed)) return null;
+  return trimmed;
+}
+
+export function parseKlaviyoHtml(
+  html: string,
+  opts: { storeUrl?: string | null } = {},
+): ParseResult {
   resetBlockCounter();
   const $ = cheerio.load(html);
   const ctx: ParseContext = {
@@ -65,6 +84,7 @@ export function parseKlaviyoHtml(html: string): ParseResult {
     unsupportedFeatures: [],
     reviewItems: [],
     skippedBlocks: [],
+    storeUrl: normalizeStoreUrl(opts.storeUrl),
   };
   const sections: Section[] = [];
 
