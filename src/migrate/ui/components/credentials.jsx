@@ -41,26 +41,15 @@ function CredentialsBar({ creds, onChange }) {
     <div className="px-4 py-3 border-b border-[#21262d] bg-[#010409]">
       <div className="grid grid-cols-[1fr_1fr_180px_180px_auto] gap-3 items-end">
         <Field label="Klaviyo API key" hint="pk_*">
-          <div className="relative">
-            <input
-              type={show.klaviyo ? "text" : "password"}
-              value={creds.klaviyoKey}
-              onChange={(e) => onChange({ ...creds, klaviyoKey: e.target.value })}
-              placeholder="pk_abc123def456…"
-              className={inputClass + " pr-7"}
-              spellCheck={false}
-              autoComplete="off"
-            />
-            <button
-              onClick={() => setShow(s => ({ ...s, klaviyo: !s.klaviyo }))}
-              className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[#6e7681] hover:text-[#e6edf3]"
-              tabIndex={-1}
-            >
-              {show.klaviyo
-                ? <Icon.eyeOff width="14" height="14"/>
-                : <Icon.eye width="14" height="14"/>}
-            </button>
-          </div>
+          <input
+            type="text"
+            value={creds.klaviyoKey}
+            onChange={(e) => onChange({ ...creds, klaviyoKey: e.target.value })}
+            placeholder="pk_abc123def456…"
+            className={inputClass}
+            spellCheck={false}
+            autoComplete="off"
+          />
         </Field>
         <Field label="Redo JWT">
           <div className="relative">
