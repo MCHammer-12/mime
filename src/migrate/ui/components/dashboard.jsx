@@ -2,7 +2,7 @@
 
 const { useState: useSD } = React;
 
-function Dashboard({ stores, jobs, onOpenStore, onAddStore, onDeleteStore }) {
+function Dashboard({ stores, jobs, onOpenStore, onAddStore, onDeleteStore, onEditStore }) {
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="max-w-[1200px] mx-auto px-8 py-8">
@@ -29,6 +29,7 @@ function Dashboard({ stores, jobs, onOpenStore, onAddStore, onDeleteStore }) {
                   jobs={storeJobs}
                   onClick={() => onOpenStore(store.id)}
                   onDelete={onDeleteStore ? () => onDeleteStore(store.id) : null}
+                  onEdit={onEditStore ? () => onEditStore(store.id) : null}
                 />
               );
             })}
@@ -71,7 +72,7 @@ function GlobalJobStatus({ jobs }) {
   );
 }
 
-function StoreCard({ store, jobs, onClick, onDelete }) {
+function StoreCard({ store, jobs, onClick, onDelete, onEdit }) {
   const running = jobs.filter(j => j.status === "running").length;
   const completed = jobs.filter(j => j.status === "complete").length;
   const failed = jobs.filter(j => j.status === "partial" || j.status === "canceled").length;
@@ -90,6 +91,15 @@ function StoreCard({ store, jobs, onClick, onDelete }) {
           : "border-[#21262d] hover:border-[#30363d]")
       }
     >
+      {onEdit && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onEdit(); }}
+          title="Edit credentials (paste fresh JWT or rotate Klaviyo key)"
+          className="absolute top-2 right-9 w-6 h-6 flex items-center justify-center rounded-[4px] text-[#6e7681] opacity-0 group-hover:opacity-100 hover:bg-[#21262d] hover:text-[#388bfd] transition-opacity"
+        >
+          <Icon.pencil width="12" height="12"/>
+        </button>
+      )}
       {onDelete && (
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}

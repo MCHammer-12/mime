@@ -54,6 +54,15 @@ import {
   type Severity,
 } from "./jobs.js";
 import { streamBundle, type BundleItemRequest } from "./bundle.js";
+import {
+  createStore,
+  deleteStore,
+  getStoreById,
+  getStoreBySlug,
+  listStores,
+  toSummary,
+  updateStore,
+} from "./stores.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
 const DEFAULT_REDOAPP_DIR = join(homedir(), "code/redoapp");
@@ -1838,6 +1847,177 @@ async function handleJobBundle(
   }
 }
 
+// ─── API: /api/stores — server-side merchant credential store ────────────
+// Replaces the browser-localStorage persistence so (a) Claude can run
+// resolver diagnostics autonomously, (b) keys outlive a browser, (c) the
+// JWT can be rotated in one place when it expires. See src/migrate/stores.ts.
+
+async function handleStoresList(_req: IncomingMessage, res: ServerResponse) {
+  if (!isDbEnabled()) return json(res, 200, { stores: [] });
+  try {
+    const records = await listStores();
+    json(res, 200, { stores: records.map(toSummary) });
+  } catch (e: any) {
+    json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+async function handleStoreGet(res: ServerResponse, id: string) {
+  if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
+  try {
+    const rec = await getStoreById(id);
+    if (!rec) return json(res, 404, { error: `store ${id} not found` });
+    // Returns the full record including unmasked keys — that's the whole
+    // point: the UI's edit form populates from this, and the debug
+    // endpoint resolves keys server-side.
+    json(res, 200, { store: rec });
+  } catch (e: any) {
+    json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+async function handleStoreCreate(req: IncomingMessage, res: ServerResponse) {
+  if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
+  const body = await readJsonBody(req);
+  const name = String(body.name ?? "").trim();
+  const merchantSlug = String(body.merchantSlug ?? "").trim();
+  const klaviyoKey = String(body.klaviyoKey ?? "").trim();
+  const storeId = String(body.storeId ?? "").trim();
+  const redoJwt = body.redoJwt ? String(body.redoJwt).trim() : null;
+  const redoServerBase = body.redoServerBase ? String(body.redoServerBase).trim() : null;
+  if (!name || !merchantSlug || !klaviyoKey || !storeId) {
+    return json(res, 400, {
+      error: "name, merchantSlug, klaviyoKey, and storeId required",
+    });
+  }
+  try {
+    const rec = await createStore({
+      name,
+      merchantSlug,
+      klaviyoKey,
+      redoJwt,
+      storeId,
+      redoServerBase,
+    });
+    json(res, 201, { store: rec });
+  } catch (e: any) {
+    // Most likely cause: merchant_slug uniqueness violation. Surface a
+    // 409 so the UI can show "already exists, edit instead?".
+    const msg = e?.message ?? String(e);
+    if (msg.includes("idx_stores_slug") || msg.includes("duplicate key")) {
+      return json(res, 409, { error: `merchantSlug "${merchantSlug}" already exists` });
+    }
+    json(res, 500, { error: msg });
+  }
+}
+
+async function handleStoreUpdate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  id: string,
+) {
+  if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
+  const body = await readJsonBody(req);
+  const patch: Record<string, unknown> = {};
+  // Only forward fields the client explicitly sent — empty strings stay
+  // as empty strings (the JWT field uses "" to clear a stale token).
+  if (typeof body.name === "string") patch.name = body.name.trim();
+  if (typeof body.merchantSlug === "string") patch.merchantSlug = body.merchantSlug.trim();
+  if (typeof body.klaviyoKey === "string") patch.klaviyoKey = body.klaviyoKey.trim();
+  if (typeof body.storeId === "string") patch.storeId = body.storeId.trim();
+  if (typeof body.redoJwt === "string") patch.redoJwt = body.redoJwt.trim() || null;
+  if (typeof body.redoServerBase === "string") {
+    patch.redoServerBase = body.redoServerBase.trim() || null;
+  }
+  try {
+    const rec = await updateStore(id, patch as any);
+    if (!rec) return json(res, 404, { error: `store ${id} not found` });
+    json(res, 200, { store: rec });
+  } catch (e: any) {
+    json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+async function handleStoreDelete(res: ServerResponse, id: string) {
+  if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
+  try {
+    const ok = await deleteStore(id);
+    if (!ok) return json(res, 404, { error: `store ${id} not found` });
+    json(res, 200, { ok: true });
+  } catch (e: any) {
+    json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// ─── API: /api/debug/resolve-template ─────────────────────────────────────
+// Read-only diagnostic: given a stored merchant slug + a Klaviyo template
+// id, run the same resolver path the flow importer uses and return the
+// outcome (typed ResolveFailure on miss, parse counts on hit). Lets Claude
+// triage troubleshoot bundles without a human-in-the-loop JWT/key paste.
+
+async function handleDebugResolveTemplate(
+  req: IncomingMessage,
+  res: ServerResponse,
+) {
+  if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
+  const body = await readJsonBody(req);
+  const merchantSlug = String(body.merchantSlug ?? "").trim();
+  const templateId = String(body.templateId ?? "").trim();
+  if (!merchantSlug || !templateId) {
+    return json(res, 400, { error: "merchantSlug and templateId required" });
+  }
+  try {
+    const store = await getStoreBySlug(merchantSlug);
+    if (!store) {
+      return json(res, 404, { error: `no store with merchantSlug "${merchantSlug}"` });
+    }
+    const account = await fetchAccount(store.klaviyoKey).catch(() => null);
+    const resolver = createTemplateResolver({
+      merchantDir: join(MIME_ROOT, "migrations", merchantSlug),
+      account,
+      skipAi: true,
+      klaviyoApiKey: store.klaviyoKey,
+    });
+    if (!resolver) {
+      return json(res, 200, {
+        merchantSlug,
+        templateId,
+        result: {
+          failure: {
+            reason: "manifest-miss-no-api-key",
+            detail: "no manifest on disk and no API key configured (unexpected — store has a key)",
+          },
+        },
+      });
+    }
+    const result = await resolver.resolve(templateId);
+    if ("failure" in result) {
+      return json(res, 200, {
+        merchantSlug,
+        templateId,
+        result: { failure: result.failure },
+      });
+    }
+    // Don't echo the full template back — the response could be 100s of
+    // KB. A summary is enough to confirm "yes, this resolves cleanly".
+    return json(res, 200, {
+      merchantSlug,
+      templateId,
+      result: {
+        ok: true,
+        sectionCount: Array.isArray(result.template.sections)
+          ? result.template.sections.length
+          : 0,
+        warningCount: result.warnings.length,
+        warnings: result.warnings.slice(0, 20),
+        subject: result.template.subject ?? null,
+      },
+    });
+  } catch (e: any) {
+    json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
 // ─── HTML ──────────────────────────────────────────────────────────────────
 
 const HTML = /* html */ `<!doctype html>
@@ -2510,7 +2690,13 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === "GET" && req.url === "/api/env") {
-      return json(res, 200, { hostedDeploy: IS_HOSTED_DEPLOY, aiAvailable: AI_AVAILABLE });
+      return json(res, 200, {
+        hostedDeploy: IS_HOSTED_DEPLOY,
+        aiAvailable: AI_AVAILABLE,
+        // Tells the UI whether to read/write stores via /api/stores or
+        // fall back to localStorage (local dev without DATABASE_URL).
+        dbEnabled: isDbEnabled(),
+      });
     }
     if (req.method === "POST" && req.url === "/api/templates") {
       return handleTemplates(req, res);
@@ -2535,6 +2721,24 @@ const server = createServer(async (req, res) => {
     }
     // Job-based dashboard endpoints
     const url = req.url ?? "";
+    // Stores CRUD — server-side merchant credentials. Match before the
+    // job routes so /api/stores/:id/... never collides.
+    if (req.method === "GET" && (url === "/api/stores" || url.startsWith("/api/stores?"))) {
+      return handleStoresList(req, res);
+    }
+    if (req.method === "POST" && url === "/api/stores") {
+      return handleStoreCreate(req, res);
+    }
+    const storePath = url.match(/^\/api\/stores\/([^/?]+)(\?.*)?$/);
+    if (storePath) {
+      const sid = storePath[1];
+      if (req.method === "GET") return handleStoreGet(res, sid);
+      if (req.method === "PATCH") return handleStoreUpdate(req, res, sid);
+      if (req.method === "DELETE") return handleStoreDelete(res, sid);
+    }
+    if (req.method === "POST" && url === "/api/debug/resolve-template") {
+      return handleDebugResolveTemplate(req, res);
+    }
     if (req.method === "POST" && url === "/api/jobs") {
       return handleJobCreate(req, res);
     }
