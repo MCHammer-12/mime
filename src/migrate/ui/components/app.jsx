@@ -367,7 +367,9 @@ function App() {
     const hours = Math.ceil((emails * 20) / 60);
     const id = Date.now() + Math.random();
     setToasts(ts => [...ts, { id, hours }]);
-    setTimeout(() => setToasts(ts => ts.filter(t => t.id !== id)), 3000);
+  }, []);
+  const dismissToast = useC((id) => {
+    setToasts(ts => ts.filter(t => t.id !== id));
   }, []);
 
   // ─ Pending needs_input question (single modal at a time) ─
@@ -946,7 +948,7 @@ function App() {
         }}
         onGoDashboard={goDashboard}
       />
-      <CompletionToasts toasts={toasts}/>
+      <CompletionToasts toasts={toasts} onDismiss={dismissToast}/>
 
       <div className="flex flex-1 overflow-hidden">
         {view.screen === "dashboard" ? (
@@ -1035,9 +1037,12 @@ function App() {
 }
 
 // Center-screen toasts that fire on job completion. Stacked vertically
-// when several jobs finish at once. pointer-events:none so they never
-// block clicks on the dashboard underneath.
-function CompletionToasts({ toasts }) {
+// when several jobs finish at once. The wrapper is pointer-events:none so
+// the rest of the dashboard stays clickable through the centered strip;
+// each toast box flips back to pointer-events:auto so its "heck yeah"
+// dismiss button works. Toasts persist until dismissed (no auto-fade-out
+// — the operator is expected to acknowledge each completion).
+function CompletionToasts({ toasts, onDismiss }) {
   if (!toasts || toasts.length === 0) return null;
   return (
     <div
@@ -1048,17 +1053,25 @@ function CompletionToasts({ toasts }) {
         {toasts.map(t => (
           <div
             key={t.id}
-            className="px-5 py-3 rounded-[6px] bg-[#010409] border border-[#FF4405]/60 shadow-2xl text-[14px] text-[#e6edf3]"
-            style={{ animation: "toastFade 3s ease-in-out forwards" }}
+            className="pointer-events-auto px-5 py-3 rounded-[6px] bg-[#010409] border border-[#FF4405]/60 shadow-2xl text-[14px] text-[#e6edf3] flex items-center gap-4"
+            style={{ animation: "toastFadeIn 250ms ease-out both" }}
           >
-            you just did <span className="font-semibold text-[#FF4405] tabular-nums">{t.hours}</span> Nigerian hour{t.hours === 1 ? "" : "s"} of duplication work
+            <span>
+              you just did <span className="font-semibold text-[#FF4405] tabular-nums">{t.hours}</span> Nigerian hour{t.hours === 1 ? "" : "s"} of duplication work
+            </span>
+            <button
+              type="button"
+              onClick={() => onDismiss(t.id)}
+              className="px-3 py-1 rounded-[4px] text-[12px] font-medium bg-[#FF4405] hover:bg-[#FF5a1f] text-white transition-colors"
+            >
+              heck yeah
+            </button>
           </div>
         ))}
       </div>
-      <style>{`@keyframes toastFade {
-        0% { opacity: 0; transform: translateY(10px); }
-        15%, 80% { opacity: 1; transform: translateY(0); }
-        100% { opacity: 0; transform: translateY(-10px); }
+      <style>{`@keyframes toastFadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
       }`}</style>
     </div>
   );
