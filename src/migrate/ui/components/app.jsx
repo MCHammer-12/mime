@@ -367,7 +367,7 @@ function App() {
     const hours = Math.ceil((emails * 20) / 60);
     const id = Date.now() + Math.random();
     setToasts(ts => [...ts, { id, hours }]);
-    setTimeout(() => setToasts(ts => ts.filter(t => t.id !== id)), 5000);
+    setTimeout(() => setToasts(ts => ts.filter(t => t.id !== id)), 3000);
   }, []);
 
   // ─ Pending needs_input question (single modal at a time) ─
@@ -1049,7 +1049,7 @@ function CompletionToasts({ toasts }) {
           <div
             key={t.id}
             className="px-5 py-3 rounded-[6px] bg-[#010409] border border-[#FF4405]/60 shadow-2xl text-[14px] text-[#e6edf3]"
-            style={{ animation: "toastFade 5s ease-in-out forwards" }}
+            style={{ animation: "toastFade 3s ease-in-out forwards" }}
           >
             you just did <span className="font-semibold text-[#FF4405] tabular-nums">{t.hours}</span> Nigerian hour{t.hours === 1 ? "" : "s"} of duplication work
           </div>
@@ -1057,7 +1057,7 @@ function CompletionToasts({ toasts }) {
       </div>
       <style>{`@keyframes toastFade {
         0% { opacity: 0; transform: translateY(10px); }
-        8%, 85% { opacity: 1; transform: translateY(0); }
+        15%, 80% { opacity: 1; transform: translateY(0); }
         100% { opacity: 0; transform: translateY(-10px); }
       }`}</style>
     </div>
