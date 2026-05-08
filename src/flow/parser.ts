@@ -198,7 +198,21 @@ async function convertAction(
       const templateWarnings: string[] = [];
       if (templateResolver && msg.template_id) {
         const resolved = await templateResolver.resolve(msg.template_id);
-        if (resolved) {
+        if ("failure" in resolved) {
+          // Surface the specific reason instead of a generic "not found".
+          // Six identical "not found" warnings on a flow that really hit
+          // six different parser exceptions hides the real bug (see
+          // Goumikids 2026-05-08 troubleshoot bundle).
+          const f = resolved.failure;
+          warnings.push({
+            kind: "requires-review",
+            actionId: id,
+            message: `send-email references Klaviyo template ${msg.template_id} — emitted blank placeholder. Reason: ${f.reason} (${f.detail})`,
+          });
+          templateWarnings.push(
+            `Resolver failed (${f.reason}): ${f.detail}`,
+          );
+        } else {
           fullTemplate = resolved.template;
           templateWarnings.push(...resolved.warnings);
           // Carry through per-step metadata onto the template so the
@@ -218,12 +232,6 @@ async function convertAction(
           if (msg.preview_text) {
             fullTemplate.emailPreview = substituteStringVars(msg.preview_text, subVarCtx);
           }
-        } else {
-          warnings.push({
-            kind: "requires-review",
-            actionId: id,
-            message: `send-email references Klaviyo template ${msg.template_id} but it wasn't found in the merchant's templates-manifest.json — emitted as blank placeholder. Run extract-templates.ts for this merchant.`,
-          });
         }
       }
       placeholderTemplates.push({
@@ -339,7 +347,9 @@ async function convertAction(
         content,
         schemaType: flowSchemaType,
         category: flowCategory,
-        ...(msg.shorten_links === true ? { autoShortenLinks: true } : {}),
+        // Mirror Klaviyo's setting explicitly; Redo's mongoose default is
+        // true, so we have to send `false` on the wire to land off.
+        autoShortenLinks: msg.shorten_links === true,
         ...(msg.image_id ? { smsImageId: String(msg.image_id) } : {}),
         templateWarnings,
       });

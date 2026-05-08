@@ -26,14 +26,33 @@ export interface ResolvedTemplate {
   warnings: string[];
 }
 
+/** Why a resolve() call returned null. Surfaced to the flow parser so each
+ *  blank-fallback placeholder can carry a specific reason instead of the
+ *  generic "not found in manifest" warning. */
+export type ResolveFailureReason =
+  | "manifest-miss-no-api-key"
+  | "manifest-miss-and-api-miss"
+  | "api-error"
+  | "disk-html-missing"
+  | "html-empty"
+  | "parser-threw";
+
+export interface ResolveFailure {
+  reason: ResolveFailureReason;
+  /** Human-readable detail. For api-error / parser-threw, includes the
+   *  underlying error message. Safe to surface in warnings. */
+  detail: string;
+}
+
 export interface TemplateResolver {
   /**
-   * Resolve a Klaviyo template id to a fully-parsed Redo EmailTemplate.
-   * Returns null when the template can't be resolved (missing from the
-   * manifest, HTML file gone, parser threw) — caller falls back to a blank
-   * placeholder and emits its own warning.
+   * Resolve a Klaviyo template id to a fully-parsed Redo EmailTemplate, or
+   * a typed failure describing why it couldn't be resolved. Caller decides
+   * whether to fall back to a blank placeholder and what warning to emit.
    */
-  resolve(klaviyoTemplateId: string): Promise<ResolvedTemplate | null>;
+  resolve(
+    klaviyoTemplateId: string,
+  ): Promise<ResolvedTemplate | { failure: ResolveFailure }>;
 }
 
 /**
@@ -76,17 +95,35 @@ export function createTemplateResolver(opts: {
     if (t.id) byId.set(t.id, t);
   }
 
-  const cache = new Map<string, Promise<ResolvedTemplate | null>>();
+  type ResolverResult = ResolvedTemplate | { failure: ResolveFailure };
+  const cache = new Map<string, Promise<ResolverResult>>();
+
+  type Source = { html: string; meta: TemplateMetadata };
+  type SourceOrFailure = Source | { failure: ResolveFailure };
 
   async function loadFromDisk(
     entry: TemplateManifest["templates"][number],
-  ): Promise<{ html: string; meta: TemplateMetadata } | null> {
-    if (!entry.files?.html) return null;
+  ): Promise<SourceOrFailure> {
+    if (!entry.files?.html) {
+      return {
+        failure: {
+          reason: "disk-html-missing",
+          detail: `manifest entry has no html file path`,
+        },
+      };
+    }
     const htmlPath = entry.files.html;
     const resolvedHtmlPath = existsSync(htmlPath)
       ? htmlPath
       : join(opts.merchantDir, "..", "..", htmlPath);
-    if (!existsSync(resolvedHtmlPath)) return null;
+    if (!existsSync(resolvedHtmlPath)) {
+      return {
+        failure: {
+          reason: "disk-html-missing",
+          detail: `manifest html path does not exist on disk: ${htmlPath}`,
+        },
+      };
+    }
     const html = readFileSync(resolvedHtmlPath, "utf8");
 
     let meta: TemplateMetadata = {
@@ -118,53 +155,106 @@ export function createTemplateResolver(opts: {
 
   async function loadFromApi(
     klaviyoTemplateId: string,
-  ): Promise<{ html: string; meta: TemplateMetadata } | null> {
-    if (!opts.klaviyoApiKey) return null;
+  ): Promise<SourceOrFailure> {
+    if (!opts.klaviyoApiKey) {
+      return {
+        failure: {
+          reason: "manifest-miss-no-api-key",
+          detail: `template ${klaviyoTemplateId} is not in the local manifest and no Klaviyo API key was configured to fetch it`,
+        },
+      };
+    }
+    let res: any;
     try {
-      const res = await klaviyo(
+      res = await klaviyo(
         `/templates/${klaviyoTemplateId}/`,
         opts.klaviyoApiKey,
       );
-      const attrs = res?.data?.attributes ?? {};
-      if (typeof attrs.html !== "string" || attrs.html.length === 0) return null;
+    } catch (e: any) {
       return {
-        html: attrs.html,
-        meta: {
-          name: attrs.name,
-          subject: attrs.name,
-          created: attrs.created,
-          editorType: attrs.editor_type,
+        failure: {
+          reason: "api-error",
+          detail: `Klaviyo /templates/${klaviyoTemplateId}/ failed: ${e?.message ?? String(e)}`,
         },
       };
-    } catch {
-      return null;
     }
+    const attrs = res?.data?.attributes ?? {};
+    if (typeof attrs.html !== "string" || attrs.html.length === 0) {
+      return {
+        failure: {
+          reason: "html-empty",
+          detail: `Klaviyo /templates/${klaviyoTemplateId}/ returned no html (editor_type=${attrs.editor_type ?? "?"})`,
+        },
+      };
+    }
+    return {
+      html: attrs.html,
+      meta: {
+        name: attrs.name,
+        subject: attrs.name,
+        created: attrs.created,
+        editorType: attrs.editor_type,
+      },
+    };
   }
 
   async function resolveUncached(
     klaviyoTemplateId: string,
-  ): Promise<ResolvedTemplate | null> {
+  ): Promise<ResolverResult> {
     // Disk first (fast, offline, deterministic), Klaviyo API fallback for
     // flow-embedded templates that don't appear in the /templates/ listing.
     const diskEntry = byId.get(klaviyoTemplateId);
-    const source = diskEntry
+    const sourceResult = diskEntry
       ? await loadFromDisk(diskEntry)
       : await loadFromApi(klaviyoTemplateId);
-    if (!source) return null;
+    if ("failure" in sourceResult) {
+      // If disk lookup failed AND we have an API key, try the API as a
+      // fallback. This is the common case for flow-embedded templates the
+      // manifest claims to know about but whose HTML file is missing.
+      if (diskEntry && opts.klaviyoApiKey) {
+        const apiResult = await loadFromApi(klaviyoTemplateId);
+        if ("failure" in apiResult) {
+          return {
+            failure: {
+              reason: "manifest-miss-and-api-miss",
+              detail: `${sourceResult.failure.detail}; api fallback: ${apiResult.failure.detail}`,
+            },
+          };
+        }
+        return await parseSource(apiResult);
+      }
+      return sourceResult;
+    }
+    return await parseSource(sourceResult);
+  }
+
+  async function parseSource(source: Source): Promise<ResolverResult> {
     try {
       const result = await exportTemplateFromHtml(source.html, source.meta, {
         account: opts.account,
         skipAi: opts.skipAi,
       });
       return { template: result.template, warnings: result.warnings };
-    } catch {
-      return null;
+    } catch (e: any) {
+      return {
+        failure: {
+          reason: "parser-threw",
+          detail: `exportTemplateFromHtml threw: ${e?.message ?? String(e)}`,
+        },
+      };
     }
   }
 
   return {
     async resolve(klaviyoTemplateId: string) {
-      if (!klaviyoTemplateId) return null;
+      if (!klaviyoTemplateId) {
+        return {
+          failure: {
+            reason: "manifest-miss-no-api-key",
+            detail: `empty template id`,
+          },
+        };
+      }
       if (!cache.has(klaviyoTemplateId)) {
         cache.set(klaviyoTemplateId, resolveUncached(klaviyoTemplateId));
       }

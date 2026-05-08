@@ -12,6 +12,11 @@ const METRIC_TO_ACTIVITY: Record<string, string> = {
   "viewed product":    "viewed-product",
   "added to cart":     "added-product-to-cart",
   "placed order":      "order-placed",
+  // Klaviyo's "Ordered Product" fires once per line item; Redo has no
+  // per-line-item activity, so collapse into the per-order activity.
+  // Conditions like "Ordered Product zero times" still resolve correctly
+  // (zero line items ⇔ zero orders).
+  "ordered product":   "order-placed",
   "started checkout":  "checkout-started",
   "checkout started":  "checkout-started",
   "active on site":    "active-on-site",

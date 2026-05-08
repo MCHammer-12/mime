@@ -1442,13 +1442,16 @@ async function runImport(
             const resolved = campaignTemplateResolver
               ? await campaignTemplateResolver.resolve(tplId)
               : null;
-            if (!resolved) {
+            if (!resolved || "failure" in resolved) {
               variantFailures++;
+              const detail = resolved && "failure" in resolved
+                ? `${resolved.failure.reason}: ${resolved.failure.detail}`
+                : `resolver not configured`;
               emit({
                 kind: "fail",
                 id: `${campaignId}:${m.id}`,
                 name: variantName,
-                error: `could not resolve Klaviyo template ${tplId}`,
+                error: `could not resolve Klaviyo template ${tplId} — ${detail}`,
               });
               continue;
             }
