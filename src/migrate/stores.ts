@@ -24,6 +24,7 @@ export interface StoreRecord {
   redoJwt: string | null;
   storeId: string;
   redoServerBase: string | null;
+  createdBy: string | null;
   createdAt: string;
   updatedAt: string;
   lastImportedAt: string | null;
@@ -43,6 +44,7 @@ export interface StoreSummary {
   klaviyoKeyMasked: string;
   redoJwtMasked: string | null;
   redoServerBase: string | null;
+  createdBy: string | null;
   createdAt: string;
   updatedAt: string;
   lastImportedAt: string | null;
@@ -57,6 +59,7 @@ function rowToRecord(row: any): StoreRecord {
     redoJwt: row.redo_jwt ?? null,
     storeId: row.store_id,
     redoServerBase: row.redo_server_base ?? null,
+    createdBy: row.created_by ?? null,
     createdAt: row.created_at?.toISOString?.() ?? String(row.created_at),
     updatedAt: row.updated_at?.toISOString?.() ?? String(row.updated_at),
     lastImportedAt:
@@ -103,6 +106,7 @@ export function toSummary(rec: StoreRecord): StoreSummary {
     klaviyoKeyMasked: maskKey(rec.klaviyoKey),
     redoJwtMasked: rec.redoJwt ? maskKey(rec.redoJwt) : null,
     redoServerBase: rec.redoServerBase,
+    createdBy: rec.createdBy,
     createdAt: rec.createdAt,
     updatedAt: rec.updatedAt,
     lastImportedAt: rec.lastImportedAt,
@@ -144,6 +148,7 @@ export interface CreateStoreInput {
   redoJwt?: string | null;
   storeId: string;
   redoServerBase?: string | null;
+  createdBy?: string | null;
 }
 
 export async function createStore(
@@ -153,8 +158,8 @@ export async function createStore(
   const id = input.id ?? `str_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const r = await getPool().query(
     `INSERT INTO stores
-       (id, name, merchant_slug, klaviyo_key, redo_jwt, store_id, redo_server_base)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (id, name, merchant_slug, klaviyo_key, redo_jwt, store_id, redo_server_base, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING *`,
     [
       id,
@@ -164,6 +169,7 @@ export async function createStore(
       input.redoJwt ?? null,
       input.storeId,
       input.redoServerBase ?? null,
+      input.createdBy ?? null,
     ],
   );
   return rowToRecord(r.rows[0]);

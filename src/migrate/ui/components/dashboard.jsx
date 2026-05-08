@@ -1,41 +1,83 @@
 // Dashboard — grid of store cards. Shows at-a-glance job status across stores.
 
-const { useState: useSD } = React;
+const { useState: useSD, useMemo: useMD } = React;
 
-function Dashboard({ stores, jobs, onOpenStore, onAddStore, onDeleteStore, onEditStore }) {
+function Dashboard({ stores, jobs, currentUser, onOpenStore, onAddStore, onDeleteStore, onEditStore }) {
+  // Default scope to "mine"; the filter is a no-op until currentUser
+  // loads, so this stays accurate even though `currentUser` may be null
+  // on first render. Pre-existing stores from before migration 007 carry
+  // no created_by — they only appear under "All".
+  const [scope, setScope] = useSD("mine");
+
+  const filtered = useMD(() => {
+    return [...stores]
+      .filter(s => {
+        if (scope === "all" || !currentUser) return true;
+        return s.createdBy === currentUser;
+      })
+      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+  }, [stores, scope, currentUser]);
+
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="max-w-[1200px] mx-auto px-8 py-8">
-        <div className="flex items-baseline justify-between mb-6">
+        <div className="flex items-baseline justify-between mb-4">
           <div>
             <h1 className="font-serif text-[40px] leading-[1] tracking-tight text-[#e6edf3]">Stores</h1>
             <p className="text-[12px] text-[#8b949e] mt-2">
-              {stores.length} connected · jobs keep running when you switch stores
+              {currentUser
+                ? `${filtered.length} of ${stores.length} · ${scope === "mine" ? `created by ${currentUser}` : "all admins"}`
+                : `${stores.length} connected · jobs keep running when you switch stores`}
             </p>
           </div>
           <GlobalJobStatus jobs={jobs} />
         </div>
 
+        {currentUser && stores.length > 0 && (
+          <div className="flex items-center gap-1 text-[11px] mb-4">
+            <DashScopeBtn active={scope === "mine"} onClick={() => setScope("mine")}>
+              Mine
+            </DashScopeBtn>
+            <DashScopeBtn active={scope === "all"} onClick={() => setScope("all")}>
+              All
+            </DashScopeBtn>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           <AddStoreCard onClick={onAddStore} />
-          {[...stores]
-            .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
-            .map(store => {
-              const storeJobs = jobs.filter(j => j.storeId === store.id);
-              return (
-                <StoreCard
-                  key={store.id}
-                  store={store}
-                  jobs={storeJobs}
-                  onClick={() => onOpenStore(store.id)}
-                  onDelete={onDeleteStore ? () => onDeleteStore(store.id) : null}
-                  onEdit={onEditStore ? () => onEditStore(store.id) : null}
-                />
-              );
-            })}
+          {filtered.map(store => {
+            const storeJobs = jobs.filter(j => j.storeId === store.id);
+            return (
+              <StoreCard
+                key={store.id}
+                store={store}
+                jobs={storeJobs}
+                onClick={() => onOpenStore(store.id)}
+                onDelete={onDeleteStore ? () => onDeleteStore(store.id) : null}
+                onEdit={onEditStore ? () => onEditStore(store.id) : null}
+              />
+            );
+          })}
         </div>
       </div>
     </div>
+  );
+}
+
+function DashScopeBtn({ active, onClick, children }) {
+  return (
+    <button
+      onClick={onClick}
+      className={
+        "px-2.5 py-1 rounded-[4px] border transition-colors " +
+        (active
+          ? "bg-[#21262d] border-[#388bfd] text-[#e6edf3]"
+          : "bg-transparent border-[#21262d] text-[#8b949e] hover:border-[#30363d] hover:text-[#e6edf3]")
+      }
+    >
+      {children}
+    </button>
   );
 }
 
@@ -116,10 +158,15 @@ function StoreCard({ store, jobs, onClick, onDelete, onEdit }) {
         <div className="flex items-start justify-between gap-2 mb-3">
           <div className="min-w-0 pr-6">
             <div className="font-serif text-[22px] leading-[1.1] text-[#e6edf3] truncate">{store.name}</div>
-            <div className="text-[11px] text-[#6e7681] mt-1">
-              {store.lastImportedAt
-                ? `Last imported ${relDate(new Date(store.lastImportedAt).toISOString())} ago`
-                : "Never imported"}
+            <div className="text-[11px] text-[#6e7681] mt-1 flex items-center gap-2">
+              <span>
+                {store.lastImportedAt
+                  ? `Last imported ${relDate(new Date(store.lastImportedAt).toISOString())} ago`
+                  : "Never imported"}
+              </span>
+              {store.createdBy && (
+                <span className="text-[10px] text-[#484f58]">· by {store.createdBy}</span>
+              )}
             </div>
           </div>
           <div className="flex-shrink-0">

@@ -203,6 +203,16 @@ const MIGRATIONS: Array<{ name: string; sql: string }> = [
         ON assist_completions (store_id, assistant);
     `,
   },
+  {
+    // Tracks which admin (Austin / Michael) created each store. Drives the
+    // dashboard's Mine/All filter and shows up alongside notes for
+    // attribution. Nullable for stores that pre-date this column.
+    name: "007_stores_created_by",
+    sql: `
+      ALTER TABLE stores
+        ADD COLUMN IF NOT EXISTS created_by TEXT;
+    `,
+  },
 ];
 
 /**
