@@ -84,7 +84,55 @@ async function main() {
       );
       process.exit(1);
     }
+    if (typeof matchingPlaceholder.autoShortenLinks !== "boolean") {
+      console.error(
+        `FAIL: SMS placeholder ${matchingPlaceholder.sentinelId} missing autoShortenLinks (must be true/false to override Redo's mongoose default)`,
+      );
+      process.exit(1);
+    }
   }
+
+  // Behavior assertion: the test fixture has shorten_links: true, so the
+  // placeholder must mirror that. Negative case (false default) is covered
+  // by the inline check below.
+  const fixtureExpectedShorten = true;
+  const fixturePh = r.placeholderSmsTemplates[0];
+  if (fixturePh.autoShortenLinks !== fixtureExpectedShorten) {
+    console.error(
+      `FAIL: fixture has shorten_links=${fixtureExpectedShorten}, placeholder emitted autoShortenLinks=${fixturePh.autoShortenLinks}`,
+    );
+    process.exit(1);
+  }
+
+  // Synthesize an SMS-only flow with shorten_links absent to confirm the
+  // explicit-false branch.
+  const synthesized: any = {
+    data: {
+      ...flow.data,
+      attributes: {
+        ...flow.data.attributes,
+        definition: {
+          ...flow.data.attributes.definition,
+          actions: flow.data.attributes.definition.actions.map((a: any) => {
+            if (a.type !== "send-sms") return a;
+            const cloned = JSON.parse(JSON.stringify(a));
+            delete cloned.data?.message?.shorten_links;
+            return cloned;
+          }),
+        },
+      },
+    },
+  };
+  const r2 = await parseFlow(synthesized as KlaviyoFlow, {}, { teamId: "team-x" });
+  if (r2.placeholderSmsTemplates[0]?.autoShortenLinks !== false) {
+    console.error(
+      `FAIL: missing shorten_links should emit autoShortenLinks=false, got ${r2.placeholderSmsTemplates[0]?.autoShortenLinks}`,
+    );
+    process.exit(1);
+  }
+  console.log(
+    `✓ autoShortenLinks: explicit-true mirrored, missing → false (overrides Redo mongoose default)`,
+  );
 
   console.log(
     `✓ ${FIXTURE.split("/").pop()}: ${smsSteps.length} send_sms steps, ${r.placeholderSmsTemplates.length} placeholders, schemaType=${r.automation.schemaType}`,

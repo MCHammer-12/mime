@@ -700,7 +700,12 @@ export async function importFlowRpc(
       category: ph.category,
       schemaType: ph.schemaType,
     };
-    if (ph.autoShortenLinks === true) template.autoShortenLinks = true;
+    // Always send through (including `false`) — Redo's mongoose default
+    // is true, so omitting the field would land migrated SMS templates with
+    // shortening on regardless of Klaviyo's setting.
+    if (typeof ph.autoShortenLinks === "boolean") {
+      template.autoShortenLinks = ph.autoShortenLinks;
+    }
 
     try {
       const created = await postMarketingRpc(

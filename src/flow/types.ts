@@ -361,7 +361,8 @@ export interface PlaceholderSmsTemplate {
   /** From the parent flow's resolved trigger. */
   schemaType: SchemaType;
   category: FlowCategory;
-  /** True when Klaviyo's `shorten_links` was set. */
+  /** Mirrors Klaviyo's `shorten_links`. Always emitted (true or false) so
+   *  the importer can override Redo's mongoose default of `true`. */
   autoShortenLinks?: boolean;
   /** Klaviyo's image_id (MMS) — informational only in v1; the importer
    *  warns and skips the attachment because rehosting + the Redo
