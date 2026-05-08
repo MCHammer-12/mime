@@ -10,9 +10,11 @@
  *   - `AI_VIA_CLAUDE_CODE=1` → local-dev mode. Hands the prompt off to
  *     a Claude Code session via `.ai-cache/*.request.md` + `.response.md`
  *     file pairs. Zero API key needed; see src/ai-claude-code.ts.
- *   - Otherwise → Replit AI Integrations (prod). Requires
- *     `AI_INTEGRATIONS_ANTHROPIC_API_KEY` + `AI_INTEGRATIONS_ANTHROPIC_BASE_URL`
- *     auto-injected by the Replit blueprint.
+ *   - Otherwise → Anthropic SDK. Picks credentials in this order:
+ *       1. `AI_INTEGRATIONS_ANTHROPIC_API_KEY` + `AI_INTEGRATIONS_ANTHROPIC_BASE_URL`
+ *          — Replit Anthropic blueprint integration (proxied through Replit).
+ *       2. `ANTHROPIC_API_KEY` — direct to api.anthropic.com. This is the
+ *          shape Replit's "Add Anthropic integration" sets by default.
  */
 
 import { claudeCodeMessagesCreate } from "./ai-claude-code.js";
@@ -43,20 +45,37 @@ async function client(): Promise<MessagesCreator> {
     return _client;
   }
 
-  const apiKey = process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY;
-  const baseURL = process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL;
-  if (!apiKey || !baseURL) {
+  // Prefer the Replit blueprint pair (proxied through Replit) when present,
+  // else fall back to a bare ANTHROPIC_API_KEY (direct to api.anthropic.com).
+  // Replit's default "Add Anthropic integration" sets only ANTHROPIC_API_KEY.
+  const blueprintKey = process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY;
+  const blueprintBase = process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL;
+  const directKey = process.env.ANTHROPIC_API_KEY;
+
+  let apiKey: string | undefined;
+  let baseURL: string | undefined;
+  if (blueprintKey && blueprintBase) {
+    apiKey = blueprintKey;
+    baseURL = blueprintBase;
+  } else if (directKey) {
+    apiKey = directKey;
+    // baseURL omitted → SDK defaults to api.anthropic.com.
+  }
+
+  if (!apiKey) {
     throw new Error(
       "No AI provider configured. Set AI_VIA_CLAUDE_CODE=1 for local dev, " +
-        "or AI_INTEGRATIONS_ANTHROPIC_API_KEY + AI_INTEGRATIONS_ANTHROPIC_BASE_URL " +
-        "(auto-set by the Replit Anthropic integration).",
+        "ANTHROPIC_API_KEY for direct access, or " +
+        "AI_INTEGRATIONS_ANTHROPIC_API_KEY + AI_INTEGRATIONS_ANTHROPIC_BASE_URL " +
+        "for the Replit blueprint integration.",
     );
   }
+
   // Dynamic import of an optional peer. The package is declared in
   // package.json but may not be installed (e.g. when SKIP_AI=1).
   const mod = await import("@anthropic-ai/sdk");
   const Anthropic = (mod.default ?? mod) as unknown as AnthropicCtor;
-  _client = new Anthropic({ apiKey, baseURL });
+  _client = new Anthropic(baseURL ? { apiKey, baseURL } : { apiKey });
   return _client;
 }
 
