@@ -173,6 +173,17 @@ const MIGRATIONS: Array<{ name: string; sql: string }> = [
         ON imported_items (store_id, item_id, imported_at DESC);
     `,
   },
+  {
+    // email_count: how many individual emails this import represents.
+    //   - templates / campaign variants = 1
+    //   - flows = createdTemplateCount + blankTemplateCount
+    // Used for the "hours saved" tally — total time = SUM(email_count) * 20min.
+    name: "005_email_count",
+    sql: `
+      ALTER TABLE imported_items
+        ADD COLUMN IF NOT EXISTS email_count INTEGER NOT NULL DEFAULT 1;
+    `,
+  },
 ];
 
 /**

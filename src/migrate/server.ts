@@ -71,7 +71,9 @@ import {
   setAdminCookie,
 } from "./auth.js";
 import {
+  emailsToHours,
   findLatestJobForItem,
+  getTotalEmailsImported,
   listAssistItemsForStore,
   listAssistStores,
 } from "./imported-items.js";
@@ -847,6 +849,7 @@ async function runImport(
     flowsFailed: 0,
     campaignsImported: 0,
     campaignsFailed: 0,
+    emailsImported: 0,
   };
 
   const emit = (event: { kind: string; severity?: Severity; [k: string]: unknown }) =>
@@ -1119,6 +1122,7 @@ async function runImport(
               `importing template "${l.name}"`,
             );
             templateImportOk++;
+            summary.emailsImported += 1;
             emit({ kind: "imported", id: l.id, name: l.name, templateId: result.templateId });
             ctrl.recordImported({ itemId: l.id, itemType: "email", name: l.name });
           } catch (e: any) {
@@ -1328,7 +1332,16 @@ async function runImport(
               `importing flow "${flowName}"`,
             );
             flowImportOk++;
-            ctrl.recordImported({ itemId: flowId, itemType: "flow", name: flowName });
+            const flowEmails =
+              (result.createdTemplateCount ?? 0) +
+              (result.blankTemplateCount ?? 0);
+            summary.emailsImported += flowEmails;
+            ctrl.recordImported({
+              itemId: flowId,
+              itemType: "flow",
+              name: flowName,
+              emailCount: flowEmails > 0 ? flowEmails : 1,
+            });
             emit({
               kind: "flow_imported",
               id: flowId,
@@ -1529,6 +1542,7 @@ async function runImport(
                 `importing campaign variant "${variantName}"`,
               );
               createdTemplateCount++;
+              summary.emailsImported += 1;
               emit({
                 kind: "imported",
                 id: `${campaignId}:${m.id}`,
@@ -1828,6 +1842,14 @@ async function handleJobNotes(
   const ok = setNote(jobId, itemId, note);
   if (!ok) return json(res, 404, { error: `job ${jobId} not found` });
   json(res, 200, { ok: true });
+}
+
+// ─── Admin metrics — running "Hours saved" tally for the header ──────────
+
+async function handleAdminMetrics(_req: IncomingMessage, res: ServerResponse) {
+  const totalEmails = await getTotalEmailsImported();
+  const totalHours = emailsToHours(totalEmails);
+  json(res, 200, { totalEmails, totalHours });
 }
 
 // ─── Assist API: read-only store + items list, plus note write ───────────
@@ -2846,6 +2868,10 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url === "/api/debug/resolve-template") {
       if (!requireAdmin(req, res)) return;
       return handleDebugResolveTemplate(req, res);
+    }
+    if (req.method === "GET" && url === "/api/admin/metrics") {
+      if (!requireAdmin(req, res)) return;
+      return handleAdminMetrics(req, res);
     }
     if (req.method === "POST" && url === "/api/jobs") {
       if (!requireAdmin(req, res)) return;
