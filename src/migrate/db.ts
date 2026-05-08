@@ -184,6 +184,25 @@ const MIGRATIONS: Array<{ name: string; sql: string }> = [
         ADD COLUMN IF NOT EXISTS email_count INTEGER NOT NULL DEFAULT 1;
     `,
   },
+  {
+    // Per-assistant "done" checkmarks on imported items. An item is "done"
+    // for an assistant when there's a row here with their name. Lets the
+    // /assist UI render checkboxes + gray out completed brand cards on a
+    // per-assistant basis.
+    name: "006_assist_completions",
+    sql: `
+      CREATE TABLE IF NOT EXISTS assist_completions (
+        id BIGSERIAL PRIMARY KEY,
+        store_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        assistant TEXT NOT NULL,
+        completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (store_id, item_id, assistant)
+      );
+      CREATE INDEX IF NOT EXISTS idx_assist_completions_lookup
+        ON assist_completions (store_id, assistant);
+    `,
+  },
 ];
 
 /**
