@@ -15,9 +15,11 @@
 import type { EmailBlockType } from "../renderer/types.js";
 import type { ParseContext } from "./index.js";
 
-export type MappedLink =
-  | { linkType: "dynamic-variable"; schemaFieldName: string }
-  | { linkType: "web-page"; buttonLink: string };
+// MappedLink used to include a `dynamic-variable` variant. We removed it
+// after Redo eng confirmed that schemaInstance.checkoutUrl resolves to a
+// Storefront cart URL that is silently null on cart-fetch failure. See
+// mapKlaviyoLink doc for context.
+export type MappedLink = { linkType: "web-page"; buttonLink: string };
 
 const CHECKOUT_URL_PATTERNS: RegExp[] = [
   // {{ event.URL }} — abandoned cart / abandoned checkout default
@@ -59,27 +61,42 @@ export function classifyVariable(varName: string): "unsupported" | "review" {
   return "review";
 }
 
-/**
- * Returns the Redo schema field name a Klaviyo URL should map to, or null
- * if the URL is a static link (or an unrecognized variable).
- */
-export function mapKlaviyoUrlToSchemaField(url: string): string | null {
-  if (!url) return null;
-  if (CHECKOUT_URL_PATTERNS.some((p) => p.test(url))) {
-    return "checkoutUrl";
-  }
-  return null;
+/** True if the href is one of the Klaviyo abandoned-cart/checkout URL
+ *  variables — `event.URL`, `event.CheckoutURL`, `event.extra.checkout_url`,
+ *  `event.extra.responsive_checkout_url` (each with optional Liquid filter). */
+export function isKlaviyoCheckoutUrlVariable(url: string): boolean {
+  if (!url) return false;
+  return CHECKOUT_URL_PATTERNS.some((p) => p.test(url));
 }
 
 /**
- * Maps a raw Klaviyo href to either a dynamic-variable link spec or a web-page
- * link. Call this from block parsers (button, image clickthrough, etc.) to
- * produce the correct Redo link shape.
+ * Maps a raw Klaviyo href to a web-page link. For Klaviyo's checkout-URL
+ * variables (`{{ event.URL }}` etc.), substitutes a static `<storeUrl>/cart`
+ * when the merchant's storeUrl is known.
+ *
+ * Background: we used to emit `{ linkType: "dynamic-variable",
+ * schemaFieldName: "checkoutUrl" }`, banking on Redo's runtime to populate
+ * the field at send time. Redo eng confirmed (2026-05-08) that
+ * `schemaInstance.checkoutUrl` is a Shopify Storefront cart URL that is
+ * silently `null` when the cart fetch fails (no Storefront access token,
+ * non-Shopify provider, fetch error). A null dynamic var causes the
+ * button block to be hidden entirely (button.tsx hideBlock=true), so a
+ * generic `/cart` link is strictly better than the dynamic-variable
+ * approach for migrated emails.
+ *
+ * If `storeUrl` is null/empty, we leave the original Klaviyo variable in
+ * the href and let `classifyKlaviyoUrl` push a reviewItem so the operator
+ * can fix it manually.
  */
-export function mapKlaviyoLink(url: string): MappedLink {
-  const schemaFieldName = mapKlaviyoUrlToSchemaField(url);
-  if (schemaFieldName) {
-    return { linkType: "dynamic-variable", schemaFieldName };
+export function mapKlaviyoLink(
+  url: string,
+  storeUrl: string | null | undefined,
+): MappedLink {
+  if (isKlaviyoCheckoutUrlVariable(url)) {
+    if (storeUrl) {
+      return { linkType: "web-page", buttonLink: `${storeUrl}/cart` };
+    }
+    // No store URL → leave variable as-is; classifyKlaviyoUrl flags it.
   }
   return { linkType: "web-page", buttonLink: url };
 }
@@ -94,21 +111,21 @@ export function classifyKlaviyoUrl(
   blockType: EmailBlockType,
   ctx: ParseContext,
 ): MappedLink {
-  const mapped = mapKlaviyoLink(url);
-  if (mapped.linkType === "web-page" && KLAVIYO_VAR_RE.test(url)) {
-    const varName = extractVariableName(url);
+  const mapped = mapKlaviyoLink(url, ctx.storeUrl);
+  if (mapped.linkType === "web-page" && KLAVIYO_VAR_RE.test(mapped.buttonLink)) {
+    const varName = extractVariableName(mapped.buttonLink);
     const kind = classifyVariable(varName);
     if (kind === "unsupported") {
       ctx.unsupportedFeatures.push({
         blockType,
         reason: varName,
-        context: url,
+        context: mapped.buttonLink,
       });
     } else {
       ctx.reviewItems.push({
         blockType,
         variableName: varName,
-        context: url,
+        context: mapped.buttonLink,
       });
     }
   }

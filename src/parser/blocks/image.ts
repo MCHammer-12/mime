@@ -73,15 +73,12 @@ export function parseImageBlock(
     sectionPadding.right = hPad;
   }
 
+  // mappedLink only ever returns web-page links now (see url-mapping.ts);
+  // checkout-URL variables get rewritten to <storeUrl>/cart up there.
   const linkFields: Pick<
     ImageBlock,
     "clickthroughUrl" | "clickthroughLinkType" | "clickthroughSchemaFieldName"
-  > = mappedLink?.linkType === "dynamic-variable"
-    ? {
-        clickthroughLinkType: "dynamic-variable",
-        clickthroughSchemaFieldName: mappedLink.schemaFieldName,
-      }
-    : { clickthroughUrl: clickthrough };
+  > = { clickthroughUrl: mappedLink?.buttonLink ?? clickthrough };
 
   return {
     type: EmailBlockType.IMAGE,

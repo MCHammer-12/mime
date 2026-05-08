@@ -56,16 +56,10 @@ export function parseButtonBlock(
     false;
 
   const mapped = classifyKlaviyoUrl(href, EmailBlockType.BUTTON, ctx);
-  const linkFields =
-    mapped.linkType === "dynamic-variable"
-      ? {
-          linkType: ButtonLinkType.DYNAMIC_VARIABLE,
-          schemaFieldName: mapped.schemaFieldName,
-        }
-      : {
-          linkType: ButtonLinkType.WEB_PAGE,
-          buttonLink: mapped.buttonLink,
-        };
+  const linkFields = {
+    linkType: ButtonLinkType.WEB_PAGE,
+    buttonLink: mapped.buttonLink,
+  };
 
   return {
     type: EmailBlockType.BUTTON,

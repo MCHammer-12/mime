@@ -171,7 +171,7 @@ async function main(): Promise<void> {
   console.log(`  mapped:      ${pending.mapped.length}`);
   console.log(`  unsupported: ${pending.unsupported.length}`);
   console.log(
-    `\nNext step: fold these into src/parser/url-mapping.ts (mapKlaviyoUrlToSchemaField + UNSUPPORTED_VARIABLES), then re-run the migration.`,
+    `\nNext step: fold these into src/parser/url-mapping.ts (CHECKOUT_URL_PATTERNS + UNSUPPORTED_VARIABLES), then re-run the migration.`,
   );
 }
 

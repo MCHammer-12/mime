@@ -31,8 +31,14 @@ const METRIC_NAME_MAP: Record<
   string,
   { key: TriggerKey; schemaType: SchemaType; category: FlowCategory }
 > = {
-  "started checkout":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT, category: "Marketing" },
-  "checkout started":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT, category: "Marketing" },
+  // Klaviyo's "Started Checkout" is colloquially "abandoned cart" — it's the
+  // event Klaviyo's stock "Abandoned Cart" flow uses. Strict semantics would
+  // map it to MARKETING_CHECKOUT_ABANDONMENT, but in practice merchants think
+  // of "they put stuff in cart and didn't buy" as cart abandonment, and Redo's
+  // CART trigger is the closer match for their workflow + UI label. Confirmed
+  // with Redo eng on 2026-05-08.
+  "started checkout":   { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT,     category: "Marketing" },
+  "checkout started":   { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT,     category: "Marketing" },
   "added to cart":      { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT,     category: "Marketing" },
   "viewed product":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
   "active on site":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
