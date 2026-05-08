@@ -322,6 +322,62 @@ function profileGroupMembershipPlaceholder(
   return null;
 }
 
+// ---------- Klaviyo profile-marketing-consent → Redo CustomerAttribute ----------
+//
+// Klaviyo shape (per Ueiu86 abandoned-cart fixture):
+//   { type: "profile-marketing-consent",
+//     consent: { channel: "sms" | "email",
+//                can_receive_marketing: boolean,
+//                consent_status: { subscription: "subscribed" | ..., filters: ... } } }
+//
+// Redo equivalents (from segment-types.ts CustomerCharacteristicType):
+//   - SUBSCRIBED_TO_SMS   ("subscribed-to-sms")    — strict opt-in
+//   - SUBSCRIBED_TO_EMAIL ("subscribed-to-email")  — strict opt-in
+//   - CAN_RECEIVE_EMAIL_MARKETING                  — broader (has email + not unsubscribed)
+//
+// V1: ignore can_receive_marketing/filters and translate only the strict
+// "is subscribed" form. consent_status.subscription === "subscribed" maps
+// to BOOLEAN value=true; anything else (unsubscribed, never_subscribed)
+// maps to value=false — i.e. "is NOT subscribed". Anything that doesn't
+// fit (e.g. an email-channel rule with subscription=null but
+// can_receive_marketing=false, or a channel we don't recognize) emits
+// a warning instead.
+function translateProfileMarketingConsentCondition(
+  c: any,
+  warnings: ParseWarning[],
+  actionId: string,
+): unknown | null {
+  const channel = c.consent?.channel;
+  const subscription = c.consent?.consent_status?.subscription;
+
+  let dimension: "subscribed-to-sms" | "subscribed-to-email" | null = null;
+  if (channel === "sms") dimension = "subscribed-to-sms";
+  else if (channel === "email") dimension = "subscribed-to-email";
+
+  if (!dimension) {
+    warnings.push({
+      kind: "requires-review",
+      actionId,
+      message: `profile-marketing-consent on channel "${channel ?? "?"}" not supported — manual config required`,
+    });
+    return null;
+  }
+
+  // Klaviyo's `subscription` enum has several values (subscribed,
+  // unsubscribed, never_subscribed, etc.). Redo's only knob is BOOLEAN, so
+  // treat anything other than `subscribed` as `value: false`.
+  const value = subscription === "subscribed";
+
+  return {
+    type: "customer_attribute",
+    whereCondition: {
+      type: "boolean",
+      dimension,
+      comparison: { type: "boolean", value },
+    },
+  };
+}
+
 // Translate a Klaviyo conditional-split into a Redo InlineSegment expression.
 // Redo's CONDITION step uses the SegmentConditionBlock interface shape
 // (segment-types.ts:177) — NOT the queryConditionSchema Zod shape. Field names:
@@ -366,6 +422,11 @@ export function translateConditionalSplitExpression(
       case "profile-group-membership":
         profileGroupMembershipPlaceholder(kc, warnings, action.id);
         break;
+      case "profile-marketing-consent": {
+        const rc = translateProfileMarketingConsentCondition(kc, warnings, action.id);
+        if (rc) redoConditions.push(rc);
+        break;
+      }
       default:
         warnings.push({
           kind: "requires-review",
