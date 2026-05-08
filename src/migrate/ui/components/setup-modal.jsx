@@ -19,7 +19,6 @@ function SetupModal({ onSave, onClose, initialStore }) {
   const [redoToken, setRedoToken] = useSM(initialStore?.redoToken ?? "");
   const [redoServerBase, setRedoServerBase] = useSM(initialStore?.redoServerBase ?? "");
   const [showAdvanced, setShowAdvanced] = useSM(Boolean(initialStore?.redoServerBase));
-  const [showKlaviyo, setShowKlaviyo] = useSM(false);
   const [showJwt, setShowJwt] = useSM(false);
   const [hydrating, setHydrating] = useSM(false);
 
@@ -94,16 +93,9 @@ function SetupModal({ onSave, onClose, initialStore }) {
           </label>
 
           <label className="block">
-            <div className="flex items-baseline justify-between mb-1.5">
-              <div className="text-[11px] text-[#8b949e]">Klaviyo key</div>
-              <button
-                type="button"
-                onClick={() => setShowKlaviyo((v) => !v)}
-                className="text-[10px] text-[#6e7681] hover:text-[#e6edf3]"
-              >{showKlaviyo ? "hide" : "show"}</button>
-            </div>
+            <div className="text-[11px] text-[#8b949e] mb-1.5">Klaviyo key</div>
             <input
-              type={showKlaviyo ? "text" : "password"}
+              type="text"
               value={klaviyoKey}
               onChange={(e) => setKlaviyoKey(e.target.value)}
               placeholder="pk_abc123def456…"
