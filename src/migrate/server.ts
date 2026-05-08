@@ -76,6 +76,7 @@ import {
   getTotalEmailsImported,
   listAssistItemsForStore,
   listAssistStores,
+  setAssistDone,
 } from "./imported-items.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
@@ -1862,17 +1863,45 @@ async function handleAdminMetrics(_req: IncomingMessage, res: ServerResponse) {
 // dashboard reads, so anything written on /assist appears in the existing
 // Toby troubleshoot panel automatically.
 
-async function handleAssistStores(_req: IncomingMessage, res: ServerResponse) {
-  const stores = await listAssistStores();
+function readAsParam(req: IncomingMessage): string | undefined {
+  const u = new URL(req.url ?? "", `http://${req.headers.host ?? "localhost"}`);
+  const raw = u.searchParams.get("as");
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  return trimmed === "" ? undefined : trimmed.slice(0, 60);
+}
+
+async function handleAssistStores(req: IncomingMessage, res: ServerResponse) {
+  const stores = await listAssistStores(readAsParam(req));
   json(res, 200, { stores });
 }
 
 async function handleAssistItems(
+  req: IncomingMessage,
   res: ServerResponse,
   storeId: string,
 ) {
-  const { storeName, items } = await listAssistItemsForStore(storeId);
+  const { storeName, items } = await listAssistItemsForStore(
+    storeId,
+    readAsParam(req),
+  );
   json(res, 200, { storeName, items });
+}
+
+async function handleAssistDone(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+  itemId: string,
+) {
+  const body = await readJsonBody(req);
+  const done = body.done === true;
+  const author = typeof body.author === "string" ? body.author.trim() : "";
+  if (!author) {
+    return json(res, 400, { error: "author required to mark done" });
+  }
+  await setAssistDone(storeId, itemId, author, done);
+  json(res, 200, { ok: true, done });
 }
 
 async function handleAssistNote(
@@ -2900,7 +2929,7 @@ const server = createServer(async (req, res) => {
     }
     const assistItems = url.match(/^\/api\/assist\/stores\/([^/?]+)\/items(\?.*)?$/);
     if (assistItems && req.method === "GET") {
-      return handleAssistItems(res, decodeURIComponent(assistItems[1]));
+      return handleAssistItems(req, res, decodeURIComponent(assistItems[1]));
     }
     const assistNote = url.match(/^\/api\/assist\/stores\/([^/?]+)\/items\/([^/?]+)\/note(\?.*)?$/);
     if (assistNote && req.method === "POST") {
@@ -2909,6 +2938,15 @@ const server = createServer(async (req, res) => {
         res,
         decodeURIComponent(assistNote[1]),
         decodeURIComponent(assistNote[2]),
+      );
+    }
+    const assistDone = url.match(/^\/api\/assist\/stores\/([^/?]+)\/items\/([^/?]+)\/done(\?.*)?$/);
+    if (assistDone && req.method === "POST") {
+      return handleAssistDone(
+        req,
+        res,
+        decodeURIComponent(assistDone[1]),
+        decodeURIComponent(assistDone[2]),
       );
     }
     // Fall-through for any GET: try to serve as a static asset from the UI

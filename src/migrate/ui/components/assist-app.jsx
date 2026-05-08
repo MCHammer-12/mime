@@ -47,12 +47,17 @@ function AssistApp() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
+  // Pass `?as=` to the API so per-assistant state (done flags, completion
+  // counts) comes back populated. Without an author the server returns
+  // generic counts and `done: false` for everything.
+  const asQuery = author ? `?as=${encodeURIComponent(author)}` : "";
+
   // Load stores once. Cheap query; we re-fetch when leaving a store detail
   // so a freshly-imported brand shows up without a hard refresh.
   const loadStores = useCApp(async () => {
     setStoresLoading(true);
     try {
-      const r = await fetch("/api/assist/stores");
+      const r = await fetch(`/api/assist/stores${asQuery}`);
       const j = await r.json();
       setStores(j.stores || []);
     } catch (e) {
@@ -60,7 +65,7 @@ function AssistApp() {
     } finally {
       setStoresLoading(false);
     }
-  }, []);
+  }, [asQuery]);
 
   useEffectApp(() => {
     if (route.view === "list") loadStores();
@@ -73,7 +78,7 @@ function AssistApp() {
     setItemsLoading(true);
     setItems([]);
     setItemsStoreName(null);
-    fetch(`/api/assist/stores/${encodeURIComponent(route.storeId)}/items`)
+    fetch(`/api/assist/stores/${encodeURIComponent(route.storeId)}/items${asQuery}`)
       .then(r => r.json())
       .then(j => {
         if (cancelled) return;
@@ -85,7 +90,7 @@ function AssistApp() {
         if (!cancelled) setItemsLoading(false);
       });
     return () => { cancelled = true; };
-  }, [route.view, route.view === "store" ? route.storeId : null]);
+  }, [route.view, route.view === "store" ? route.storeId : null, asQuery]);
 
   const onSaveNote = useCApp(async (itemId, note) => {
     if (route.view !== "store") return null;
@@ -103,6 +108,27 @@ function AssistApp() {
     } catch (e) {
       console.warn("save note failed:", e);
       return null;
+    }
+  }, [route, author]);
+
+  const onToggleDone = useCApp(async (itemId, done) => {
+    if (route.view !== "store" || !author) return false;
+    try {
+      const r = await fetch(
+        `/api/assist/stores/${encodeURIComponent(route.storeId)}/items/${encodeURIComponent(itemId)}/done`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ done, author }),
+        },
+      );
+      if (!r.ok) return false;
+      // Mirror in local items state so the row stays in sync if we revisit.
+      setItems(its => its.map(it => it.itemId === itemId ? { ...it, done } : it));
+      return true;
+    } catch (e) {
+      console.warn("toggle done failed:", e);
+      return false;
     }
   }, [route, author]);
 
@@ -133,6 +159,7 @@ function AssistApp() {
           <AssistStores
             stores={stores}
             loading={storesLoading}
+            author={author}
             onOpenStore={openStore}
           />
         ) : (
@@ -142,6 +169,7 @@ function AssistApp() {
             loading={itemsLoading}
             author={author}
             onSaveNote={onSaveNote}
+            onToggleDone={onToggleDone}
             onBack={goBack}
           />
         )}

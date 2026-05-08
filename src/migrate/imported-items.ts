@@ -37,6 +37,17 @@ export interface AssistStoreRow {
   storeName: string;
   lastImportedAt: string;
   itemCount: number;
+  /**
+   * Completion stats scoped to the requesting assistant. Only populated
+   * when the request specifies `?as=<name>`; otherwise both are 0/null.
+   * `mineComplete` lets the UI gray out a card when this assistant has
+   * checked off everything for the brand.
+   */
+  myDoneCount: number;
+  mineComplete: boolean;
+  /** Has this assistant written any note for this brand? — used by the
+   *  "Mine | All" filter on the brand picker. */
+  myEngaged: boolean;
 }
 
 export interface AssistItemRow {
@@ -47,6 +58,9 @@ export interface AssistItemRow {
   latestJobId: string;
   /** Note pulled from jobs.notes[itemId] for the latestJobId. */
   note: { text: string; author: string | null; savedAt: string | null } | null;
+  /** True when the requesting assistant has checked this item off. False
+   *  when no `?as=` param was provided. */
+  done: boolean;
 }
 
 /**
@@ -102,30 +116,100 @@ export function emailsToHours(emails: number): number {
 /**
  * List stores that have ≥1 imported item. Sorted by most-recent import
  * first. The assist UI uses this to render the brand-card grid.
+ *
+ * When `assistant` is provided, each row also carries `myDoneCount`,
+ * `mineComplete`, and `myEngaged` — the brand picker uses these to gray
+ * out completed cards and to power the "Mine | All" filter.
  */
-export async function listAssistStores(): Promise<AssistStoreRow[]> {
+export async function listAssistStores(
+  assistant?: string,
+): Promise<AssistStoreRow[]> {
   if (!isDbEnabled()) return [];
+  const as = assistant && assistant.trim() !== "" ? assistant.trim() : null;
   try {
+    if (!as) {
+      // Fast path: no assistant context, skip the joins.
+      const { rows } = await getPool().query(
+        `SELECT
+           store_id,
+           MAX(store_name) AS store_name,
+           MAX(imported_at) AS last_imported_at,
+           COUNT(DISTINCT item_id) AS item_count
+         FROM imported_items
+         WHERE state = 'imported'
+         GROUP BY store_id
+         ORDER BY MAX(imported_at) DESC`,
+      );
+      return rows.map((r: any) => ({
+        storeId: r.store_id,
+        storeName: r.store_name,
+        lastImportedAt:
+          r.last_imported_at instanceof Date
+            ? r.last_imported_at.toISOString()
+            : String(r.last_imported_at),
+        itemCount: Number(r.item_count),
+        myDoneCount: 0,
+        mineComplete: false,
+        myEngaged: false,
+      }));
+    }
+    // With-assistant path: join completions + notes-by-author so we can
+    // compute per-store {done count, complete?, engaged?}.
     const { rows } = await getPool().query(
-      `SELECT
-         store_id,
-         MAX(store_name) AS store_name,
-         MAX(imported_at) AS last_imported_at,
-         COUNT(DISTINCT item_id) AS item_count
-       FROM imported_items
-       WHERE state = 'imported'
-       GROUP BY store_id
-       ORDER BY MAX(imported_at) DESC`,
+      `WITH items AS (
+         SELECT store_id,
+                MAX(store_name) AS store_name,
+                MAX(imported_at) AS last_imported_at,
+                COUNT(DISTINCT item_id) AS item_count
+           FROM imported_items
+          WHERE state = 'imported'
+          GROUP BY store_id
+       ),
+       my_done AS (
+         SELECT store_id, COUNT(DISTINCT item_id) AS done_count
+           FROM assist_completions
+          WHERE assistant = $1
+          GROUP BY store_id
+       ),
+       my_notes AS (
+         SELECT j.id AS job_id,
+                ii.store_id,
+                COUNT(*) AS note_count
+           FROM jobs j
+           CROSS JOIN LATERAL jsonb_each(j.notes) AS n(item_id, value)
+           JOIN imported_items ii
+             ON ii.job_id = j.id AND ii.item_id = n.item_id
+          WHERE jsonb_typeof(value) = 'object'
+            AND value->>'author' = $1
+          GROUP BY j.id, ii.store_id
+       )
+       SELECT i.store_id,
+              i.store_name,
+              i.last_imported_at,
+              i.item_count,
+              COALESCE(d.done_count, 0) AS done_count,
+              CASE WHEN EXISTS (SELECT 1 FROM my_notes mn WHERE mn.store_id = i.store_id) THEN true ELSE false END AS engaged
+         FROM items i
+         LEFT JOIN my_done d ON d.store_id = i.store_id
+        ORDER BY i.last_imported_at DESC`,
+      [as],
     );
-    return rows.map((r: any) => ({
-      storeId: r.store_id,
-      storeName: r.store_name,
-      lastImportedAt:
-        r.last_imported_at instanceof Date
-          ? r.last_imported_at.toISOString()
-          : String(r.last_imported_at),
-      itemCount: Number(r.item_count),
-    }));
+    return rows.map((r: any) => {
+      const itemCount = Number(r.item_count);
+      const myDoneCount = Number(r.done_count);
+      return {
+        storeId: r.store_id,
+        storeName: r.store_name,
+        lastImportedAt:
+          r.last_imported_at instanceof Date
+            ? r.last_imported_at.toISOString()
+            : String(r.last_imported_at),
+        itemCount,
+        myDoneCount,
+        mineComplete: itemCount > 0 && myDoneCount >= itemCount,
+        myEngaged: Boolean(r.engaged) || myDoneCount > 0,
+      };
+    });
   } catch (e) {
     console.warn("[imported-items] listAssistStores failed:", e);
     return [];
@@ -137,11 +221,16 @@ export async function listAssistStores(): Promise<AssistStoreRow[]> {
  * recent successful import and joins jobs.notes for that job's note.
  * Returns the store name alongside so the UI can render the page header
  * even on a direct deep-link without first loading the stores list.
+ *
+ * When `assistant` is provided, each item's `done` reflects whether
+ * that assistant has checked it off in `assist_completions`.
  */
 export async function listAssistItemsForStore(
   storeId: string,
+  assistant?: string,
 ): Promise<{ storeName: string | null; items: AssistItemRow[] }> {
   if (!isDbEnabled()) return { storeName: null, items: [] };
+  const as = assistant && assistant.trim() !== "" ? assistant.trim() : null;
   try {
     const { rows } = await getPool().query(
       `WITH latest AS (
@@ -159,11 +248,15 @@ export async function listAssistItemsForStore(
        )
        SELECT l.item_id, l.item_type, l.name, l.imported_at, l.job_id,
               l.store_name,
-              j.notes
+              j.notes,
+              CASE WHEN $2::text IS NOT NULL AND EXISTS (
+                SELECT 1 FROM assist_completions c
+                 WHERE c.store_id = $1 AND c.item_id = l.item_id AND c.assistant = $2
+              ) THEN true ELSE false END AS done
          FROM latest l
          LEFT JOIN jobs j ON j.id = l.job_id
         ORDER BY l.imported_at DESC`,
-      [storeId],
+      [storeId, as],
     );
     const storeName = rows[0]?.store_name ?? null;
     const items = rows.map((r: any) => {
@@ -190,12 +283,46 @@ export async function listAssistItemsForStore(
             : String(r.imported_at),
         latestJobId: r.job_id,
         note,
+        done: Boolean(r.done),
       };
     });
     return { storeName, items };
   } catch (e) {
     console.warn("[imported-items] listAssistItemsForStore failed:", e);
     return { storeName: null, items: [] };
+  }
+}
+
+/**
+ * Toggle the per-assistant "done" state for an item. Inserts a row when
+ * `done` is true, deletes it when false. Idempotent on both directions.
+ */
+export async function setAssistDone(
+  storeId: string,
+  itemId: string,
+  assistant: string,
+  done: boolean,
+): Promise<void> {
+  if (!isDbEnabled()) return;
+  const as = assistant.trim();
+  if (!as) return;
+  try {
+    if (done) {
+      await getPool().query(
+        `INSERT INTO assist_completions (store_id, item_id, assistant)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (store_id, item_id, assistant) DO NOTHING`,
+        [storeId, itemId, as],
+      );
+    } else {
+      await getPool().query(
+        `DELETE FROM assist_completions
+          WHERE store_id = $1 AND item_id = $2 AND assistant = $3`,
+        [storeId, itemId, as],
+      );
+    }
+  } catch (e) {
+    console.warn("[imported-items] setAssistDone failed:", e);
   }
 }
 
