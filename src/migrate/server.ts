@@ -63,6 +63,18 @@ import {
   toSummary,
   updateStore,
 } from "./stores.js";
+import {
+  isAdmin,
+  isAdminAuthEnabled,
+  isAdminEntryUrl,
+  requireAdmin,
+  setAdminCookie,
+} from "./auth.js";
+import {
+  findLatestJobForItem,
+  listAssistItemsForStore,
+  listAssistStores,
+} from "./imported-items.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
 const DEFAULT_REDOAPP_DIR = join(homedir(), "code/redoapp");
@@ -162,6 +174,12 @@ function resController(res: ServerResponse, job?: { id: string }): RunController
       // Legacy stream can't prompt — fall back to default (if any) or
       // return an empty string so callers can degrade gracefully.
       return input.default ?? "";
+    },
+    recordImported(item) {
+      // Forward to the job-backed controller when this stream also
+      // created a job; otherwise the legacy /api/run path silently drops
+      // the row (it never appeared in the dashboard anyway).
+      if (job) jobController(job.id).recordImported(item);
     },
   };
 }
@@ -1102,6 +1120,7 @@ async function runImport(
             );
             templateImportOk++;
             emit({ kind: "imported", id: l.id, name: l.name, templateId: result.templateId });
+            ctrl.recordImported({ itemId: l.id, itemType: "email", name: l.name });
           } catch (e: any) {
             templateImportFail++;
             const msg = e.message ?? String(e);
@@ -1309,6 +1328,7 @@ async function runImport(
               `importing flow "${flowName}"`,
             );
             flowImportOk++;
+            ctrl.recordImported({ itemId: flowId, itemType: "flow", name: flowName });
             emit({
               kind: "flow_imported",
               id: flowId,
@@ -1514,6 +1534,11 @@ async function runImport(
                 id: `${campaignId}:${m.id}`,
                 name: variantName,
                 templateId: result.templateId,
+              });
+              ctrl.recordImported({
+                itemId: `${campaignId}:${m.id}`,
+                itemType: "email",
+                name: variantName,
               });
             } catch (e: any) {
               variantFailures++;
@@ -1803,6 +1828,58 @@ async function handleJobNotes(
   const ok = setNote(jobId, itemId, note);
   if (!ok) return json(res, 404, { error: `job ${jobId} not found` });
   json(res, 200, { ok: true });
+}
+
+// ─── Assist API: read-only store + items list, plus note write ───────────
+//
+// These endpoints power the public-facing /assist UI. They sit inside the
+// Replit Private Deployment fence (so only invited Replit users reach
+// them) but require no admin cookie — assistants don't have one.
+//
+// Notes written here go into the same jobs.notes JSONB store the admin
+// dashboard reads, so anything written on /assist appears in the existing
+// Toby troubleshoot panel automatically.
+
+async function handleAssistStores(_req: IncomingMessage, res: ServerResponse) {
+  const stores = await listAssistStores();
+  json(res, 200, { stores });
+}
+
+async function handleAssistItems(
+  res: ServerResponse,
+  storeId: string,
+) {
+  const { storeName, items } = await listAssistItemsForStore(storeId);
+  json(res, 200, { storeName, items });
+}
+
+async function handleAssistNote(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+  itemId: string,
+) {
+  const body = await readJsonBody(req);
+  const note = typeof body.note === "string" ? body.note : "";
+  const author = typeof body.author === "string" ? body.author.trim() : "";
+
+  const jobId = await findLatestJobForItem(storeId, itemId);
+  if (!jobId) {
+    return json(res, 404, { error: "no imported item matching that id" });
+  }
+  const ok = setNote(jobId, itemId, note, author || undefined);
+  if (!ok) return json(res, 404, { error: `job ${jobId} not found` });
+
+  // Return the canonical shape so the UI can render the "saved by …" line
+  // without round-tripping through a separate fetch.
+  const savedNote = note.trim() === ""
+    ? null
+    : {
+        text: note,
+        author: author || null,
+        savedAt: new Date().toISOString(),
+      };
+  json(res, 200, { ok: true, note: savedNote });
 }
 
 // ─── API: POST /api/jobs/:id/bundle — stream a troubleshoot zip ──────────
@@ -2675,16 +2752,32 @@ function tryServeStatic(
 const server = createServer(async (req, res) => {
   try {
     if (!checkBasicAuth(req, res)) return;
-    // GET / → serve the Toby 2.0 UI entry point.
-    if (req.method === "GET" && (req.url === "/" || req.url === "/index.html")) {
+    // Strip query string for path-only matches below; handlers that care
+    // about the query (like `/api/jobs?storeId=`) re-parse from req.url.
+    const rawUrl = req.url ?? "";
+    const path = rawUrl.split("?")[0];
+
+    // GET / → assist UI entry point (external view).
+    if (req.method === "GET" && (path === "/" || path === "/assist.html")) {
+      if (tryServeStatic("/assist.html", res)) return;
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("assist UI not built");
+      return;
+    }
+    // GET /<ADMIN_URL_TOKEN>/[index.html] → admin UI entry. Sets the admin
+    // cookie, then serves the Toby 2.0 shell. Subsequent admin API calls
+    // are gated by the cookie.
+    if (req.method === "GET" && isAdminEntryUrl(req.url ?? "")) {
+      setAdminCookie(res);
       if (tryServeStatic("/index.html", res)) return;
       // Fall back to the legacy inline HTML if the UI isn't present.
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(HTML);
       return;
     }
-    // GET /legacy → the original inline HTML (for debugging).
+    // GET /legacy → the original inline HTML (for debugging). Admin-gated.
     if (req.method === "GET" && req.url === "/legacy") {
+      if (!requireAdmin(req, res)) return;
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(HTML);
       return;
@@ -2696,57 +2789,75 @@ const server = createServer(async (req, res) => {
         // Tells the UI whether to read/write stores via /api/stores or
         // fall back to localStorage (local dev without DATABASE_URL).
         dbEnabled: isDbEnabled(),
+        adminAuthEnabled: isAdminAuthEnabled(),
+        isAdmin: isAdmin(req),
       });
     }
+    // ─── Admin-only endpoints (Klaviyo/Redo creds, import triggers, jobs) ──
     if (req.method === "POST" && req.url === "/api/templates") {
+      if (!requireAdmin(req, res)) return;
       return handleTemplates(req, res);
     }
     if (req.method === "POST" && req.url === "/api/flows") {
+      if (!requireAdmin(req, res)) return;
       return handleFlows(req, res);
     }
     if (req.method === "POST" && req.url === "/api/flows/stream") {
+      if (!requireAdmin(req, res)) return;
       return handleFlowsStream(req, res);
     }
     if (req.method === "POST" && req.url === "/api/flows/list") {
+      if (!requireAdmin(req, res)) return;
       return handleFlowsList(req, res);
     }
     if (req.method === "POST" && req.url === "/api/flows/walk-batch") {
+      if (!requireAdmin(req, res)) return;
       return handleFlowsWalkBatch(req, res);
     }
     if (req.method === "POST" && req.url === "/api/campaigns") {
+      if (!requireAdmin(req, res)) return;
       return handleCampaigns(req, res);
     }
     if (req.method === "POST" && req.url === "/api/run") {
+      if (!requireAdmin(req, res)) return;
       return handleRun(req, res);
     }
-    // Job-based dashboard endpoints
+    // Job-based dashboard endpoints — admin only.
     const url = req.url ?? "";
     // Stores CRUD — server-side merchant credentials. Match before the
-    // job routes so /api/stores/:id/... never collides.
+    // job routes so /api/stores/:id/... never collides. Admin only —
+    // these endpoints expose merchant Klaviyo keys + Redo JWTs.
     if (req.method === "GET" && (url === "/api/stores" || url.startsWith("/api/stores?"))) {
+      if (!requireAdmin(req, res)) return;
       return handleStoresList(req, res);
     }
     if (req.method === "POST" && url === "/api/stores") {
+      if (!requireAdmin(req, res)) return;
       return handleStoreCreate(req, res);
     }
     const storePath = url.match(/^\/api\/stores\/([^/?]+)(\?.*)?$/);
     if (storePath) {
+      if (!requireAdmin(req, res)) return;
       const sid = storePath[1];
       if (req.method === "GET") return handleStoreGet(res, sid);
       if (req.method === "PATCH") return handleStoreUpdate(req, res, sid);
       if (req.method === "DELETE") return handleStoreDelete(res, sid);
     }
     if (req.method === "POST" && url === "/api/debug/resolve-template") {
+      if (!requireAdmin(req, res)) return;
       return handleDebugResolveTemplate(req, res);
     }
     if (req.method === "POST" && url === "/api/jobs") {
+      if (!requireAdmin(req, res)) return;
       return handleJobCreate(req, res);
     }
     if (req.method === "GET" && (url === "/api/jobs" || url.startsWith("/api/jobs?"))) {
+      if (!requireAdmin(req, res)) return;
       return handleJobList(req, res);
     }
     const jobPath = url.match(/^\/api\/jobs\/([^/?]+)(\/[a-z]+)?(\?.*)?$/);
     if (jobPath) {
+      if (!requireAdmin(req, res)) return;
       const jobId = jobPath[1];
       const sub = jobPath[2];
       if (req.method === "GET" && !sub) return handleJobGet(res, jobId);
@@ -2756,8 +2867,28 @@ const server = createServer(async (req, res) => {
       if (req.method === "POST" && sub === "/notes") return handleJobNotes(req, res, jobId);
       if (req.method === "POST" && sub === "/bundle") return handleJobBundle(req, res, jobId);
     }
+    // Assist API — read-only stores/items list + note write. No admin
+    // cookie required; assistants live inside the Private Deployment fence.
+    if (req.method === "GET" && (url === "/api/assist/stores" || url.startsWith("/api/assist/stores?"))) {
+      return handleAssistStores(req, res);
+    }
+    const assistItems = url.match(/^\/api\/assist\/stores\/([^/?]+)\/items(\?.*)?$/);
+    if (assistItems && req.method === "GET") {
+      return handleAssistItems(res, decodeURIComponent(assistItems[1]));
+    }
+    const assistNote = url.match(/^\/api\/assist\/stores\/([^/?]+)\/items\/([^/?]+)\/note(\?.*)?$/);
+    if (assistNote && req.method === "POST") {
+      return handleAssistNote(
+        req,
+        res,
+        decodeURIComponent(assistNote[1]),
+        decodeURIComponent(assistNote[2]),
+      );
+    }
     // Fall-through for any GET: try to serve as a static asset from the UI
-    // dir. Covers /components/*, /fonts/*, /mock-*.js, etc.
+    // dir. Covers /components/*, /fonts/*, /mock-*.js, /assist.html, etc.
+    // Static assets aren't gated — they're shared between the assist UI
+    // (anyone) and the admin UI (cookie-gated by API). No secrets in JS.
     if (req.method === "GET" && req.url && tryServeStatic(req.url, res)) return;
 
     res.writeHead(404, { "content-type": "text/plain" });
