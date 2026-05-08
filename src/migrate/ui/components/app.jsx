@@ -343,6 +343,33 @@ function App() {
   const [logJobId, setLogJobId] = useS(null);
   const [warningsView, setWarningsView] = useS(null); // {jobId, itemId}
 
+  // ─ Hours saved tally — running total across all imports + per-job toast ─
+  // Server is the source of truth; we refetch on mount and after each
+  // job completion. Hours = ceil(emails * 20min / 60).
+  const [hoursSaved, setHoursSaved] = useS(null);
+  // Active toast(s) — one per recently-completed job. Self-dismisses after
+  // ~5s. Pointer-events:none so it never blocks the UI underneath.
+  const [toasts, setToasts] = useS([]);
+
+  const refreshMetrics = useC(async () => {
+    try {
+      const r = await fetch("/api/admin/metrics");
+      if (!r.ok) return;
+      const m = await r.json();
+      if (typeof m.totalHours === "number") setHoursSaved(m.totalHours);
+    } catch (_) { /* best-effort */ }
+  }, []);
+
+  useE(() => { refreshMetrics(); }, [refreshMetrics]);
+
+  const pushCompletionToast = useC((emails) => {
+    if (!emails || emails <= 0) return;
+    const hours = Math.ceil((emails * 20) / 60);
+    const id = Date.now() + Math.random();
+    setToasts(ts => [...ts, { id, hours }]);
+    setTimeout(() => setToasts(ts => ts.filter(t => t.id !== id)), 5000);
+  }, []);
+
   // ─ Pending needs_input question (single modal at a time) ─
   const [pendingInput, setPendingInput] = useS(null); // {jobId, qid, itemId, itemName, question, options, broker}
 
@@ -661,6 +688,7 @@ function App() {
       let endedAt = j.endedAt;
       let importMethod = j.importMethod;
       let pendingQid = j.pendingQid;
+      let emailsImported = j.emailsImported || 0;
 
       if (evt.kind === "step") currentStep = evt.label;
       else if (evt.kind === "info") infos = [...infos, evt.text];
@@ -691,6 +719,7 @@ function App() {
       } else if (evt.kind === "fonts_done") {
         fontsDone = evt;
       } else if (evt.kind === "imported") {
+        emailsImported += 1;
         items = items.map(i => i.id === evt.id ? { ...i, state: "imported", detail: `→ ${evt.templateId.slice(-8)}` } : i);
         setSessionImports(si => {
           const cur = si[j.storeId] || { flows: new Set([...window.PRIOR_IMPORTED_FLOW_IDS]), tmpls: new Set([...window.PRIOR_IMPORTED_TEMPLATE_IDS]), campaigns: new Set([...(window.PRIOR_IMPORTED_CAMPAIGN_IDS ?? [])]) };
@@ -701,6 +730,7 @@ function App() {
         setLastResult(lr => ({ ...lr, [j.storeId]: new Map([...(lr[j.storeId] || new Map())]).set(evt.id, "imported") }));
         setInProgress(ip => { const n = new Set(ip[j.storeId] || []); n.delete(evt.id); return { ...ip, [j.storeId]: n }; });
       } else if (evt.kind === "flow_imported") {
+        emailsImported += (evt.createdTemplateCount ?? 0) + (evt.blankTemplateCount ?? 0);
         const parts = [`${evt.createdTemplateCount} email${evt.createdTemplateCount === 1 ? '' : 's'}`];
         if (evt.blankTemplateCount) parts.push(`${evt.blankTemplateCount} blank`);
         if (evt.warningCount) parts.push(`${evt.warningCount} warn`);
@@ -744,11 +774,21 @@ function App() {
         currentStep = "";
         importMethod = evt.importMethod;
         items = items.map(i => i.state === "queued" || i.state === "running" ? { ...i, state: "imported" } : i);
+        // Fire the celebratory toast for this job and refresh the running
+        // header tally. Both happen post-render via setTimeout so we don't
+        // mutate sibling state from inside the reducer.
+        if (j.status !== status && (status === "complete" || status === "partial")) {
+          const finalEmails = emailsImported;
+          setTimeout(() => {
+            pushCompletionToast(finalEmails);
+            refreshMetrics();
+          }, 0);
+        }
       }
 
-      return { ...j, items, currentStep, warnings, infos, fatalError, fontsDone, exportSummary, status, endedAt, log, importMethod, pendingQid };
+      return { ...j, items, currentStep, warnings, infos, fatalError, fontsDone, exportSummary, status, endedAt, log, importMethod, pendingQid, emailsImported };
     }));
-  }, []);
+  }, [pushCompletionToast, refreshMetrics]);
 
   const answerNeedsInput = useC((answer, applyAll) => {
     if (!pendingInput) return;
@@ -898,6 +938,7 @@ function App() {
         view={view}
         store={activeStore}
         hosted={hosted}
+        hoursSaved={hoursSaved}
         onToggleHosted={() => {
           const next = !hosted;
           window.mockEnv = { ...(window.mockEnv || {}), hostedDeploy: next };
@@ -905,6 +946,7 @@ function App() {
         }}
         onGoDashboard={goDashboard}
       />
+      <CompletionToasts toasts={toasts}/>
 
       <div className="flex flex-1 overflow-hidden">
         {view.screen === "dashboard" ? (
@@ -992,7 +1034,37 @@ function App() {
   );
 }
 
-function TopBar({ view, store, hosted, onToggleHosted, onGoDashboard }) {
+// Center-screen toasts that fire on job completion. Stacked vertically
+// when several jobs finish at once. pointer-events:none so they never
+// block clicks on the dashboard underneath.
+function CompletionToasts({ toasts }) {
+  if (!toasts || toasts.length === 0) return null;
+  return (
+    <div
+      className="pointer-events-none fixed inset-0 z-[60] flex items-center justify-center"
+      aria-live="polite"
+    >
+      <div className="flex flex-col gap-2 items-center">
+        {toasts.map(t => (
+          <div
+            key={t.id}
+            className="px-5 py-3 rounded-[6px] bg-[#010409] border border-[#FF4405]/60 shadow-2xl text-[14px] text-[#e6edf3]"
+            style={{ animation: "toastFade 5s ease-in-out forwards" }}
+          >
+            you just did <span className="font-semibold text-[#FF4405] tabular-nums">{t.hours}</span> Nigerian hour{t.hours === 1 ? "" : "s"} of duplication work
+          </div>
+        ))}
+      </div>
+      <style>{`@keyframes toastFade {
+        0% { opacity: 0; transform: translateY(10px); }
+        8%, 85% { opacity: 1; transform: translateY(0); }
+        100% { opacity: 0; transform: translateY(-10px); }
+      }`}</style>
+    </div>
+  );
+}
+
+function TopBar({ view, store, hosted, hoursSaved, onToggleHosted, onGoDashboard }) {
   return (
     <div className="flex items-center gap-3 px-4 py-2 border-b border-[#21262d] bg-[#010409]">
       <div className="flex items-baseline gap-2">
@@ -1021,6 +1093,11 @@ function TopBar({ view, store, hosted, onToggleHosted, onGoDashboard }) {
         )}
       </div>
       <div className="ml-auto text-[11px] text-[#6e7681] flex items-center gap-3">
+        {typeof hoursSaved === "number" && (
+          <span className="px-2 py-0.5 border border-[#30363d] rounded-[3px] tabular-nums">
+            Hours saved: <span className="text-[#FF4405] font-semibold">{hoursSaved}</span>
+          </span>
+        )}
         <button
           onClick={onToggleHosted}
           title="Toggle env between prod and dev (visual only)"

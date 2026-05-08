@@ -24,6 +24,12 @@ export interface ImportedItemInput {
   itemId: string;
   itemType: ItemType;
   name: string;
+  /**
+   * How many individual emails this import represents — 1 for a single
+   * email/campaign variant, N for a flow that ships N emails. Drives the
+   * "hours saved" tally; defaults to 1 when omitted.
+   */
+  emailCount?: number;
 }
 
 export interface AssistStoreRow {
@@ -49,11 +55,12 @@ export interface AssistItemRow {
  */
 export function recordImportedItem(input: ImportedItemInput): void {
   if (!isDbEnabled()) return;
+  const emailCount = Math.max(1, Math.floor(input.emailCount ?? 1));
   getPool()
     .query(
       `INSERT INTO imported_items
-         (store_id, store_name, job_id, item_id, item_type, name, state)
-       VALUES ($1, $2, $3, $4, $5, $6, 'imported')
+         (store_id, store_name, job_id, item_id, item_type, name, state, email_count)
+       VALUES ($1, $2, $3, $4, $5, $6, 'imported', $7)
        ON CONFLICT (store_id, item_id, job_id) DO NOTHING`,
       [
         input.storeId,
@@ -62,9 +69,34 @@ export function recordImportedItem(input: ImportedItemInput): void {
         input.itemId,
         input.itemType,
         input.name,
+        emailCount,
       ],
     )
     .catch((err) => console.warn("[imported-items] insert failed:", err));
+}
+
+/**
+ * Sum of email_count across all successful imports — drives the
+ * "Hours saved: X" header counter. Hours = ceil(emails * 20 / 60).
+ */
+export async function getTotalEmailsImported(): Promise<number> {
+  if (!isDbEnabled()) return 0;
+  try {
+    const { rows } = await getPool().query(
+      `SELECT COALESCE(SUM(email_count), 0)::bigint AS total
+         FROM imported_items
+        WHERE state = 'imported'`,
+    );
+    return Number(rows[0]?.total ?? 0);
+  } catch (e) {
+    console.warn("[imported-items] getTotalEmailsImported failed:", e);
+    return 0;
+  }
+}
+
+/** Convert an email count to ceiling-rounded hours. 20 minutes per email. */
+export function emailsToHours(emails: number): number {
+  return Math.ceil((emails * 20) / 60);
 }
 
 /**

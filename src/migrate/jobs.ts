@@ -83,6 +83,12 @@ export interface JobSummary {
   flowsFailed: number;
   campaignsImported: number;
   campaignsFailed: number;
+  /**
+   * Total emails landed by this job — sum of templates + campaign variants
+   * + emails inside imported flows. Drives the per-job toast "you just did
+   * X Nigerian hours of duplication work" (X = ceil(emails * 20min / 60)).
+   */
+  emailsImported: number;
 }
 
 export interface JobState {
@@ -536,10 +542,17 @@ export interface RunController {
   prompt(input: Omit<PendingInput, "id">): Promise<string>;
   /**
    * Record an item that successfully landed in Redo. Surfaces it in the
-   * assist view's per-store item list. Best-effort — silently no-ops if
-   * the job no longer exists or the DB is unavailable.
+   * assist view's per-store item list and contributes to the "Hours saved"
+   * tally. Best-effort — silently no-ops if the job no longer exists or
+   * the DB is unavailable. `emailCount` defaults to 1 (single email);
+   * pass the flow's createdTemplateCount + blankTemplateCount for flows.
    */
-  recordImported(item: { itemId: string; itemType: ItemType; name: string }): void;
+  recordImported(item: {
+    itemId: string;
+    itemType: ItemType;
+    name: string;
+    emailCount?: number;
+  }): void;
 }
 
 export function jobController(jobId: string): RunController {
@@ -560,6 +573,7 @@ export function jobController(jobId: string): RunController {
         itemId: item.itemId,
         itemType: item.itemType,
         name: item.name,
+        emailCount: item.emailCount,
       });
     },
   };
