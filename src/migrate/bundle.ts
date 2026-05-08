@@ -16,7 +16,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerResponse } from "node:http";
 import archiver from "archiver";
-import type { JobState } from "./jobs.js";
+import { coerceNote, type JobState } from "./jobs.js";
 
 const MIGRATIONS_DIR = "migrations";
 
@@ -104,23 +104,29 @@ export async function streamBundle(
   ];
 
   for (const item of items) {
-    const note = job.notes[item.id];
+    const note = coerceNote(job.notes[item.id]);
     const folder = `${item.type}-${item.id}`;
     if (item.type === "template") {
       addTemplateToBundle(job, item.id, folder, archive);
     } else {
       addFlowToBundle(job, item.id, folder, archive);
     }
-    if (note && note.trim() !== "") {
-      archive.append(note, { name: `${folder}/notes.md` });
+    if (note) {
+      const noteBody = note.author
+        ? `_by ${note.author}${note.savedAt ? ` · ${note.savedAt}` : ""}_\n\n${note.text}`
+        : note.text;
+      archive.append(noteBody, { name: `${folder}/notes.md` });
     }
 
     readmeChunks.push(
       `### ${item.type}: ${itemName(job, item.id)} (${item.id})`,
       `Folder: \`${folder}/\``,
     );
-    if (note && note.trim() !== "") {
-      readmeChunks.push("", "**Note:**", "", note.trim(), "");
+    if (note) {
+      readmeChunks.push("");
+      if (note.author) readmeChunks.push(`**Note** (by ${note.author}):`);
+      else readmeChunks.push(`**Note:**`);
+      readmeChunks.push("", note.text.trim(), "");
     }
     readmeChunks.push("");
   }

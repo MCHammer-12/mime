@@ -343,7 +343,16 @@ function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
   const [open, setOpen] = useStateJobs(true);
   const [selected, setSelected] = useStateJobs(() => new Set());
   // Local note buffers so typing doesn't lag while we debounce-save.
-  const [localNotes, setLocalNotes] = useStateJobs(() => ({ ...(job.notes || {}) }));
+  // Notes may be plain strings (admin-written) or {text, author, savedAt}
+  // (assistant-written) — coerce both to text for the textarea.
+  const [localNotes, setLocalNotes] = useStateJobs(() => {
+    const out = {};
+    for (const [k, v] of Object.entries(job.notes || {})) {
+      if (typeof v === "string") out[k] = v;
+      else if (v && typeof v === "object" && typeof v.text === "string") out[k] = v.text;
+    }
+    return out;
+  });
   const [exporting, setExporting] = useStateJobs(false);
   const saveTimers = useRefJobs({});
 

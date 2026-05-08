@@ -20,6 +20,7 @@
 
 import { randomUUID } from "node:crypto";
 import { getPool, isDbEnabled } from "./db.js";
+import { recordImportedItem, type ItemType } from "./imported-items.js";
 
 export type Severity = "info" | "warn" | "error" | "success";
 
@@ -82,6 +83,12 @@ export interface JobSummary {
   flowsFailed: number;
   campaignsImported: number;
   campaignsFailed: number;
+  /**
+   * Total emails landed by this job — sum of templates + campaign variants
+   * + emails inside imported flows. Drives the per-job toast "you just did
+   * X Nigerian hours of duplication work" (X = ceil(emails * 20min / 60)).
+   */
+  emailsImported: number;
 }
 
 export interface JobState {
@@ -293,14 +300,63 @@ export function setStatus(
 // ─── Notes (troubleshooting annotations) ───────────────────────────────────
 
 /**
- * Upsert a free-text note for a specific template or flow within a job.
- * Empty string clears the note. Persists to DB on best-effort basis.
+ * Stored note shape. Legacy entries are bare strings (admin-side notes
+ * written before the assist view shipped); newer entries are objects with
+ * an optional author so the assist UI can attribute notes. All readers
+ * should funnel through `coerceNote` rather than touching the raw value.
  */
-export function setNote(jobId: string, itemId: string, note: string): boolean {
+export type StoredNote = string | { text: string; author?: string; savedAt: string };
+
+export interface CoercedNote {
+  text: string;
+  author: string | null;
+  savedAt: string | null;
+}
+
+/** Normalize whatever's in `jobs.notes[itemId]` into a uniform shape. */
+export function coerceNote(value: unknown): CoercedNote | null {
+  if (typeof value === "string") {
+    return value.length > 0 ? { text: value, author: null, savedAt: null } : null;
+  }
+  if (value && typeof value === "object") {
+    const v = value as Record<string, unknown>;
+    if (typeof v.text === "string" && v.text.length > 0) {
+      return {
+        text: v.text,
+        author: typeof v.author === "string" ? v.author : null,
+        savedAt: typeof v.savedAt === "string" ? v.savedAt : null,
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Upsert a note for a specific template or flow within a job. Empty text
+ * clears the note. When `author` is provided the stored value is the
+ * structured shape; when omitted it remains a bare string for compatibility
+ * with existing admin-side callers and the Toby panel's local cache.
+ */
+export function setNote(
+  jobId: string,
+  itemId: string,
+  note: string,
+  author?: string,
+): boolean {
   const job = jobs.get(jobId);
   if (!job) return false;
   if (note.trim() === "") {
     delete job.notes[itemId];
+  } else if (author && author.trim() !== "") {
+    job.notes[itemId] = {
+      text: note,
+      author: author.trim(),
+      savedAt: new Date().toISOString(),
+    } as unknown as string;
+    // ^ JobState.notes is typed Record<string,string> for legacy reasons;
+    //   the JSONB column accepts the structured shape directly. Coerce
+    //   readers via `coerceNote` rather than tightening the type until the
+    //   structured shape is the only one in flight.
   } else {
     job.notes[itemId] = note;
   }
@@ -484,6 +540,19 @@ export async function hydrateFromDb(limit = 200): Promise<number> {
 export interface RunController {
   emit(event: { kind: string; severity?: Severity; [k: string]: unknown }): void;
   prompt(input: Omit<PendingInput, "id">): Promise<string>;
+  /**
+   * Record an item that successfully landed in Redo. Surfaces it in the
+   * assist view's per-store item list and contributes to the "Hours saved"
+   * tally. Best-effort — silently no-ops if the job no longer exists or
+   * the DB is unavailable. `emailCount` defaults to 1 (single email);
+   * pass the flow's createdTemplateCount + blankTemplateCount for flows.
+   */
+  recordImported(item: {
+    itemId: string;
+    itemType: ItemType;
+    name: string;
+    emailCount?: number;
+  }): void;
 }
 
 export function jobController(jobId: string): RunController {
@@ -493,6 +562,19 @@ export function jobController(jobId: string): RunController {
     },
     prompt(input) {
       return awaitInput(jobId, input);
+    },
+    recordImported(item) {
+      const job = jobs.get(jobId);
+      if (!job) return;
+      recordImportedItem({
+        storeId: job.storeId,
+        storeName: job.storeName,
+        jobId,
+        itemId: item.itemId,
+        itemType: item.itemType,
+        name: item.name,
+        emailCount: item.emailCount,
+      });
     },
   };
 }

@@ -149,6 +149,41 @@ const MIGRATIONS: Array<{ name: string; sql: string }> = [
         ON stores (merchant_slug);
     `,
   },
+  {
+    // Flat per-store list of successful imports — denormalized at the
+    // existing exported / flow_imported / campaign-imported events so the
+    // assist read path is one indexed query.
+    name: "004_imported_items",
+    sql: `
+      CREATE TABLE IF NOT EXISTS imported_items (
+        id BIGSERIAL PRIMARY KEY,
+        store_id TEXT NOT NULL,
+        store_name TEXT NOT NULL,
+        job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL,
+        item_type TEXT NOT NULL,
+        name TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'imported',
+        imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (store_id, item_id, job_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_imported_items_store
+        ON imported_items (store_id, imported_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_imported_items_lookup
+        ON imported_items (store_id, item_id, imported_at DESC);
+    `,
+  },
+  {
+    // email_count: how many individual emails this import represents.
+    //   - templates / campaign variants = 1
+    //   - flows = createdTemplateCount + blankTemplateCount
+    // Used for the "hours saved" tally — total time = SUM(email_count) * 20min.
+    name: "005_email_count",
+    sql: `
+      ALTER TABLE imported_items
+        ADD COLUMN IF NOT EXISTS email_count INTEGER NOT NULL DEFAULT 1;
+    `,
+  },
 ];
 
 /**
