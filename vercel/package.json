@@ -1,0 +1,12 @@
+{
+  "name": "redo-notes",
+  "version": "0.1.0",
+  "private": true,
+  "description": "External-facing assist surface — brand picker + per-item note + checkmark, deployed on Vercel against the same Postgres the Replit admin app writes to.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@neondatabase/serverless": "^0.10.4",
+    "@vercel/node": "^5.4.0"
+  }
+}
