@@ -1,5 +1,73 @@
 # Session Log
 
+## 2026-05-06/07 — Pretty Cult / Fore All / Gaidama bundle pass: bg, fonts, flow drops, SMS migration, Yotpo, saved templates
+
+**Context**
+Long live-use session against Pretty Cult (multiple bundles), Fore All UmQdKw failure, and Gaidama Yotpo flows. Triaged each bundle as it landed, fixed the underlying parser/importer bug or extended schema coverage, shipped 8 PRs.
+
+**Done — bg ancestor walker + system-font substitute ([#31](https://github.com/MCHammer-12/mime/pull/31))**
+- `findAncestorBackgroundColor` now walks every DOM ancestor (not just `td`), catching MJML section bg-divs / wrapping tables / body bg. Wired up the parsers that had hardcoded `"#ffffff"` fallbacks (button, line, socials, image, header, spacer, menu, klaviyo-specific, product, column, discount).
+- `New York` and `Baskerville` (Apple/Linotype system serifs, not on Google Fonts) → substitute to Georgia at parse time. Block-level via `parseFontFamily`; inline span declarations via new `substituteSystemFontsInHtml` pre-pass in the text parser.
+- Same PR also bundled: drop-policy for un-translatable flow actions (update-profile/list-update/target-date/heavily-unmapped-webhook) → drop-and-restitch chain (was WAIT stub); ab-test → extract `data.main_action` as a real send-email step; `organization.name` substitution in subject + preview (new `substituteStringVars`); `{{ event.extra.responsive_checkout_url }}` → `checkoutUrl` dynamic variable; static product blocks → real Products block with `productSelectionType: "static"` + `_pendingProducts` (importer-side resolution required); adjacent same-shape Products blocks merge with name dedup; AC context override (cart signal in doc → upgrade static product blocks to dynamic + Cart Item filter); social icon color from section-bg luminance; link color walks up ancestor spans for inherited `color:`; default `#000000` text/link on dark-bg sections → swap to white.
+- New memory: `feedback_drop_unsupported_actions` (drop-not-stub policy), `project_discount_codes_open_question` (parked decision), `project_sms_migration_plan` (now superseded by #32).
+
+**Done — SMS migration ([#32](https://github.com/MCHammer-12/mime/pull/32))**
+- send-sms now emits real `SendSmsStep` + `placeholderSmsTemplate`. importFlowRpc loops the placeholders → `createSmsTemplate` RPC → swaps sentinel templateId. Body Liquid through existing `rewriteKlaviyoLiquid`. Empty body (Klaviyo AI-content templates) → WAIT stub fallback. MMS image_id captured + dropped with warning (deferred to v2).
+- Fixed `SendSmsStep` type (was bogus `body: string`, now `templateId` + `phoneNumberFieldName: "customerPhone"` + `recipientNameFieldName: "customerFirstName"` per `send-sms.it.spec.ts`).
+- New `src/flow/sms.smoke.ts` smoke test verifies 1:1 step↔placeholder pairing.
+
+**Done — `person|lookup:"X"` Liquid translation ([#33](https://github.com/MCHammer-12/mime/pull/33))**
+- Pretty Cult AC SMS bundle showed `{{ person|lookup:"first_name"|default:'' }}` rendering as empty string. Rewriter was treating the `lookup:` form as unmapped. Now strips the lookup filter and routes the field through `KLAVIYO_TO_REDO_VAR_MAP`. Tolerant of single/double quotes, optional `$` prefix (legacy Swell), whitespace around `:`. Filter chain after lookup (`|default:`, `|upcase`) preserved.
+
+**Done — split-block image padding + WCAG contrast ([#34](https://github.com/MCHammer-12/mime/pull/34))**
+- `parseSplitSubblock` only read padding from a `td.spacer` and dropped to zero when missing. Now sums every td between the `<img>` and the kl-split-subblock div as a fallback.
+- Replaced "all-color-sources-unset → swap to white" heuristic with WCAG contrast check (`contrastRatio` helper). Resolved color contrasting below 3:1 against section bg → swap to whichever of black/white reads better. Catches the Klaviyo CSS-default `#15c` blue link on a black bg case where divStyle.color was set but still poor contrast. Same logic in product-block titles.
+
+**Done — line-height as `<br><br>` + product merge across spacers/lines ([#35](https://github.com/MCHammer-12/mime/pull/35))**
+- Klaviyo `line-height: 2` doesn't render in Redo. When `divStyle["line-height"]` parses as ≥ 1.7, replace each `<br>` with `<br><br>` and drop the inline line-height. New `parseLineHeightUnitless` helper.
+- Static-Products merge now walks back over only SPACER / LINE sections to find the most recent ProductsBlock candidate. Drops the intervening decorative sections. Non-decorative sections still break the chain so logical groupings stay separate.
+
+**Done — bundle failed flow imports with full context ([#36](https://github.com/MCHammer-12/mime/pull/36))**
+- When `createAdvancedFlow` failed, the troubleshoot bundle had only README + manifest. Parsed automation was discarded by the catch block; Klaviyo source flow JSON was never captured for failures; the full Zod error string was only on the UI's compact `fail` event.
+- New `flow_failed` event carries `parsedAutomation`, `klaviyoFlow`, `error`, `warningList`. bundle.ts reads it: writes `parse-result.json` (`{ status: "failed", error, warnings, parsedAutomation }`), `klaviyo-flow.json`, `error.txt`. Compact `fail` event preserved for UI red-row indicator.
+
+**Done — Yotpo Integration triggers ([#37](https://github.com/MCHammer-12/mime/pull/37))**
+- 12 Yotpo Loyalty + Reviews triggers now route Klaviyo metric → Redo Integration-category trigger. Per redoapp `advanced-flow-db-parser.ts:618-625`, no `eventName` / `triggerSpecificFields` required; `key` and `schemaType` strings match.
+- New `IntegrationTriggerKey` type alias; `FlowCategory` widened to include `"Integration"`; `TriggerKey` union extended.
+- 30+ aliases in METRIC_NAME_MAP covering Yotpo Swell (legacy) + Yotpo Loyalty (current) + display-form names. Verification against a live Yotpo merchant (Gaidama) still TODO.
+- All 12 also added to user-facing trigger picker as fallback.
+
+**Done — Saved Templates instead of Previous Emails ([#38](https://github.com/MCHammer-12/mime/pull/38))**
+- Saved templates and previous emails are two separate Mongo collections (`SavedEmailTemplate` vs `EmailTemplate`), not a flag. Mime was always calling `createEmailTemplate` → everything landed in Previous Emails.
+- New `asSavedTemplate?: boolean` opt on `importTemplateRpc`. Standalone template imports + campaign imports pass `true` → `createSavedEmailTemplate` RPC with `source: "saved"` → wrapper doc in SavedEmailTemplates collection. Flow placeholder templates KEEP using `createEmailTemplate` because flow `send_email.templateId` references EmailTemplate `_id` at send time.
+
+**Files changed (cross-PR)**
+- `src/parser/style-utils.ts`, `src/parser/index.ts`, `src/parser/url-mapping.ts`
+- `src/parser/blocks/{button,column,discount,header,image,klaviyo-specific,line,menu,product,socials,spacer,text}.ts`
+- `src/fonts.ts`, `src/transform.ts`, `src/export-template.ts`, `src/export-flow.ts`
+- `src/flow/parser.ts`, `src/flow/types.ts`, `src/flow/trigger-mapping.ts`, `src/flow/marketing-trigger-options.ts`, `src/flow/variable-mapping.ts`, `src/flow/import-one.ts`
+- `src/flow/sms.smoke.ts` (NEW)
+- `src/migrate/server.ts`, `src/migrate/import-rpc.ts`, `src/migrate/bundle.ts`
+- `src/renderer/types.ts`
+- `plans/sms-migration.md` (NEW)
+
+**Decisions (see DECISIONS.md)**
+- System fonts substitute to Redo system fonts at parse time, not Google Fonts.
+- Drop-not-stub for un-translatable flow actions (supersedes `feedback_skipped_action_mappings`).
+- ab-test → extract embedded main_action.
+- Static product blocks → Products block + `_pendingProducts` (importer-side Shopify name resolution).
+- WCAG contrast guard for text + link colors instead of "all-unset" heuristic.
+- Saved templates use a different RPC (different collection); flow-attached emails stay as EmailTemplate.
+
+**Next steps (in priority order)**
+1. **Live test the saved-templates split** — re-import a merchant; confirm Saved Templates tab populates and flow-attached emails still send (their `send_email.templateId` references survive).
+2. **Verify Yotpo aliases on Gaidama** — re-import; if any flow lands in the trigger picker with a Yotpo metric not in our aliases, add the missing entry.
+3. **Discount codes** still parked (memory `project_discount_codes_open_question`). User confirmed it now blocks SMS UX too. Likely needs redoapp-side change to programmatically create + attach a code at import time.
+4. **Importer-side `_pendingProducts` resolution** — redoapp `import-klaviyo-templates.ts` doesn't yet swap `_pendingProducts` for `manuallySelectedProducts` via Shopify name search. Mime is emitting; importer hasn't been updated.
+5. **MMS attachments support** for SMS (deferred to v2). Currently dropped with warning.
+
+---
+
 ## 2026-04-30 — Live merchant fixes: text vars, padding, troubleshoot bundle, trigger picker, campaigns filter
 
 **Context**
