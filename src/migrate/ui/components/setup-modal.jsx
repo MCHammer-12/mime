@@ -19,7 +19,6 @@ function SetupModal({ onSave, onClose, initialStore }) {
   const [redoToken, setRedoToken] = useSM(initialStore?.redoToken ?? "");
   const [redoServerBase, setRedoServerBase] = useSM(initialStore?.redoServerBase ?? "");
   const [showAdvanced, setShowAdvanced] = useSM(Boolean(initialStore?.redoServerBase));
-  const [showJwt, setShowJwt] = useSM(false);
   const [hydrating, setHydrating] = useSM(false);
 
   // For edit mode the parent may have only passed a masked listing entry.
@@ -106,24 +105,17 @@ function SetupModal({ onSave, onClose, initialStore }) {
           </label>
 
           <label className="block">
-            <div className="flex items-baseline justify-between mb-1.5">
-              <div className="text-[11px] text-[#8b949e]">
-                Redo session token
-                {isEdit && jwtExpired && (
-                  <span className="ml-2 text-[#f85149]">expired — paste fresh</span>
-                )}
-                {isEdit && !jwtExpired && jwtMinutesLeft !== null && (
-                  <span className="ml-2 text-[#8b949e]">expires in {jwtMinutesLeft} min</span>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowJwt((v) => !v)}
-                className="text-[10px] text-[#6e7681] hover:text-[#e6edf3]"
-              >{showJwt ? "hide" : "show"}</button>
+            <div className="text-[11px] text-[#8b949e] mb-1.5">
+              Redo session token
+              {isEdit && jwtExpired && (
+                <span className="ml-2 text-[#f85149]">expired — paste fresh</span>
+              )}
+              {isEdit && !jwtExpired && jwtMinutesLeft !== null && (
+                <span className="ml-2 text-[#8b949e]">expires in {jwtMinutesLeft} min</span>
+              )}
             </div>
             <input
-              type={showJwt ? "text" : "password"}
+              type="text"
               value={redoToken}
               onChange={(e) => setRedoToken(e.target.value)}
               placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"
