@@ -1,34 +1,86 @@
-// Add-store modal — three-field form. Decodes store ID from Redo token on save.
-// Token field always asks for the Redo session JWT (same in dev + prod).
+// Add/Edit-store modal — three-field form. Decodes store ID from Redo
+// token on save. Token field always asks for the Redo session JWT (same
+// in dev + prod).
+//
+// Modes:
+//   - Add (default): name + key + JWT all required.
+//   - Edit (when `initialStore` is passed): inputs pre-populate from the
+//     existing record. JWT field can be re-pasted to rotate when expired;
+//     leaving it blank keeps the prior value. Showing exp time helps the
+//     user know whether a rotation is needed.
 
-const { useState: useSM } = React;
+const { useState: useSM, useEffect: useEM } = React;
 
-function SetupModal({ onSave, onClose }) {
-  const [name, setName] = useSM("");
-  const [klaviyoKey, setKlaviyoKey] = useSM("");
-  const [redoToken, setRedoToken] = useSM("");
-  const [redoServerBase, setRedoServerBase] = useSM("");
-  const [showAdvanced, setShowAdvanced] = useSM(false);
+function SetupModal({ onSave, onClose, initialStore }) {
+  const isEdit = Boolean(initialStore);
 
-  const decoded = window.decodeStoreIdFromToken(redoToken);
-  const valid = name.trim() && klaviyoKey.trim().length > 10 && decoded;
+  const [name, setName] = useSM(initialStore?.name ?? "");
+  const [klaviyoKey, setKlaviyoKey] = useSM(initialStore?.klaviyoKey ?? "");
+  const [redoToken, setRedoToken] = useSM(initialStore?.redoToken ?? "");
+  const [redoServerBase, setRedoServerBase] = useSM(initialStore?.redoServerBase ?? "");
+  const [showAdvanced, setShowAdvanced] = useSM(Boolean(initialStore?.redoServerBase));
+  const [showKlaviyo, setShowKlaviyo] = useSM(false);
+  const [showJwt, setShowJwt] = useSM(false);
+  const [hydrating, setHydrating] = useSM(false);
+
+  // For edit mode the parent may have only passed a masked listing entry.
+  // Pull the unmasked record once on mount.
+  useEM(() => {
+    if (!isEdit || !initialStore?.id) return;
+    if (initialStore.klaviyoKey) return; // already hydrated
+    if (typeof window.fetchStoreById !== "function") return;
+    setHydrating(true);
+    window
+      .fetchStoreById(initialStore.id)
+      .then((rec) => {
+        if (rec.klaviyoKey && !klaviyoKey) setKlaviyoKey(rec.klaviyoKey);
+        if (rec.redoToken && !redoToken) setRedoToken(rec.redoToken);
+        if (rec.name && !name) setName(rec.name);
+        if (rec.redoServerBase && !redoServerBase) setRedoServerBase(rec.redoServerBase);
+      })
+      .finally(() => setHydrating(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEdit, initialStore?.id]);
+
+  const decoded = window.decodeStoreIdFromToken(redoToken)
+    ?? initialStore?.decodedStoreId
+    ?? null;
+
+  // Edit mode: name + klaviyo key required, JWT optional (blank means
+  // "keep existing"). Add mode: all three required.
+  const valid = isEdit
+    ? Boolean(name.trim() && klaviyoKey.trim().length > 10)
+    : Boolean(name.trim() && klaviyoKey.trim().length > 10 && decoded);
 
   const inputClass =
     "w-full bg-[#010409] border border-[#30363d] rounded-[4px] " +
     "px-2.5 py-2 text-[13px] text-[#e6edf3] " +
     "placeholder:text-[#484f58] focus:outline-none focus:border-[#388bfd]";
 
+  // JWT exp surface — helps the user decide whether the token even needs
+  // re-pasting before they hit save.
+  const jwtExpMs = redoToken ? window.decodeJwtExp?.(redoToken) : null;
+  const jwtExpired = jwtExpMs && jwtExpMs < Date.now();
+  const jwtMinutesLeft = jwtExpMs && !jwtExpired
+    ? Math.round((jwtExpMs - Date.now()) / 60000)
+    : null;
+
   return (
     <div className="fixed inset-0 z-50 bg-[#010409cc] backdrop-blur-sm flex items-center justify-center px-4">
       <div className="w-full max-w-[460px] bg-[#0d1117] border border-[#30363d] rounded-[6px] shadow-2xl">
         <div className="flex items-center justify-between px-5 py-3 border-b border-[#21262d]">
-          <h2 className="font-serif text-[22px] leading-none text-[#e6edf3]">Add store</h2>
+          <h2 className="font-serif text-[22px] leading-none text-[#e6edf3]">
+            {isEdit ? "Edit credentials" : "Add store"}
+          </h2>
           <button onClick={onClose} className="text-[#6e7681] hover:text-[#e6edf3]">
             <Icon.x width="14" height="14"/>
           </button>
         </div>
 
         <div className="px-5 py-4 space-y-4">
+          {hydrating && (
+            <div className="text-[11px] text-[#8b949e]">Loading current values…</div>
+          )}
           <label className="block">
             <div className="text-[11px] text-[#8b949e] mb-1.5">Store name</div>
             <input
@@ -36,15 +88,22 @@ function SetupModal({ onSave, onClose }) {
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Acme Co."
               className={inputClass}
-              autoFocus
+              autoFocus={!isEdit}
             />
             <div className="text-[10px] text-[#6e7681] mt-1">Merchant-facing name. Shows on the dashboard.</div>
           </label>
 
           <label className="block">
-            <div className="text-[11px] text-[#8b949e] mb-1.5">Klaviyo key</div>
+            <div className="flex items-baseline justify-between mb-1.5">
+              <div className="text-[11px] text-[#8b949e]">Klaviyo key</div>
+              <button
+                type="button"
+                onClick={() => setShowKlaviyo((v) => !v)}
+                className="text-[10px] text-[#6e7681] hover:text-[#e6edf3]"
+              >{showKlaviyo ? "hide" : "show"}</button>
+            </div>
             <input
-              type="text"
+              type={showKlaviyo ? "text" : "password"}
               value={klaviyoKey}
               onChange={(e) => setKlaviyoKey(e.target.value)}
               placeholder="pk_abc123def456…"
@@ -58,10 +117,21 @@ function SetupModal({ onSave, onClose }) {
             <div className="flex items-baseline justify-between mb-1.5">
               <div className="text-[11px] text-[#8b949e]">
                 Redo session token
+                {isEdit && jwtExpired && (
+                  <span className="ml-2 text-[#f85149]">expired — paste fresh</span>
+                )}
+                {isEdit && !jwtExpired && jwtMinutesLeft !== null && (
+                  <span className="ml-2 text-[#8b949e]">expires in {jwtMinutesLeft} min</span>
+                )}
               </div>
+              <button
+                type="button"
+                onClick={() => setShowJwt((v) => !v)}
+                className="text-[10px] text-[#6e7681] hover:text-[#e6edf3]"
+              >{showJwt ? "hide" : "show"}</button>
             </div>
             <input
-              type="text"
+              type={showJwt ? "text" : "password"}
               value={redoToken}
               onChange={(e) => setRedoToken(e.target.value)}
               placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…"
@@ -79,7 +149,7 @@ function SetupModal({ onSave, onClose }) {
             {decoded && (
               <div className="text-[10px] text-[#3fb950] mt-1.5 font-mono flex items-center gap-1.5">
                 <Icon.check width="10" height="10"/>
-                Store ID decoded: {decoded.slice(0, 20)}…
+                Store ID: {decoded.slice(0, 20)}…
               </div>
             )}
           </label>
@@ -122,15 +192,21 @@ function SetupModal({ onSave, onClose }) {
           >Cancel</button>
           <button
             onClick={() => valid && onSave({
+              id: initialStore?.id,
               name: name.trim(),
               klaviyoKey: klaviyoKey.trim(),
-              redoToken: redoToken.trim(),
+              // In edit mode, an empty token means "keep existing" so we
+              // omit the field from the patch. Trimmed token is required
+              // in add mode.
+              ...(redoToken.trim()
+                ? { redoToken: redoToken.trim() }
+                : {}),
               decodedStoreId: decoded,
               redoServerBase: redoServerBase.trim() || null,
             })}
             disabled={!valid}
             className="text-[12px] font-medium text-white bg-[#238636] hover:bg-[#2ea043] disabled:bg-[#21262d] disabled:text-[#6e7681] disabled:cursor-not-allowed px-3 py-1.5 rounded-[4px] border border-[#2ea043] disabled:border-[#30363d]"
-          >Add store</button>
+          >{isEdit ? "Save changes" : "Add store"}</button>
         </div>
       </div>
     </div>

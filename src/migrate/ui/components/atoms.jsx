@@ -165,6 +165,11 @@ const Icon = {
       <rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 6.5H14M2 9.5H14" strokeLinecap="round"/>
     </svg>
   ),
+  pencil: (p) => (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" {...p}>
+      <path d="M11.5 2.5L13.5 4.5L5 13H3V11L11.5 2.5Z" strokeLinejoin="round"/>
+    </svg>
+  ),
 };
 
 Object.assign(window, { StatusBadge, relDate, Checkbox, Icon });

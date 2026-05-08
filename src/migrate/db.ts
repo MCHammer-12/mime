@@ -122,6 +122,33 @@ const MIGRATIONS: Array<{ name: string; sql: string }> = [
         ADD COLUMN IF NOT EXISTS notes JSONB NOT NULL DEFAULT '{}'::jsonb;
     `,
   },
+  {
+    // Stores merchant credentials server-side so (a) Claude can run
+    // resolver diagnostics autonomously, (b) keys outlive a browser's
+    // localStorage, (c) JWT can be edited in one place when it expires
+    // and the next run picks up the new value automatically.
+    //
+    // Threat model: anyone with basic-auth creds can read all keys via
+    // GET /api/stores/:id. That's intentional — same access surface as
+    // submitting an arbitrary klaviyoKey to /api/run today.
+    name: "003_stores",
+    sql: `
+      CREATE TABLE IF NOT EXISTS stores (
+        id              TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        merchant_slug   TEXT NOT NULL,
+        klaviyo_key     TEXT NOT NULL,
+        redo_jwt        TEXT,
+        store_id        TEXT NOT NULL,
+        redo_server_base TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_imported_at TIMESTAMPTZ
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_stores_slug
+        ON stores (merchant_slug);
+    `,
+  },
 ];
 
 /**

@@ -171,7 +171,13 @@ const EMPTY_DATA = {
 };
 
 function App() {
-  // ─ Stores ─ (persisted to localStorage via mock-stores.js)
+  // ─ Stores ─
+  // Persistence is in mock-stores.js — server-backed (`/api/stores`) when
+  // the deploy has a Postgres URL configured, localStorage otherwise.
+  // The `stores:refreshed` event fires after a server pull, so we mirror
+  // it into React state. setStores() still calls saveStores() for the
+  // localStorage path; the server path no-ops it (mutations go through
+  // window.addStore/updateStore/deleteStore).
   const [stores, setStoresState] = useS(window.MOCK_STORES);
   const setStores = (updater) =>
     setStoresState((prev) => {
@@ -179,9 +185,19 @@ function App() {
       window.saveStores?.(next);
       return next;
     });
+  useE(() => {
+    const onRefresh = (e) => setStoresState(e.detail || window.MOCK_STORES);
+    window.addEventListener("stores:refreshed", onRefresh);
+    return () => window.removeEventListener("stores:refreshed", onRefresh);
+  }, []);
 
   const [view, setView] = useS({ screen: "dashboard", storeId: null });
   const [showAddStore, setShowAddStore] = useS(false);
+  // null = closed; { id, ... } = open with a specific store loaded.
+  // Triggered from the dashboard's per-card edit pencil. Lets the user
+  // rotate an expired JWT or update a Klaviyo key without re-creating
+  // the store record.
+  const [editingStore, setEditingStore] = useS(null);
 
   // ─ Per-store data catalogs, fetched on demand ─
   // Each entry: {
@@ -200,11 +216,39 @@ function App() {
     ? (storeDataMap[view.storeId] || EMPTY_DATA)
     : EMPTY_DATA;
 
+  // Hydrated-store cache: when stores come from the server, the list
+  // entries have masked keys only. We pull the full record (with
+  // klaviyoKey + redoToken) the first time it's needed for a migration.
+  // Mutations still go through window.updateStore — this map just
+  // remembers what we've fetched this session.
+  const [hydratedStores, setHydratedStores] = useS({});
+
+  const getHydratedStore = useC(async (storeId) => {
+    if (hydratedStores[storeId]) return hydratedStores[storeId];
+    const fromList = stores.find((s) => s.id === storeId);
+    if (fromList && fromList.klaviyoKey) {
+      // localStorage backend already has unmasked keys in the list.
+      setHydratedStores((h) => ({ ...h, [storeId]: fromList }));
+      return fromList;
+    }
+    if (typeof window.fetchStoreById !== "function") {
+      return fromList ?? null;
+    }
+    try {
+      const full = await window.fetchStoreById(storeId);
+      setHydratedStores((h) => ({ ...h, [storeId]: full }));
+      return full;
+    } catch (e) {
+      console.warn("getHydratedStore failed", storeId, e);
+      return fromList ?? null;
+    }
+  }, [stores, hydratedStores]);
+
   // Fetch flows + templates when the user opens a store's migration view.
   useE(() => {
     if (view.screen !== "migration" || !view.storeId) return;
-    const store = stores.find((s) => s.id === view.storeId);
-    if (!store) return;
+    const listed = stores.find((s) => s.id === view.storeId);
+    if (!listed) return;
     if (storeDataMap[view.storeId]?.loaded) return; // already fetched
 
     const sid = view.storeId;
@@ -234,8 +278,15 @@ function App() {
       });
     };
 
-    window
-      .fetchStoreData(store, onProgress)
+    getHydratedStore(sid)
+      .then((store) => {
+        if (!store?.klaviyoKey) {
+          throw new Error(
+            "store has no klaviyoKey — open the credentials editor and paste a key first",
+          );
+        }
+        return window.fetchStoreData(store, onProgress);
+      })
       .then((res) => {
         setStoreDataMap((m) => ({
           ...m,
@@ -421,23 +472,46 @@ function App() {
   }, [view.screen, view.storeId]);
 
   // ─ Add store ─
-  // Saves the store and immediately opens its migration screen so the
-  // operator goes straight from "submit credentials" to "pick what to
-  // import" without an extra click on the dashboard tile.
-  const addStore = (data) => {
-    const newStore = {
-      id: `str_${Date.now().toString(36)}`,
-      name: data.name,
-      klaviyoKey: data.klaviyoKey,
-      redoToken: data.redoToken,
-      decodedStoreId: data.decodedStoreId,
-      redoServerBase: data.redoServerBase ?? null,
-      createdAt: Date.now(),
-      lastImportedAt: null,
-    };
-    setStores(s => [...s, newStore]);
-    setShowAddStore(false);
-    setView({ screen: "migration", storeId: newStore.id });
+  // Saves the store via window.addStore (server-backed when DB is on,
+  // localStorage-fallback otherwise) and immediately opens its migration
+  // screen. The hydrated cache gets seeded with the just-created record so
+  // the migration view doesn't make a second round-trip for keys we just
+  // sent.
+  const addStore = async (data) => {
+    try {
+      const newStore = await window.addStore({
+        name: data.name,
+        merchantSlug: data.merchantSlug ?? data.name,
+        klaviyoKey: data.klaviyoKey,
+        redoToken: data.redoToken,
+        decodedStoreId: data.decodedStoreId,
+        redoServerBase: data.redoServerBase ?? null,
+      });
+      setHydratedStores((h) => ({ ...h, [newStore.id]: newStore }));
+      // Refresh-driven setStores keeps server backend in sync; for
+      // localStorage we still mirror into React state explicitly.
+      setStoresState((prev) =>
+        prev.some((s) => s.id === newStore.id) ? prev : [...prev, newStore],
+      );
+      setShowAddStore(false);
+      setView({ screen: "migration", storeId: newStore.id });
+    } catch (e) {
+      window.alert(`Failed to save store: ${e?.message ?? e}`);
+    }
+  };
+
+  // ─ Update store ─ (e.g. rotating an expired JWT)
+  const updateStoreCreds = async (storeId, patch) => {
+    try {
+      const updated = await window.updateStore(storeId, patch);
+      if (!updated) return;
+      setHydratedStores((h) => ({ ...h, [storeId]: updated }));
+      setStoresState((prev) =>
+        prev.map((s) => (s.id === storeId ? { ...s, ...updated } : s)),
+      );
+    } catch (e) {
+      window.alert(`Failed to update store: ${e?.message ?? e}`);
+    }
   };
 
   // ─ Delete store ─
@@ -446,7 +520,7 @@ function App() {
   // left as orphan entries — they're keyed by storeId and garbage-collected
   // on the next browser-storage clear. Jobs stay in the jobs panel so the
   // user can still open their logs.
-  const deleteStore = (storeId) => {
+  const deleteStore = async (storeId) => {
     const store = stores.find(s => s.id === storeId);
     if (!store) return;
     const jobsForStore = jobs.filter(j => j.storeId === storeId);
@@ -455,7 +529,14 @@ function App() {
       ? `Delete "${store.name}"?\n\n${running} job${running === 1 ? "" : "s"} still running — they'll keep running on the server but disappear from the dashboard.`
       : `Delete "${store.name}"?\n\nThe store card will be removed from the dashboard. Prior imports in Redo are unaffected.`;
     if (!window.confirm(msg)) return;
-    setStores(s => s.filter(x => x.id !== storeId));
+    try {
+      await window.deleteStore(storeId);
+    } catch (e) {
+      window.alert(`Failed to delete store: ${e?.message ?? e}`);
+      return;
+    }
+    setStoresState((prev) => prev.filter((x) => x.id !== storeId));
+    setHydratedStores((h) => { const { [storeId]: _drop, ...rest } = h; return rest; });
     setStoreDataMap(m => {
       const { [storeId]: _drop, ...rest } = m;
       return rest;
@@ -467,9 +548,17 @@ function App() {
   const goDashboard = () => setView({ screen: "dashboard", storeId: null });
 
   // ─ Import ─
-  const startImport = useC((storeId) => {
-    const store = stores.find(s => s.id === storeId);
+  const startImport = useC(async (storeId) => {
+    // Server-backed stores carry only masked keys in the listing — pull
+    // the full record before kicking off the import.
+    const store = await getHydratedStore(storeId);
     if (!store) return;
+    if (!store.klaviyoKey) {
+      window.alert(
+        "This store has no Klaviyo key on record. Open the credentials editor to paste one before starting the import.",
+      );
+      return;
+    }
     const ss = getStoreState(storeId);
     const totalSel = ss.selectedFlowIds.size + ss.selectedTmplIds.size + ss.selectedCampaignIds.size;
     if (totalSel === 0) return;
@@ -555,7 +644,7 @@ function App() {
         applyEvent(jobId, { kind: "error", text: e?.message ?? String(e) });
       }
     })();
-  }, [stores, perStore, jobs, data]);
+  }, [stores, perStore, jobs, data, getHydratedStore]);
 
   const applyEvent = useC((jobId, evt) => {
     setJobs(js => js.map(j => {
@@ -680,7 +769,9 @@ function App() {
     })));
     const job = jobs.find(j => j.id === jobId);
     const storeId = job?.storeId;
-    const store = stores.find(s => s.id === storeId);
+    // Pull the full record (with klaviyoKey) before re-running the import —
+    // listed stores only carry masked keys when DB is enabled.
+    const store = storeId ? await getHydratedStore(storeId) : null;
     if (storeId) setInProgress(ip => ({ ...ip, [storeId]: new Set([...(ip[storeId] || []), item.id]) }));
 
     const flow = data.flows.find(f => f.flowId === item.id);
@@ -704,7 +795,7 @@ function App() {
       ...j,
       items: j.items.map(i => i.id === item.id ? { ...i, retrying: false } : i),
     })));
-  }, [jobs, stores, data, applyEvent]);
+  }, [jobs, stores, data, applyEvent, getHydratedStore]);
 
   const dismissJob = useC((jobId) => {
     setJobs(js => js.filter(j => j.id !== jobId));
@@ -823,6 +914,10 @@ function App() {
             onOpenStore={openStore}
             onAddStore={() => setShowAddStore(true)}
             onDeleteStore={deleteStore}
+            onEditStore={(storeId) => {
+              const s = stores.find((x) => x.id === storeId);
+              if (s) setEditingStore(s);
+            }}
           />
         ) : (
           <MigrationScreen
@@ -855,6 +950,27 @@ function App() {
 
       {showAddStore && (
         <SetupModal onSave={addStore} onClose={() => setShowAddStore(false)} />
+      )}
+      {editingStore && (
+        <SetupModal
+          initialStore={editingStore}
+          onClose={() => setEditingStore(null)}
+          onSave={async (data) => {
+            const patch = {
+              name: data.name,
+              klaviyoKey: data.klaviyoKey,
+              decodedStoreId: data.decodedStoreId,
+              redoServerBase: data.redoServerBase,
+            };
+            // Empty redoToken in edit mode means "keep existing", so only
+            // include it when the user actually pasted a new value.
+            if (typeof data.redoToken === "string" && data.redoToken.length > 0) {
+              patch.redoToken = data.redoToken;
+            }
+            await updateStoreCreds(editingStore.id, patch);
+            setEditingStore(null);
+          }}
+        />
       )}
       {pendingInput && (
         <NeedsInputModal
