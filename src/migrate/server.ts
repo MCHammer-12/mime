@@ -64,16 +64,25 @@ import {
   updateStore,
 } from "./stores.js";
 import {
+  adminPathPrefix,
+  clearAdminClaimCookie,
   clearAdminUserCookie,
+  getAdminClaimToken,
   getAdminUser,
   isAdmin,
   isAdminAuthEnabled,
   isAdminEntryUrl,
   isAllowedAdminUser,
   requireAdmin,
+  setAdminClaimCookie,
   setAdminCookie,
   setAdminUserCookie,
 } from "./auth.js";
+import {
+  getClaimStatus,
+  tryClaim,
+  userForClaimToken,
+} from "./claims.js";
 import {
   emailsToHours,
   findLatestJobForItem,
@@ -1855,10 +1864,57 @@ async function handleJobNotes(
   json(res, 200, { ok: true });
 }
 
+/**
+ * Full admin gate — admin_token cookie AND a valid claim. Used on every
+ * endpoint except the identity-pick flow and /api/me (which need to be
+ * callable BEFORE the user has claimed an identity).
+ *
+ * Returns true if the request may proceed; false (and writes 401)
+ * otherwise. Async because the claim check hits the DB.
+ */
+async function requireFullAdmin(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<boolean> {
+  if (!requireAdmin(req, res)) return false;
+  // Local dev (no ADMIN_URL_TOKEN) → no claims either; admin_token
+  // already bypassed, treat claim as bypassed too.
+  if (!isAdminAuthEnabled()) return true;
+  const claimToken = getAdminClaimToken(req);
+  const claimedUser = await userForClaimToken(claimToken);
+  if (claimedUser) return true;
+  // Claim missing or invalid. If no one has claimed anything yet, allow
+  // through so the first visitor can do anything they need before they
+  // hit the identity modal. Once any claim exists, the gate locks.
+  const status = await getClaimStatus(claimToken);
+  if (status.claimedUsers.length === 0) return true;
+  res.writeHead(401, { "content-type": "application/json" });
+  res.end(JSON.stringify({
+    error: "admin claim required",
+    detail: "pick your identity first (or both slots are taken)",
+  }));
+  return false;
+}
+
 // ─── Admin identity (Austin / Michael) ──────────────────────────────────
+//
+// First-visit modal picks Austin or Michael. The slot is claimed in
+// admin_claims and tied to the browser via the HttpOnly admin_claim
+// cookie. Once both slots are claimed, no new browser can authenticate
+// as either — the modal disables taken options and any API call that
+// requires admin returns 401 until they present a matching claim cookie.
 
 async function handleAdminIdentityGet(req: IncomingMessage, res: ServerResponse) {
-  json(res, 200, { user: getAdminUser(req) });
+  const claimToken = getAdminClaimToken(req);
+  const status = await getClaimStatus(claimToken);
+  // Prefer the DB-verified identity when the cookie validates against a
+  // claim; fall back to the un-validated admin_user cookie (legacy / no
+  // DB available) just so we don't blow up local dev.
+  const user = status.myClaim ?? getAdminUser(req);
+  json(res, 200, {
+    user,
+    claimedUsers: status.claimedUsers,
+  });
 }
 
 async function handleAdminIdentitySet(req: IncomingMessage, res: ServerResponse) {
@@ -1867,13 +1923,63 @@ async function handleAdminIdentitySet(req: IncomingMessage, res: ServerResponse)
   if (!isAllowedAdminUser(user)) {
     return json(res, 400, { error: "user must be Austin or Michael" });
   }
+  const existingToken = getAdminClaimToken(req);
+  const outcome = await tryClaim(user, existingToken);
+  if (!outcome.ok) {
+    if (outcome.reason === "already_claimed") {
+      return json(res, 403, {
+        error: "this identity is already claimed by another browser",
+      });
+    }
+    // db_unavailable — fall back to the legacy in-memory cookie-only flow
+    // so local dev (no DATABASE_URL) still works. No claim is recorded.
+    setAdminUserCookie(res, user);
+    return json(res, 200, { user });
+  }
   setAdminUserCookie(res, user);
+  if (!outcome.existed) {
+    // First-time claim; set the proof cookie.
+    setAdminClaimCookie(res, outcome.token);
+  } else if (!existingToken) {
+    // Re-affirm an existing claim that's somehow lost its cookie locally.
+    setAdminClaimCookie(res, outcome.token);
+  }
   json(res, 200, { user });
 }
 
 async function handleAdminIdentityClear(_req: IncomingMessage, res: ServerResponse) {
+  // Only clears the cookies locally — the claim row in admin_claims
+  // stays so the slot remains owned. A new "switch user" press just
+  // re-shows the modal; the next pick must match the existing claim
+  // (your own slot) or be the other still-unclaimed name.
   clearAdminUserCookie(res);
   json(res, 200, { ok: true });
+}
+
+// "Who am I?" — used by the assist UI to decide whether to show the
+// "← Admin" back-link. Returns the verified admin identity (if any) and
+// the URL to the admin dashboard so the link is correct even when the
+// admin URL token rotates.
+async function handleMe(req: IncomingMessage, res: ServerResponse) {
+  const adminViaCookie = isAdmin(req);
+  // Local dev (no ADMIN_URL_TOKEN) skips the claim check — adminViaCookie
+  // already trusts everything. In prod, the claim cookie has to match a
+  // row in admin_claims for the back-link to appear.
+  if (!isAdminAuthEnabled()) {
+    return json(res, 200, {
+      isAdmin: adminViaCookie,
+      adminUser: getAdminUser(req),
+      adminUrl: adminViaCookie ? `${adminPathPrefix()}/` : null,
+    });
+  }
+  const claimToken = getAdminClaimToken(req);
+  const claimedUser = await userForClaimToken(claimToken);
+  const verified = adminViaCookie && claimedUser !== null;
+  json(res, 200, {
+    isAdmin: verified,
+    adminUser: verified ? claimedUser : null,
+    adminUrl: verified ? `${adminPathPrefix()}/` : null,
+  });
 }
 
 // ─── Admin metrics — running "Hours saved" tally for the header ──────────
@@ -2894,7 +3000,7 @@ const server = createServer(async (req, res) => {
     }
     // GET /legacy → the original inline HTML (for debugging). Admin-gated.
     if (req.method === "GET" && req.url === "/legacy") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(HTML);
       return;
@@ -2910,33 +3016,39 @@ const server = createServer(async (req, res) => {
         isAdmin: isAdmin(req),
       });
     }
+    // "Am I admin?" — used by the assist UI to decide whether to render
+    // the "← Admin" back-link in its header. Open endpoint (no gate);
+    // returns only the verified identity, no other secrets.
+    if (req.method === "GET" && req.url === "/api/me") {
+      return handleMe(req, res);
+    }
     // ─── Admin-only endpoints (Klaviyo/Redo creds, import triggers, jobs) ──
     if (req.method === "POST" && req.url === "/api/templates") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleTemplates(req, res);
     }
     if (req.method === "POST" && req.url === "/api/flows") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleFlows(req, res);
     }
     if (req.method === "POST" && req.url === "/api/flows/stream") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleFlowsStream(req, res);
     }
     if (req.method === "POST" && req.url === "/api/flows/list") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleFlowsList(req, res);
     }
     if (req.method === "POST" && req.url === "/api/flows/walk-batch") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleFlowsWalkBatch(req, res);
     }
     if (req.method === "POST" && req.url === "/api/campaigns") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleCampaigns(req, res);
     }
     if (req.method === "POST" && req.url === "/api/run") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleRun(req, res);
     }
     // Job-based dashboard endpoints — admin only.
@@ -2945,29 +3057,32 @@ const server = createServer(async (req, res) => {
     // job routes so /api/stores/:id/... never collides. Admin only —
     // these endpoints expose merchant Klaviyo keys + Redo JWTs.
     if (req.method === "GET" && (url === "/api/stores" || url.startsWith("/api/stores?"))) {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleStoresList(req, res);
     }
     if (req.method === "POST" && url === "/api/stores") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleStoreCreate(req, res);
     }
     const storePath = url.match(/^\/api\/stores\/([^/?]+)(\?.*)?$/);
     if (storePath) {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       const sid = storePath[1];
       if (req.method === "GET") return handleStoreGet(res, sid);
       if (req.method === "PATCH") return handleStoreUpdate(req, res, sid);
       if (req.method === "DELETE") return handleStoreDelete(res, sid);
     }
     if (req.method === "POST" && url === "/api/debug/resolve-template") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleDebugResolveTemplate(req, res);
     }
     if (req.method === "GET" && url === "/api/admin/metrics") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleAdminMetrics(req, res);
     }
+    // Identity endpoints use the lighter requireAdmin gate (admin_token
+    // cookie only) — they're the path through the identity modal, so they
+    // need to be callable BEFORE the user has a valid claim.
     if (req.method === "GET" && url === "/api/admin/identity") {
       if (!requireAdmin(req, res)) return;
       return handleAdminIdentityGet(req, res);
@@ -2981,16 +3096,16 @@ const server = createServer(async (req, res) => {
       return handleAdminIdentityClear(req, res);
     }
     if (req.method === "POST" && url === "/api/jobs") {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleJobCreate(req, res);
     }
     if (req.method === "GET" && (url === "/api/jobs" || url.startsWith("/api/jobs?"))) {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       return handleJobList(req, res);
     }
     const jobPath = url.match(/^\/api\/jobs\/([^/?]+)(\/[a-z]+)?(\?.*)?$/);
     if (jobPath) {
-      if (!requireAdmin(req, res)) return;
+      if (!(await requireFullAdmin(req, res))) return;
       const jobId = jobPath[1];
       const sub = jobPath[2];
       if (req.method === "GET" && !sub) return handleJobGet(res, jobId);

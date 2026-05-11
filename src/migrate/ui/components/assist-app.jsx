@@ -47,6 +47,18 @@ function AssistApp() {
   const [route, setRoute] = useStateApp(readRouteFromHash);
   const [author] = useStateApp(readAuthorFromUrl);
   const [preview] = useStateApp(readPreviewFlag);
+  // "Am I admin?" — null while loading, then { isAdmin, adminUrl }. Only
+  // verified admins (via the admin_claim cookie) get the "← Admin" link.
+  // Assistants don't see it; they have no path to the dashboard from here.
+  const [me, setMe] = useStateApp(null);
+  useEffectApp(() => {
+    let cancelled = false;
+    fetch("/api/me")
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (!cancelled && j) setMe(j); })
+      .catch(() => { /* best-effort */ });
+    return () => { cancelled = true; };
+  }, []);
 
   const [stores, setStores] = useStateApp([]);
   const [storesLoading, setStoresLoading] = useStateApp(true);
@@ -218,6 +230,14 @@ function AssistApp() {
     <div className="h-screen w-screen flex flex-col bg-[#0d1117] text-[#e6edf3] font-sans">
       <header className="flex items-center gap-3 px-4 py-2 border-b border-[#21262d] bg-[#010409]">
         <span className="font-serif text-[22px] leading-none text-[#e6edf3]">redo</span>
+        {me && me.isAdmin && me.adminUrl && (
+          <a
+            href={me.adminUrl}
+            className="text-[11px] text-[#388bfd] hover:text-[#58a6ff]"
+          >
+            ← Admin
+          </a>
+        )}
         {author && (
           <span className="ml-auto text-[11px] text-[#6e7681]">
             signed as <span className="text-[#8b949e]">{author}</span>
