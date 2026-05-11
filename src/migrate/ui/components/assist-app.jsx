@@ -4,6 +4,11 @@
 // per-store items list. The `?as=<name>` query param identifies the
 // assistant for note attribution; it's read once at boot and bookmarked
 // per-assistant ("…/?as=alex"). No login.
+//
+// `?preview=1` is a read-only flag used by the admin's "View as X" links.
+// In preview mode, note saves and done toggles are no-ops and a banner
+// at the top surfaces "Previewing as <name>". Lets Michael look at the
+// page without polluting attribution.
 
 const { useState: useStateApp, useEffect: useEffectApp, useCallback: useCApp } = React;
 
@@ -20,6 +25,15 @@ function readAuthorFromUrl() {
   }
 }
 
+function readPreviewFlag() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("preview") === "1";
+  } catch (_) {
+    return false;
+  }
+}
+
 function readRouteFromHash() {
   const h = window.location.hash || "";
   const m = h.match(/^#\/store\/([^/?]+)/);
@@ -30,6 +44,7 @@ function readRouteFromHash() {
 function AssistApp() {
   const [route, setRoute] = useStateApp(readRouteFromHash);
   const [author] = useStateApp(readAuthorFromUrl);
+  const [preview] = useStateApp(readPreviewFlag);
 
   const [stores, setStores] = useStateApp([]);
   const [storesLoading, setStoresLoading] = useStateApp(true);
@@ -94,6 +109,10 @@ function AssistApp() {
 
   const onSaveNote = useCApp(async (itemId, note) => {
     if (route.view !== "store") return null;
+    // Preview mode: short-circuit before the POST so writes don't fire.
+    // Return null to signal "no save" — the item row will leave the
+    // textarea editable but clear the "Saved by" line.
+    if (preview) return null;
     try {
       const r = await fetch(
         `/api/assist/stores/${encodeURIComponent(route.storeId)}/items/${encodeURIComponent(itemId)}/note`,
@@ -109,10 +128,11 @@ function AssistApp() {
       console.warn("save note failed:", e);
       return null;
     }
-  }, [route, author]);
+  }, [route, author, preview]);
 
   const onToggleDone = useCApp(async (itemId, done) => {
     if (route.view !== "store" || !author) return false;
+    if (preview) return false;
     try {
       const r = await fetch(
         `/api/assist/stores/${encodeURIComponent(route.storeId)}/items/${encodeURIComponent(itemId)}/done`,
@@ -130,7 +150,7 @@ function AssistApp() {
       console.warn("toggle done failed:", e);
       return false;
     }
-  }, [route, author]);
+  }, [route, author, preview]);
 
   const openStore = (storeId) => {
     window.location.hash = `#/store/${encodeURIComponent(storeId)}`;
@@ -154,6 +174,11 @@ function AssistApp() {
           </span>
         )}
       </header>
+      {preview && (
+        <div className="px-4 py-1.5 bg-[#FF440520] border-b border-[#FF4405]/40 text-[11px] text-[#FF7a4f] text-center">
+          Previewing as <span className="font-semibold">{author || "—"}</span> · read-only (your notes and checkmarks won't save)
+        </div>
+      )}
       <div className="flex flex-1 overflow-hidden">
         {route.view === "list" ? (
           <AssistStores

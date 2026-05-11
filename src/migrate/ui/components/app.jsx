@@ -1095,6 +1095,33 @@ function IdentityModal({ onPick }) {
   );
 }
 
+// Per-assistant assist URLs. Update here when new assistants are added.
+const ASSISTANTS = ["Dennis", "Toby"];
+
+// Header widget: "View as Dennis | Toby" links. Opens the assist view in
+// a new tab with ?as=<name>&preview=1 so writes are disabled — Michael
+// can preview without polluting attribution.
+function ViewAsLinks() {
+  return (
+    <span className="flex items-center gap-1.5 px-2 py-0.5 border border-[#30363d] rounded-[3px]">
+      <span className="text-[#6e7681]">View as</span>
+      {ASSISTANTS.map((name, i) => (
+        <React.Fragment key={name}>
+          {i > 0 && <span className="text-[#30363d]">·</span>}
+          <a
+            href={`/?as=${encodeURIComponent(name)}&preview=1`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[#388bfd] hover:text-[#58a6ff]"
+          >
+            {name}
+          </a>
+        </React.Fragment>
+      ))}
+    </span>
+  );
+}
+
 function TopBar({ view, store, hosted, hoursSaved, adminUser, onSwitchAdminUser, onToggleHosted, onGoDashboard }) {
   return (
     <div className="flex items-center gap-3 px-4 py-2 border-b border-[#21262d] bg-[#010409]">
@@ -1136,6 +1163,7 @@ function TopBar({ view, store, hosted, hoursSaved, adminUser, onSwitchAdminUser,
             </button>
           </span>
         )}
+        <ViewAsLinks />
         {typeof hoursSaved === "number" && (
           <span className="px-2 py-0.5 border border-[#30363d] rounded-[3px] tabular-nums">
             Hours saved: <span className="text-[#FF4405] font-semibold">{hoursSaved}</span>
