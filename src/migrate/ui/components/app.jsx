@@ -1189,7 +1189,10 @@ function TopBar({ view, store, hosted, hoursSaved, adminUser, onSwitchAdminUser,
         >Dashboard</button>
         <span className="text-[#484f58]">·</span>
         <a
-          href="/"
+          // Open assist signed in AS the current admin — writes (notes,
+          // done checkmarks) attribute to Michael/Austin rather than
+          // requiring read-only preview mode.
+          href={adminUser ? `/?as=${encodeURIComponent(adminUser)}` : "/"}
           target="_blank"
           rel="noopener noreferrer"
           className="text-[#8b949e] hover:text-[#e6edf3]"

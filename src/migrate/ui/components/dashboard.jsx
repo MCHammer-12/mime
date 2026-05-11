@@ -13,7 +13,11 @@ function Dashboard({ stores, jobs, currentUser, onOpenStore, onAddStore, onDelet
     return [...stores]
       .filter(s => {
         if (scope === "all" || !currentUser) return true;
-        return s.createdBy === currentUser;
+        // Mine shows what I created, plus unclaimed legacy stores (those
+        // imported before admin identity tracking shipped — they have
+        // createdBy=null). Otherwise they'd disappear from both admins'
+        // Mine views and feel like they vanished.
+        return s.createdBy === currentUser || s.createdBy == null;
       })
       .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
   }, [stores, scope, currentUser]);
@@ -26,7 +30,7 @@ function Dashboard({ stores, jobs, currentUser, onOpenStore, onAddStore, onDelet
             <h1 className="font-serif text-[40px] leading-[1] tracking-tight text-[#e6edf3]">Stores</h1>
             <p className="text-[12px] text-[#8b949e] mt-2">
               {currentUser
-                ? `${filtered.length} of ${stores.length} · ${scope === "mine" ? `created by ${currentUser}` : "all admins"}`
+                ? `${filtered.length} of ${stores.length} · ${scope === "mine" ? `created by ${currentUser} or unclaimed` : "all admins"}`
                 : `${stores.length} connected · jobs keep running when you switch stores`}
             </p>
           </div>
