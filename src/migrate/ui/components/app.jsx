@@ -193,6 +193,42 @@ function App() {
 
   const [view, setView] = useS({ screen: "dashboard", storeId: null });
   const [showAddStore, setShowAddStore] = useS(false);
+
+  // ─ Admin identity (Austin / Michael) ─
+  // Loaded once at startup from /api/admin/identity. `null` until the
+  // operator picks via the first-visit modal; then sticks via cookie so
+  // subsequent loads skip the modal.
+  const [adminUser, setAdminUser] = useS(null);
+  const [adminUserLoaded, setAdminUserLoaded] = useS(false);
+  useE(() => {
+    let cancelled = false;
+    fetch("/api/admin/identity")
+      .then(r => r.ok ? r.json() : { user: null })
+      .then(j => { if (!cancelled) { setAdminUser(j.user || null); setAdminUserLoaded(true); } })
+      .catch(() => { if (!cancelled) setAdminUserLoaded(true); });
+    return () => { cancelled = true; };
+  }, []);
+  const pickAdminUser = useC(async (user) => {
+    try {
+      const r = await fetch("/api/admin/identity", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ user }),
+      });
+      if (!r.ok) return false;
+      const j = await r.json();
+      setAdminUser(j.user || null);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }, []);
+  const switchAdminUser = useC(async () => {
+    try {
+      await fetch("/api/admin/identity", { method: "DELETE" });
+    } catch (_) { /* best-effort */ }
+    setAdminUser(null);
+  }, []);
   // null = closed; { id, ... } = open with a specific store loaded.
   // Triggered from the dashboard's per-card edit pencil. Lets the user
   // rotate an expired JWT or update a Klaviyo key without re-creating
@@ -941,6 +977,8 @@ function App() {
         store={activeStore}
         hosted={hosted}
         hoursSaved={hoursSaved}
+        adminUser={adminUser}
+        onSwitchAdminUser={switchAdminUser}
         onToggleHosted={() => {
           const next = !hosted;
           window.mockEnv = { ...(window.mockEnv || {}), hostedDeploy: next };
@@ -955,6 +993,7 @@ function App() {
           <Dashboard
             stores={stores}
             jobs={jobs}
+            currentUser={adminUser}
             onOpenStore={openStore}
             onAddStore={() => setShowAddStore(true)}
             onDeleteStore={deleteStore}
@@ -991,6 +1030,10 @@ function App() {
           onExportBundle={exportJobBundle}
         />
       </div>
+
+      {adminUserLoaded && !adminUser && (
+        <IdentityModal onPick={pickAdminUser}/>
+      )}
 
       {showAddStore && (
         <SetupModal onSave={addStore} onClose={() => setShowAddStore(false)} />
@@ -1036,6 +1079,41 @@ function App() {
   );
 }
 
+// First-visit modal asking which admin (Austin / Michael) is using the
+// dashboard. Choice persists via the admin_user cookie. No backdrop click
+// to dismiss — it's a hard gate so attribution is never accidentally
+// blank, and the underlying UI is mostly hidden anyway.
+function IdentityModal({ onPick }) {
+  const [picking, setPicking] = useS(null);
+  const choose = async (name) => {
+    setPicking(name);
+    const ok = await onPick(name);
+    if (!ok) setPicking(null);
+  };
+  return (
+    <div className="fixed inset-0 z-[55] bg-[#010409cc] backdrop-blur-sm flex items-center justify-center px-4">
+      <div className="w-full max-w-[360px] bg-[#0d1117] border border-[#30363d] rounded-[6px] shadow-2xl px-6 py-5">
+        <h2 className="font-serif text-[22px] leading-none text-[#e6edf3] mb-1">Who's using this?</h2>
+        <p className="text-[12px] text-[#8b949e] mb-5 leading-relaxed">
+          Pick once. Notes you save and stores you create get attributed to your name.
+        </p>
+        <div className="flex gap-2">
+          {["Austin", "Michael"].map((name) => (
+            <button
+              key={name}
+              onClick={() => choose(name)}
+              disabled={picking !== null}
+              className="flex-1 px-4 py-3 rounded-[6px] border border-[#30363d] hover:border-[#388bfd] text-[#e6edf3] text-[14px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {picking === name ? "…" : name}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Center-screen toasts that fire on job completion. Stacked vertically
 // when several jobs finish at once. The wrapper is pointer-events:none so
 // the rest of the dashboard stays clickable through the centered strip;
@@ -1077,7 +1155,7 @@ function CompletionToasts({ toasts, onDismiss }) {
   );
 }
 
-function TopBar({ view, store, hosted, hoursSaved, onToggleHosted, onGoDashboard }) {
+function TopBar({ view, store, hosted, hoursSaved, adminUser, onSwitchAdminUser, onToggleHosted, onGoDashboard }) {
   return (
     <div className="flex items-center gap-3 px-4 py-2 border-b border-[#21262d] bg-[#010409]">
       <div className="flex items-baseline gap-2">
@@ -1106,6 +1184,18 @@ function TopBar({ view, store, hosted, hoursSaved, onToggleHosted, onGoDashboard
         )}
       </div>
       <div className="ml-auto text-[11px] text-[#6e7681] flex items-center gap-3">
+        {adminUser && (
+          <span className="px-2 py-0.5 border border-[#30363d] rounded-[3px] flex items-center gap-1.5">
+            <span className="text-[#e6edf3]">{adminUser}</span>
+            <button
+              onClick={onSwitchAdminUser}
+              title="Switch user"
+              className="text-[#6e7681] hover:text-[#e6edf3]"
+            >
+              <Icon.x width="10" height="10"/>
+            </button>
+          </span>
+        )}
         {typeof hoursSaved === "number" && (
           <span className="px-2 py-0.5 border border-[#30363d] rounded-[3px] tabular-nums">
             Hours saved: <span className="text-[#FF4405] font-semibold">{hoursSaved}</span>

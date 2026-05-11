@@ -24,6 +24,14 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 const ADMIN_URL_TOKEN = process.env.ADMIN_URL_TOKEN ?? "";
 const ADMIN_AUTH_ENABLED = ADMIN_URL_TOKEN !== "";
 const COOKIE_NAME = "admin_token";
+const USER_COOKIE_NAME = "admin_user";
+
+/** Allowed admin identities. Anything else is rejected. Loose validation
+ *  is intentional — adding a new admin means editing this list. */
+const ALLOWED_ADMIN_USERS = ["Austin", "Michael"];
+export function isAllowedAdminUser(name: string): boolean {
+  return ALLOWED_ADMIN_USERS.includes(name);
+}
 
 export function isAdminAuthEnabled(): boolean {
   return ADMIN_AUTH_ENABLED;
@@ -75,6 +83,40 @@ export function setAdminCookie(res: ServerResponse): void {
   res.setHeader(
     "set-cookie",
     `${COOKIE_NAME}=${ADMIN_URL_TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`,
+  );
+}
+
+/**
+ * Read the picked admin identity (Austin / Michael) from the request
+ * cookie. Returns null until the operator picks one via the first-visit
+ * modal. Validation rejects anything outside ALLOWED_ADMIN_USERS so a
+ * stale cookie can't smuggle in a bogus value.
+ */
+export function getAdminUser(req: IncomingMessage): string | null {
+  const raw = parseCookies(req)[USER_COOKIE_NAME];
+  if (!raw) return null;
+  const decoded = decodeURIComponent(raw);
+  return isAllowedAdminUser(decoded) ? decoded : null;
+}
+
+/**
+ * Set the admin-user cookie. Readable by client JS so the UI can surface
+ * the current identity in the header without a round-trip — that's
+ * intentional, the value isn't a secret (it's just "Austin" / "Michael").
+ */
+export function setAdminUserCookie(res: ServerResponse, user: string): void {
+  if (!isAllowedAdminUser(user)) return;
+  const maxAge = 60 * 60 * 24 * 365;
+  res.setHeader(
+    "set-cookie",
+    `${USER_COOKIE_NAME}=${encodeURIComponent(user)}; Path=/; SameSite=Lax; Max-Age=${maxAge}`,
+  );
+}
+
+export function clearAdminUserCookie(res: ServerResponse): void {
+  res.setHeader(
+    "set-cookie",
+    `${USER_COOKIE_NAME}=; Path=/; SameSite=Lax; Max-Age=0`,
   );
 }
 

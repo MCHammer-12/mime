@@ -64,11 +64,15 @@ import {
   updateStore,
 } from "./stores.js";
 import {
+  clearAdminUserCookie,
+  getAdminUser,
   isAdmin,
   isAdminAuthEnabled,
   isAdminEntryUrl,
+  isAllowedAdminUser,
   requireAdmin,
   setAdminCookie,
+  setAdminUserCookie,
 } from "./auth.js";
 import {
   emailsToHours,
@@ -1840,8 +1844,33 @@ async function handleJobNotes(
   if (typeof itemId !== "string" || typeof note !== "string") {
     return json(res, 400, { error: "itemId and note (string) required" });
   }
-  const ok = setNote(jobId, itemId, note);
+  // Attribute admin-side notes to whoever's logged in (Austin / Michael)
+  // so the troubleshoot panel can show "Saved by Michael". Falls back to
+  // anonymous if the identity cookie isn't set.
+  const author = getAdminUser(req) ?? undefined;
+  const ok = setNote(jobId, itemId, note, author);
   if (!ok) return json(res, 404, { error: `job ${jobId} not found` });
+  json(res, 200, { ok: true });
+}
+
+// ─── Admin identity (Austin / Michael) ──────────────────────────────────
+
+async function handleAdminIdentityGet(req: IncomingMessage, res: ServerResponse) {
+  json(res, 200, { user: getAdminUser(req) });
+}
+
+async function handleAdminIdentitySet(req: IncomingMessage, res: ServerResponse) {
+  const body = await readJsonBody(req);
+  const user = typeof body.user === "string" ? body.user.trim() : "";
+  if (!isAllowedAdminUser(user)) {
+    return json(res, 400, { error: "user must be Austin or Michael" });
+  }
+  setAdminUserCookie(res, user);
+  json(res, 200, { user });
+}
+
+async function handleAdminIdentityClear(_req: IncomingMessage, res: ServerResponse) {
+  clearAdminUserCookie(res);
   json(res, 200, { ok: true });
 }
 
@@ -2026,6 +2055,7 @@ async function handleStoreCreate(req: IncomingMessage, res: ServerResponse) {
       redoJwt,
       storeId,
       redoServerBase,
+      createdBy: getAdminUser(req),
     });
     json(res, 201, { store: rec });
   } catch (e: any) {
@@ -2901,6 +2931,18 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url === "/api/admin/metrics") {
       if (!requireAdmin(req, res)) return;
       return handleAdminMetrics(req, res);
+    }
+    if (req.method === "GET" && url === "/api/admin/identity") {
+      if (!requireAdmin(req, res)) return;
+      return handleAdminIdentityGet(req, res);
+    }
+    if (req.method === "POST" && url === "/api/admin/identity") {
+      if (!requireAdmin(req, res)) return;
+      return handleAdminIdentitySet(req, res);
+    }
+    if (req.method === "DELETE" && url === "/api/admin/identity") {
+      if (!requireAdmin(req, res)) return;
+      return handleAdminIdentityClear(req, res);
     }
     if (req.method === "POST" && url === "/api/jobs") {
       if (!requireAdmin(req, res)) return;
