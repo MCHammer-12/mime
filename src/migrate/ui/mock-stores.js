@@ -138,6 +138,10 @@ async function fetchStoreList() {
     merchantSlug: s.merchantSlug,
     decodedStoreId: s.storeId,
     redoServerBase: s.redoServerBase,
+    // Pass through the creator so the dashboard's Mine/All filter can
+    // match against currentUser. Stores from before migration 007 will
+    // have createdBy === null and only show under All.
+    createdBy: s.createdBy ?? null,
     createdAt: s.createdAt ? Date.parse(s.createdAt) : null,
     lastImportedAt: s.lastImportedAt ? Date.parse(s.lastImportedAt) : null,
     // Mask hints for the picker tile
