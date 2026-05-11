@@ -379,13 +379,10 @@ function App() {
   const [logJobId, setLogJobId] = useS(null);
   const [warningsView, setWarningsView] = useS(null); // {jobId, itemId}
 
-  // ─ Hours saved tally — running total across all imports + per-job toast ─
+  // ─ Hours saved tally — running total across all imports, shown in header.
   // Server is the source of truth; we refetch on mount and after each
   // job completion. Hours = ceil(emails * 20min / 60).
   const [hoursSaved, setHoursSaved] = useS(null);
-  // Active toast(s) — one per recently-completed job. Self-dismisses after
-  // ~5s. Pointer-events:none so it never blocks the UI underneath.
-  const [toasts, setToasts] = useS([]);
 
   const refreshMetrics = useC(async () => {
     try {
@@ -397,16 +394,6 @@ function App() {
   }, []);
 
   useE(() => { refreshMetrics(); }, [refreshMetrics]);
-
-  const pushCompletionToast = useC((emails) => {
-    if (!emails || emails <= 0) return;
-    const hours = Math.ceil((emails * 20) / 60);
-    const id = Date.now() + Math.random();
-    setToasts(ts => [...ts, { id, hours }]);
-  }, []);
-  const dismissToast = useC((id) => {
-    setToasts(ts => ts.filter(t => t.id !== id));
-  }, []);
 
   // ─ Pending needs_input question (single modal at a time) ─
   const [pendingInput, setPendingInput] = useS(null); // {jobId, qid, itemId, itemName, question, options, broker}
@@ -812,21 +799,17 @@ function App() {
         currentStep = "";
         importMethod = evt.importMethod;
         items = items.map(i => i.state === "queued" || i.state === "running" ? { ...i, state: "imported" } : i);
-        // Fire the celebratory toast for this job and refresh the running
-        // header tally. Both happen post-render via setTimeout so we don't
-        // mutate sibling state from inside the reducer.
+        // Refresh the running header tally on completion. Post-render via
+        // setTimeout so we don't mutate sibling state from inside the
+        // reducer.
         if (j.status !== status && (status === "complete" || status === "partial")) {
-          const finalEmails = emailsImported;
-          setTimeout(() => {
-            pushCompletionToast(finalEmails);
-            refreshMetrics();
-          }, 0);
+          setTimeout(() => refreshMetrics(), 0);
         }
       }
 
       return { ...j, items, currentStep, warnings, infos, fatalError, fontsDone, exportSummary, status, endedAt, log, importMethod, pendingQid, emailsImported };
     }));
-  }, [pushCompletionToast, refreshMetrics]);
+  }, [refreshMetrics]);
 
   const answerNeedsInput = useC((answer, applyAll) => {
     if (!pendingInput) return;
@@ -986,8 +969,6 @@ function App() {
         }}
         onGoDashboard={goDashboard}
       />
-      <CompletionToasts toasts={toasts} onDismiss={dismissToast}/>
-
       <div className="flex flex-1 overflow-hidden">
         {view.screen === "dashboard" ? (
           <Dashboard
@@ -1110,47 +1091,6 @@ function IdentityModal({ onPick }) {
           ))}
         </div>
       </div>
-    </div>
-  );
-}
-
-// Center-screen toasts that fire on job completion. Stacked vertically
-// when several jobs finish at once. The wrapper is pointer-events:none so
-// the rest of the dashboard stays clickable through the centered strip;
-// each toast box flips back to pointer-events:auto so its "heck yeah"
-// dismiss button works. Toasts persist until dismissed (no auto-fade-out
-// — the operator is expected to acknowledge each completion).
-function CompletionToasts({ toasts, onDismiss }) {
-  if (!toasts || toasts.length === 0) return null;
-  return (
-    <div
-      className="pointer-events-none fixed inset-0 z-[60] flex items-center justify-center"
-      aria-live="polite"
-    >
-      <div className="flex flex-col gap-2 items-center">
-        {toasts.map(t => (
-          <div
-            key={t.id}
-            className="pointer-events-auto px-5 py-3 rounded-[6px] bg-[#010409] border border-[#FF4405]/60 shadow-2xl text-[14px] text-[#e6edf3] flex items-center gap-4"
-            style={{ animation: "toastFadeIn 250ms ease-out both" }}
-          >
-            <span>
-              you just did <span className="font-semibold text-[#FF4405] tabular-nums">{t.hours}</span> Nigerian hour{t.hours === 1 ? "" : "s"} of duplication work
-            </span>
-            <button
-              type="button"
-              onClick={() => onDismiss(t.id)}
-              className="px-3 py-1 rounded-[4px] text-[12px] font-medium bg-[#FF4405] hover:bg-[#FF5a1f] text-white transition-colors"
-            >
-              heck yeah
-            </button>
-          </div>
-        ))}
-      </div>
-      <style>{`@keyframes toastFadeIn {
-        from { opacity: 0; transform: translateY(10px); }
-        to { opacity: 1; transform: translateY(0); }
-      }`}</style>
     </div>
   );
 }
