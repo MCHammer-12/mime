@@ -327,6 +327,63 @@ export async function setAssistDone(
 }
 
 /**
+ * Read a user's saved brand-card ordering. Returns store ids in the
+ * order the user dragged them. Stores not in the table are absent;
+ * the caller's responsibility to append them after the saved order.
+ */
+export async function getCardOrder(userName: string): Promise<string[]> {
+  if (!isDbEnabled()) return [];
+  const u = userName.trim();
+  if (!u) return [];
+  try {
+    const { rows } = await getPool().query(
+      `SELECT store_id FROM card_priority
+        WHERE user_name = $1
+        ORDER BY position ASC`,
+      [u],
+    );
+    return rows.map((r: any) => r.store_id);
+  } catch (e) {
+    console.warn("[imported-items] getCardOrder failed:", e);
+    return [];
+  }
+}
+
+/**
+ * Replace a user's saved ordering. Deletes existing rows and inserts
+ * the new sequence in one transaction so the table never reflects a
+ * half-applied reorder.
+ */
+export async function setCardOrder(
+  userName: string,
+  storeIds: string[],
+): Promise<void> {
+  if (!isDbEnabled()) return;
+  const u = userName.trim();
+  if (!u) return;
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM card_priority WHERE user_name = $1`, [u]);
+    for (let i = 0; i < storeIds.length; i++) {
+      await client.query(
+        `INSERT INTO card_priority (user_name, store_id, position)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_name, store_id) DO UPDATE SET position = EXCLUDED.position`,
+        [u, storeIds[i], i],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) { /* ignore */ }
+    console.warn("[imported-items] setCardOrder failed:", e);
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Resolve the latest job id that imported a given (storeId, itemId). The
  * assist note-write endpoint uses this to pick which job's notes JSONB to
  * upsert into.

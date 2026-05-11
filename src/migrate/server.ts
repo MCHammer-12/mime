@@ -77,10 +77,12 @@ import {
 import {
   emailsToHours,
   findLatestJobForItem,
+  getCardOrder,
   getTotalEmailsImported,
   listAssistItemsForStore,
   listAssistStores,
   setAssistDone,
+  setCardOrder,
 } from "./imported-items.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
@@ -1933,6 +1935,40 @@ async function handleAssistDone(
   json(res, 200, { ok: true, done });
 }
 
+// ─── Assist API: per-user brand-card ordering ──────────────────────────────
+//
+// GET  /api/assist/cards/order?as=Dennis  → { storeIds: string[] }
+// POST /api/assist/cards/order            → { ok: true }
+//   body: { storeIds: string[], author: string }
+//
+// The UI reads the order on mount and applies it client-side (stores
+// missing from the saved list fall through to the default
+// last-imported-at sort). On drag-end, the UI POSTs the new full
+// order; the server replaces all rows for the user atomically.
+
+async function handleAssistCardsOrderGet(req: IncomingMessage, res: ServerResponse) {
+  const as = readAsParam(req);
+  if (!as) return json(res, 200, { storeIds: [] });
+  const storeIds = await getCardOrder(as);
+  json(res, 200, { storeIds });
+}
+
+async function handleAssistCardsOrderSet(req: IncomingMessage, res: ServerResponse) {
+  const body = await readJsonBody(req);
+  const author = typeof body.author === "string" ? body.author.trim() : "";
+  if (!author) return json(res, 400, { error: "author required" });
+  const raw = body.storeIds;
+  if (!Array.isArray(raw)) {
+    return json(res, 400, { error: "storeIds must be an array" });
+  }
+  const storeIds: string[] = [];
+  for (const v of raw) {
+    if (typeof v === "string" && v.trim() !== "") storeIds.push(v.trim());
+  }
+  await setCardOrder(author, storeIds);
+  json(res, 200, { ok: true });
+}
+
 async function handleAssistNote(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2981,6 +3017,12 @@ const server = createServer(async (req, res) => {
         decodeURIComponent(assistNote[1]),
         decodeURIComponent(assistNote[2]),
       );
+    }
+    if (req.method === "GET" && (url === "/api/assist/cards/order" || url.startsWith("/api/assist/cards/order?"))) {
+      return handleAssistCardsOrderGet(req, res);
+    }
+    if (req.method === "POST" && url === "/api/assist/cards/order") {
+      return handleAssistCardsOrderSet(req, res);
     }
     const assistDone = url.match(/^\/api\/assist\/stores\/([^/?]+)\/items\/([^/?]+)\/done(\?.*)?$/);
     if (assistDone && req.method === "POST") {
