@@ -10,7 +10,7 @@
 // at the top surfaces "Previewing as <name>". Lets Michael look at the
 // page without polluting attribution.
 
-const { useState: useStateApp, useEffect: useEffectApp, useCallback: useCApp } = React;
+const { useState: useStateApp, useEffect: useEffectApp, useCallback: useCApp, useRef: useRefApp } = React;
 
 function readAuthorFromUrl() {
   try {
@@ -25,6 +25,8 @@ function readAuthorFromUrl() {
   }
 }
 
+// Admin's "View as" links open the assist UI with ?preview=1 so writes
+// and drag-reorder don't fire. See app.jsx ViewAsLinks for the source.
 function readPreviewFlag() {
   try {
     const params = new URLSearchParams(window.location.search);
@@ -48,6 +50,9 @@ function AssistApp() {
 
   const [stores, setStores] = useStateApp([]);
   const [storesLoading, setStoresLoading] = useStateApp(true);
+  // Saved per-assistant ordering of brand cards. Applied client-side
+  // after the stores list arrives.
+  const [savedOrder, setSavedOrder] = useStateApp([]);
 
   const [items, setItems] = useStateApp([]);
   const [itemsLoading, setItemsLoading] = useStateApp(false);
@@ -67,24 +72,69 @@ function AssistApp() {
   // generic counts and `done: false` for everything.
   const asQuery = author ? `?as=${encodeURIComponent(author)}` : "";
 
-  // Load stores once. Cheap query; we re-fetch when leaving a store detail
-  // so a freshly-imported brand shows up without a hard refresh.
+  // Load stores AND saved card ordering in parallel. The order is
+  // applied client-side: priority-ordered stores come first in saved
+  // order, then any new (unordered) stores fall through in the server's
+  // default last-imported-at order.
   const loadStores = useCApp(async () => {
     setStoresLoading(true);
     try {
-      const r = await fetch(`/api/assist/stores${asQuery}`);
-      const j = await r.json();
-      setStores(j.stores || []);
+      const [storesRes, orderRes] = await Promise.all([
+        fetch(`/api/assist/stores${asQuery}`).then(r => r.json()),
+        author
+          ? fetch(`/api/assist/cards/order${asQuery}`).then(r => r.json()).catch(() => ({ storeIds: [] }))
+          : Promise.resolve({ storeIds: [] }),
+      ]);
+      const allStores = storesRes.stores || [];
+      const order = Array.isArray(orderRes.storeIds) ? orderRes.storeIds : [];
+      setSavedOrder(order);
+      // Apply order: indexed stores first, rest in default order.
+      const byId = Object.fromEntries(allStores.map(s => [s.storeId, s]));
+      const ordered = [];
+      const seen = new Set();
+      for (const id of order) {
+        if (byId[id]) {
+          ordered.push(byId[id]);
+          seen.add(id);
+        }
+      }
+      for (const s of allStores) {
+        if (!seen.has(s.storeId)) ordered.push(s);
+      }
+      setStores(ordered);
     } catch (e) {
       console.warn("loadStores failed:", e);
     } finally {
       setStoresLoading(false);
     }
-  }, [asQuery]);
+  }, [asQuery, author]);
 
   useEffectApp(() => {
     if (route.view === "list") loadStores();
   }, [route.view, loadStores]);
+
+  // Reorder handler — passed down to the brand picker. `opts.preview`
+  // means "user is mid-drag, update local state only"; otherwise commit
+  // to the server with a debounce so we don't POST on every dragenter.
+  const reorderTimerRef = useRefApp(null);
+  const onReorderCards = useCApp((storeIds, opts) => {
+    if (preview || !author) return;
+    // Optimistic local reorder so the UI follows the drag cursor.
+    setStores(prev => {
+      const byId = Object.fromEntries(prev.map(s => [s.storeId, s]));
+      return storeIds.map(id => byId[id]).filter(Boolean);
+    });
+    if (opts && opts.preview) return;
+    setSavedOrder(storeIds);
+    if (reorderTimerRef.current) clearTimeout(reorderTimerRef.current);
+    reorderTimerRef.current = setTimeout(() => {
+      fetch("/api/assist/cards/order", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ author, storeIds }),
+      }).catch(e => console.warn("save order failed:", e));
+    }, 250);
+  }, [author, preview]);
 
   // Load items when a store is opened.
   useEffectApp(() => {
@@ -185,7 +235,9 @@ function AssistApp() {
             stores={stores}
             loading={storesLoading}
             author={author}
+            preview={preview}
             onOpenStore={openStore}
+            onReorder={onReorderCards}
           />
         ) : (
           <AssistItems

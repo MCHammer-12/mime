@@ -213,6 +213,28 @@ const MIGRATIONS: Array<{ name: string; sql: string }> = [
         ADD COLUMN IF NOT EXISTS created_by TEXT;
     `,
   },
+  {
+    // Per-user ordering of brand cards on the /assist picker. One row per
+    // (user_name, store_id); `position` is a 0-based index. Each user
+    // (Dennis, Toby, …) gets their own ordering, persisted across devices.
+    //
+    // Stores not present in the table for a given user fall back to the
+    // server's default sort (last_imported_at DESC). When the UI saves a
+    // new order, the server replaces all rows for that user in one
+    // transaction — simpler than recomputing diffs and forces consistency.
+    name: "008_card_priority",
+    sql: `
+      CREATE TABLE IF NOT EXISTS card_priority (
+        user_name TEXT NOT NULL,
+        store_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_name, store_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_card_priority_user
+        ON card_priority (user_name, position);
+    `,
+  },
 ];
 
 /**
