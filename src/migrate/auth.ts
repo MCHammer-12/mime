@@ -25,6 +25,7 @@ const ADMIN_URL_TOKEN = process.env.ADMIN_URL_TOKEN ?? "";
 const ADMIN_AUTH_ENABLED = ADMIN_URL_TOKEN !== "";
 const COOKIE_NAME = "admin_token";
 const USER_COOKIE_NAME = "admin_user";
+const CLAIM_COOKIE_NAME = "admin_claim";
 
 /** Allowed admin identities. Anything else is rejected. Loose validation
  *  is intentional — adding a new admin means editing this list. */
@@ -76,12 +77,21 @@ export function isAdmin(req: IncomingMessage): boolean {
   return parseCookies(req)[COOKIE_NAME] === ADMIN_URL_TOKEN;
 }
 
+/**
+ * Append a Set-Cookie header without overwriting any previously-set ones.
+ * Each cookie helper below uses this so multiple cookies can be set on a
+ * single response (the admin URL visit, the identity claim flow, etc.).
+ */
+function appendCookie(res: ServerResponse, cookie: string): void {
+  res.appendHeader("set-cookie", cookie);
+}
+
 /** Set the admin cookie. 1-year expiry; rotation invalidates immediately. */
 export function setAdminCookie(res: ServerResponse): void {
   if (!ADMIN_AUTH_ENABLED) return;
   const maxAge = 60 * 60 * 24 * 365;
-  res.setHeader(
-    "set-cookie",
+  appendCookie(
+    res,
     `${COOKIE_NAME}=${ADMIN_URL_TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`,
   );
 }
@@ -107,16 +117,41 @@ export function getAdminUser(req: IncomingMessage): string | null {
 export function setAdminUserCookie(res: ServerResponse, user: string): void {
   if (!isAllowedAdminUser(user)) return;
   const maxAge = 60 * 60 * 24 * 365;
-  res.setHeader(
-    "set-cookie",
+  appendCookie(
+    res,
     `${USER_COOKIE_NAME}=${encodeURIComponent(user)}; Path=/; SameSite=Lax; Max-Age=${maxAge}`,
   );
 }
 
 export function clearAdminUserCookie(res: ServerResponse): void {
-  res.setHeader(
-    "set-cookie",
+  appendCookie(
+    res,
     `${USER_COOKIE_NAME}=; Path=/; SameSite=Lax; Max-Age=0`,
+  );
+}
+
+/**
+ * Read the admin_claim cookie. Returns the raw token (validated DB-side
+ * via verifyAdminClaim). HttpOnly so client JS can't see it — only the
+ * server's claim verification matches it against admin_claims.claim_token.
+ */
+export function getAdminClaimToken(req: IncomingMessage): string | null {
+  return parseCookies(req)[CLAIM_COOKIE_NAME] ?? null;
+}
+
+/** Set the admin_claim cookie. 1-year expiry, HttpOnly. */
+export function setAdminClaimCookie(res: ServerResponse, token: string): void {
+  const maxAge = 60 * 60 * 24 * 365;
+  appendCookie(
+    res,
+    `${CLAIM_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`,
+  );
+}
+
+export function clearAdminClaimCookie(res: ServerResponse): void {
+  appendCookie(
+    res,
+    `${CLAIM_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
   );
 }
 

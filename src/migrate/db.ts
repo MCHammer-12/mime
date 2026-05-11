@@ -235,6 +235,28 @@ const MIGRATIONS: Array<{ name: string; sql: string }> = [
         ON card_priority (user_name, position);
     `,
   },
+  {
+    // Locks each admin slot (Austin, Michael) to the first browser that
+    // claims it via the identity modal. `claim_token` is a long random
+    // value mirrored into an HttpOnly admin_claim cookie; subsequent
+    // requests prove identity by presenting the matching token.
+    //
+    // Threat model: anyone with the obscure admin URL can request the
+    // SPA. The claim layer ensures the *identity* (Austin/Michael) is
+    // bound to a specific browser. Once both slots are claimed, no
+    // further visitors can authenticate as either user.
+    //
+    // To reset a claim (e.g., cookie lost on a new device), delete the
+    // row from psql. We deliberately don't expose a "reset" API.
+    name: "009_admin_claims",
+    sql: `
+      CREATE TABLE IF NOT EXISTS admin_claims (
+        user_name TEXT PRIMARY KEY,
+        claim_token TEXT NOT NULL,
+        claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `,
+  },
 ];
 
 /**

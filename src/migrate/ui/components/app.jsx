@@ -200,14 +200,23 @@ function App() {
   // subsequent loads skip the modal.
   const [adminUser, setAdminUser] = useS(null);
   const [adminUserLoaded, setAdminUserLoaded] = useS(false);
-  useE(() => {
-    let cancelled = false;
-    fetch("/api/admin/identity")
-      .then(r => r.ok ? r.json() : { user: null })
-      .then(j => { if (!cancelled) { setAdminUser(j.user || null); setAdminUserLoaded(true); } })
-      .catch(() => { if (!cancelled) setAdminUserLoaded(true); });
-    return () => { cancelled = true; };
+  // List of admin slot names currently claimed by some browser. The
+  // identity modal disables taken options unless they match adminUser
+  // (in which case picking re-affirms the existing claim).
+  const [claimedUsers, setClaimedUsers] = useS([]);
+  const refreshIdentity = useC(async () => {
+    try {
+      const r = await fetch("/api/admin/identity");
+      if (!r.ok) { setAdminUserLoaded(true); return; }
+      const j = await r.json();
+      setAdminUser(j.user || null);
+      setClaimedUsers(Array.isArray(j.claimedUsers) ? j.claimedUsers : []);
+      setAdminUserLoaded(true);
+    } catch (_) {
+      setAdminUserLoaded(true);
+    }
   }, []);
+  useE(() => { refreshIdentity(); }, [refreshIdentity]);
   const pickAdminUser = useC(async (user) => {
     try {
       const r = await fetch("/api/admin/identity", {
@@ -215,14 +224,22 @@ function App() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ user }),
       });
+      if (r.status === 403) {
+        // Slot taken by someone else — refresh the claim list so the modal
+        // greys out the option and surfaces the conflict.
+        await refreshIdentity();
+        return false;
+      }
       if (!r.ok) return false;
       const j = await r.json();
       setAdminUser(j.user || null);
+      // Re-pull claimedUsers so other slots' state stays accurate.
+      refreshIdentity();
       return true;
     } catch (_) {
       return false;
     }
-  }, []);
+  }, [refreshIdentity]);
   const switchAdminUser = useC(async () => {
     try {
       await fetch("/api/admin/identity", { method: "DELETE" });
@@ -1013,7 +1030,10 @@ function App() {
       </div>
 
       {adminUserLoaded && !adminUser && (
-        <IdentityModal onPick={pickAdminUser}/>
+        <IdentityModal
+          onPick={pickAdminUser}
+          claimedUsers={claimedUsers}
+        />
       )}
 
       {showAddStore && (
@@ -1061,35 +1081,59 @@ function App() {
 }
 
 // First-visit modal asking which admin (Austin / Michael) is using the
-// dashboard. Choice persists via the admin_user cookie. No backdrop click
-// to dismiss — it's a hard gate so attribution is never accidentally
-// blank, and the underlying UI is mostly hidden anyway.
-function IdentityModal({ onPick }) {
+// dashboard. Choice persists via the admin_claim cookie (HttpOnly,
+// matched against admin_claims.claim_token server-side). Once a slot
+// is claimed by another browser, the corresponding option is disabled
+// for everyone else — the lockdown ensures only the first Austin and
+// the first Michael can ever access the dashboard from then on.
+function IdentityModal({ onPick, claimedUsers }) {
   const [picking, setPicking] = useS(null);
+  const [error, setError] = useS(null);
   const choose = async (name) => {
     setPicking(name);
+    setError(null);
     const ok = await onPick(name);
-    if (!ok) setPicking(null);
+    if (!ok) {
+      setPicking(null);
+      setError(`${name} is already claimed by another browser.`);
+    }
   };
+  const allClaimed =
+    claimedUsers.includes("Austin") && claimedUsers.includes("Michael");
   return (
     <div className="fixed inset-0 z-[55] bg-[#010409cc] backdrop-blur-sm flex items-center justify-center px-4">
-      <div className="w-full max-w-[360px] bg-[#0d1117] border border-[#30363d] rounded-[6px] shadow-2xl px-6 py-5">
+      <div className="w-full max-w-[400px] bg-[#0d1117] border border-[#30363d] rounded-[6px] shadow-2xl px-6 py-5">
         <h2 className="font-serif text-[22px] leading-none text-[#e6edf3] mb-1">Who's using this?</h2>
         <p className="text-[12px] text-[#8b949e] mb-5 leading-relaxed">
-          Pick once. Notes you save and stores you create get attributed to your name.
+          {allClaimed
+            ? "Both slots are claimed. If one of them is yours, sign in from the original browser. Otherwise this dashboard is locked."
+            : "Pick once. Notes you save and stores you create get attributed to your name. Each name can only be claimed by one browser."}
         </p>
         <div className="flex gap-2">
-          {["Austin", "Michael"].map((name) => (
-            <button
-              key={name}
-              onClick={() => choose(name)}
-              disabled={picking !== null}
-              className="flex-1 px-4 py-3 rounded-[6px] border border-[#30363d] hover:border-[#388bfd] text-[#e6edf3] text-[14px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {picking === name ? "…" : name}
-            </button>
-          ))}
+          {["Austin", "Michael"].map((name) => {
+            const taken = claimedUsers.includes(name);
+            const disabled = taken || picking !== null;
+            return (
+              <button
+                key={name}
+                onClick={() => choose(name)}
+                disabled={disabled}
+                title={taken ? `${name} is already claimed` : undefined}
+                className="flex-1 px-4 py-3 rounded-[6px] border border-[#30363d] hover:border-[#388bfd] text-[#e6edf3] text-[14px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-[#30363d]"
+              >
+                {picking === name ? "…" : name}
+                {taken && (
+                  <span className="block text-[10px] text-[#6e7681] font-normal mt-0.5">
+                    claimed
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
+        {error && (
+          <p className="text-[11px] text-[#f85149] mt-4">{error}</p>
+        )}
       </div>
     </div>
   );
@@ -1143,6 +1187,13 @@ function TopBar({ view, store, hosted, hoursSaved, adminUser, onSwitchAdminUser,
           onClick={onGoDashboard}
           className={view.screen === "dashboard" ? "text-[#e6edf3]" : "text-[#8b949e] hover:text-[#e6edf3]"}
         >Dashboard</button>
+        <span className="text-[#484f58]">·</span>
+        <a
+          href="/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[#8b949e] hover:text-[#e6edf3]"
+        >Assist ↗</a>
         {view.screen === "migration" && store && (
           <>
             <span className="text-[#484f58]">/</span>
