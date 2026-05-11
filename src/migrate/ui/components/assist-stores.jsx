@@ -8,9 +8,12 @@ const { useState: useSAS, useMemo: useMAS, useRef: useRAS } = React;
 
 function AssistStores({ stores, loading, author, preview, onOpenStore, onReorder }) {
   const [query, setQuery] = useSAS("");
-  // Default to "mine" when the URL identifies an assistant; without one
-  // there's nothing to scope to so default to "all".
-  const [scope, setScope] = useSAS(author ? "mine" : "all");
+  // Default to "mine" when an assistant is signed in viewing their own work.
+  // In preview mode (admin checking what Dennis/Toby see) default to "all"
+  // — Michael isn't an assistant, so Mine would only show brands the
+  // previewed assistant has already engaged, which is rarely what's
+  // useful when previewing.
+  const [scope, setScope] = useSAS(author && !preview ? "mine" : "all");
   const [dragIndex, setDragIndex] = useSAS(null);
 
   // Filtering is independent of ordering — ordering applies to the full

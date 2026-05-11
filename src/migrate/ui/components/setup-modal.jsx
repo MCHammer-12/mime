@@ -44,24 +44,26 @@ function SetupModal({ onSave, onClose, initialStore }) {
     ?? initialStore?.decodedStoreId
     ?? null;
 
-  // Edit mode: name + klaviyo key required, JWT optional (blank means
-  // "keep existing"). Add mode: all three required.
-  const valid = isEdit
-    ? Boolean(name.trim() && klaviyoKey.trim().length > 10)
-    : Boolean(name.trim() && klaviyoKey.trim().length > 10 && decoded);
-
-  const inputClass =
-    "w-full bg-[#010409] border border-[#30363d] rounded-[4px] " +
-    "px-2.5 py-2 text-[13px] text-[#e6edf3] " +
-    "placeholder:text-[#484f58] focus:outline-none focus:border-[#388bfd]";
-
   // JWT exp surface — helps the user decide whether the token even needs
-  // re-pasting before they hit save.
+  // re-pasting before they hit save, and blocks Add mode when expired.
   const jwtExpMs = redoToken ? window.decodeJwtExp?.(redoToken) : null;
   const jwtExpired = jwtExpMs && jwtExpMs < Date.now();
   const jwtMinutesLeft = jwtExpMs && !jwtExpired
     ? Math.round((jwtExpMs - Date.now()) / 60000)
     : null;
+
+  // Edit mode: name + klaviyo key required, JWT optional (blank = "keep
+  // existing"; if a new value is pasted it must not be expired).
+  // Add mode: all three required, and the JWT must decode AND not be expired.
+  const tokenOk = !redoToken.trim() || (decoded && !jwtExpired);
+  const valid = isEdit
+    ? Boolean(name.trim() && klaviyoKey.trim().length > 10 && tokenOk)
+    : Boolean(name.trim() && klaviyoKey.trim().length > 10 && decoded && !jwtExpired);
+
+  const inputClass =
+    "w-full bg-[#010409] border border-[#30363d] rounded-[4px] " +
+    "px-2.5 py-2 text-[13px] text-[#e6edf3] " +
+    "placeholder:text-[#484f58] focus:outline-none focus:border-[#388bfd]";
 
   return (
     <div className="fixed inset-0 z-50 bg-[#010409cc] backdrop-blur-sm flex items-center justify-center px-4">
@@ -107,10 +109,10 @@ function SetupModal({ onSave, onClose, initialStore }) {
           <label className="block">
             <div className="text-[11px] text-[#8b949e] mb-1.5">
               Redo session token
-              {isEdit && jwtExpired && (
+              {jwtExpired && (
                 <span className="ml-2 text-[#f85149]">expired — paste fresh</span>
               )}
-              {isEdit && !jwtExpired && jwtMinutesLeft !== null && (
+              {!jwtExpired && jwtMinutesLeft !== null && (
                 <span className="ml-2 text-[#8b949e]">expires in {jwtMinutesLeft} min</span>
               )}
             </div>
@@ -130,10 +132,22 @@ function SetupModal({ onSave, onClose, initialStore }) {
               <code className="text-[#8b949e]">redo.merchant_auth_token.&lt;teamId&gt;</code>.
               Expires periodically; re-paste if you get a 401.
             </div>
-            {decoded && (
+            {decoded && !jwtExpired && (
               <div className="text-[10px] text-[#3fb950] mt-1.5 font-mono flex items-center gap-1.5">
                 <Icon.check width="10" height="10"/>
                 Store ID: {decoded.slice(0, 20)}…
+              </div>
+            )}
+            {decoded && jwtExpired && (
+              <div className="text-[10px] text-[#f85149] mt-1.5">
+                Token has expired — re-paste a fresh one.
+              </div>
+            )}
+            {redoToken.trim() && !decoded && (
+              <div className="text-[10px] text-[#f85149] mt-1.5">
+                Couldn't read the store ID from this token. Make sure it's the JWT
+                from <code className="text-[#8b949e]">redo.merchant_auth_token.&lt;teamId&gt;</code>{" "}
+                (starts with <code className="text-[#8b949e]">eyJ</code>).
               </div>
             )}
           </label>
