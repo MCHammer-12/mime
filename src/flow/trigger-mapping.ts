@@ -2,6 +2,7 @@ import type { MetricLookup } from "../extract-metrics.js";
 import {
   MarketingTriggerKey,
   OrderTrackingTriggerKey,
+  ReviewsTriggerKey,
   SchemaType,
   type FlowCategory,
   type KlaviyoFlow,
@@ -48,6 +49,61 @@ const METRIC_NAME_MAP: Record<
   "placed order":       { key: OrderTrackingTriggerKey.ORDER_CREATED,  schemaType: SchemaType.ORDER_TRACKING,                 category: "Order tracking" },
   "ordered product":    { key: OrderTrackingTriggerKey.ORDER_CREATED,  schemaType: SchemaType.ORDER_TRACKING,                 category: "Order tracking" },
 
+  // ─── Order Tracking — full set ────────────────────────────────────
+  // Klaviyo's shipment events vary by source (Shopify Klaviyo integration,
+  // Aftership, ShipBob, etc.). The names here cover the common patterns;
+  // add aliases as new merchants surface variants.
+  // All share SchemaType.ORDER_TRACKING — only `key` distinguishes them.
+  "fulfilled order":              { key: OrderTrackingTriggerKey.ORDER_FULFILLED,                  schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "marked as fulfilled":          { key: OrderTrackingTriggerKey.ORDER_FULFILLED,                  schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  // "Order shipped" = Shopify fires when fulfillment posts tracking; usually
+  // means "label created / carrier accepted" — closer to ORDER_FULFILLED than
+  // ORDER_IN_TRANSIT in Klaviyo's semantics.
+  "order shipped":                { key: OrderTrackingTriggerKey.ORDER_FULFILLED,                  schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment pre-transit":         { key: OrderTrackingTriggerKey.ORDER_PRE_TRANSIT,                schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "pre-transit":                  { key: OrderTrackingTriggerKey.ORDER_PRE_TRANSIT,                schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment in transit":          { key: OrderTrackingTriggerKey.ORDER_IN_TRANSIT,                 schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "in transit":                   { key: OrderTrackingTriggerKey.ORDER_IN_TRANSIT,                 schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment out for delivery":    { key: OrderTrackingTriggerKey.ORDER_OUT_FOR_DELIVERY,           schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "out for delivery":             { key: OrderTrackingTriggerKey.ORDER_OUT_FOR_DELIVERY,           schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment delivered":           { key: OrderTrackingTriggerKey.ORDER_DELIVERED,                  schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "order delivered":              { key: OrderTrackingTriggerKey.ORDER_DELIVERED,                  schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment available for pickup": { key: OrderTrackingTriggerKey.ORDER_AVAILABLE_FOR_PICKUP,      schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "available for pickup":          { key: OrderTrackingTriggerKey.ORDER_AVAILABLE_FOR_PICKUP,      schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "available for pickup (carrier)": { key: OrderTrackingTriggerKey.ORDER_AVAILABLE_FOR_PICKUP_CARRIER, schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment stalled in transit":  { key: OrderTrackingTriggerKey.ORDER_STALLED_IN_TRANSIT,         schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "stalled in transit":           { key: OrderTrackingTriggerKey.ORDER_STALLED_IN_TRANSIT,         schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment stalled in fulfillment": { key: OrderTrackingTriggerKey.ORDER_STALLED_IN_FULFILLMENT,  schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "stalled in fulfillment":       { key: OrderTrackingTriggerKey.ORDER_STALLED_IN_FULFILLMENT,     schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment delayed":             { key: OrderTrackingTriggerKey.ORDER_DELAYED,                    schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "order delayed":                { key: OrderTrackingTriggerKey.ORDER_DELAYED,                    schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment arriving early":      { key: OrderTrackingTriggerKey.ORDER_ARRIVING_EARLY,             schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "arriving early":               { key: OrderTrackingTriggerKey.ORDER_ARRIVING_EARLY,             schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment return to sender":    { key: OrderTrackingTriggerKey.ORDER_RETURN_TO_SENDER,           schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "return to sender":             { key: OrderTrackingTriggerKey.ORDER_RETURN_TO_SENDER,           schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment delivery attempted":  { key: OrderTrackingTriggerKey.ORDER_DELIVERY_ATTEMPTED,         schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "delivery attempted":           { key: OrderTrackingTriggerKey.ORDER_DELIVERY_ATTEMPTED,         schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment failure":             { key: OrderTrackingTriggerKey.ORDER_DELIVERY_FAILURE,           schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "delivery failure":             { key: OrderTrackingTriggerKey.ORDER_DELIVERY_FAILURE,           schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment cancelled":           { key: OrderTrackingTriggerKey.ORDER_SHIPMENT_CANCELLED,         schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "cancelled order":              { key: OrderTrackingTriggerKey.ORDER_SHIPMENT_CANCELLED,         schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+  "shipment error":               { key: OrderTrackingTriggerKey.ORDER_SHIPMENT_ERROR,             schemaType: SchemaType.ORDER_TRACKING, category: "Order tracking" },
+
+  // ─── Reviews (generic — non-Yotpo platforms) ──────────────────────
+  // Yotpo-specific events stay on the Integration category (see
+  // YOTPO_REVIEW_CREATED entries below). Anything else routes here.
+  // Plain "submitted review" used to map to Yotpo (Integration); routing it
+  // through the generic Reviews trigger is what merchants actually want for
+  // non-Yotpo review platforms like Judge.me, Loox, Okendo, Stamped.
+  "review submitted":             { key: ReviewsTriggerKey.REVIEW_SUBMITTED,                       schemaType: SchemaType.REVIEWS,        category: "Reviews" },
+  "submitted review":             { key: ReviewsTriggerKey.REVIEW_SUBMITTED,                       schemaType: SchemaType.REVIEWS,        category: "Reviews" },
+  "review created":               { key: ReviewsTriggerKey.REVIEW_SUBMITTED,                       schemaType: SchemaType.REVIEWS,        category: "Reviews" },
+  "judge.me review created":      { key: ReviewsTriggerKey.REVIEW_SUBMITTED,                       schemaType: SchemaType.REVIEWS,        category: "Reviews" },
+  "judge.me - review created":    { key: ReviewsTriggerKey.REVIEW_SUBMITTED,                       schemaType: SchemaType.REVIEWS,        category: "Reviews" },
+  "loox review submitted":        { key: ReviewsTriggerKey.REVIEW_SUBMITTED,                       schemaType: SchemaType.REVIEWS,        category: "Reviews" },
+  "okendo review submitted":      { key: ReviewsTriggerKey.REVIEW_SUBMITTED,                       schemaType: SchemaType.REVIEWS,        category: "Reviews" },
+  "stamped review created":       { key: ReviewsTriggerKey.REVIEW_SUBMITTED,                       schemaType: SchemaType.REVIEWS,        category: "Reviews" },
+
   // ─── Yotpo Loyalty (Klaviyo integration) ──────────────────────────
   // Yotpo's Klaviyo integration emits events under both the legacy "Swell"
   // brand name and the current "Loyalty" name; merchant accounts vintage
@@ -89,9 +145,11 @@ const METRIC_NAME_MAP: Record<
   "yotpo loyalty opt in":                     { key: SchemaType.YOTPO_LOYALTY_OPT_IN,             schemaType: SchemaType.YOTPO_LOYALTY_OPT_IN,             category: "Integration" },
 
   // ─── Yotpo Reviews (Klaviyo integration) ──────────────────────────
-  "submitted review":      { key: SchemaType.YOTPO_REVIEW_CREATED, schemaType: SchemaType.YOTPO_REVIEW_CREATED, category: "Integration" },
+  // Only Yotpo-prefixed events stay on the Integration category — plain
+  // "submitted review" goes to the generic Reviews trigger above.
   "yotpo review created":  { key: SchemaType.YOTPO_REVIEW_CREATED, schemaType: SchemaType.YOTPO_REVIEW_CREATED, category: "Integration" },
   "yotpo: submitted review": { key: SchemaType.YOTPO_REVIEW_CREATED, schemaType: SchemaType.YOTPO_REVIEW_CREATED, category: "Integration" },
+  "yotpo submitted review": { key: SchemaType.YOTPO_REVIEW_CREATED, schemaType: SchemaType.YOTPO_REVIEW_CREATED, category: "Integration" },
 };
 
 const COMMENTSOLD_VARIANTS: Record<
