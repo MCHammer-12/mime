@@ -1804,13 +1804,27 @@ async function handleJobStream(
     const current = getJob(jobId);
     if (!current || terminal(current.status)) {
       clearInterval(interval);
+      clearInterval(heartbeat);
       unsubscribe();
       res.end();
     }
   }, 500);
 
+  // Heartbeat keeps the NDJSON stream alive across idle gaps — most
+  // importantly the wait between emitting `needs_input` and receiving
+  // the user's answer via POST /api/jobs/:id/inputs. Replit's autoscale
+  // proxy kills idle streams in seconds; without this the client sees
+  // `TypeError: network error` mid-import and the modal answer never
+  // gets delivered. Mirrors `handleFlowsStream`'s pattern. The client
+  // (mock-stream.js readNdjsonLines) treats unknown event kinds as
+  // no-ops, so this is invisible to the UI.
+  const heartbeat = setInterval(() => {
+    res.write(JSON.stringify({ kind: "heartbeat", t: Date.now() }) + "\n");
+  }, 10_000);
+
   req.on("close", () => {
     clearInterval(interval);
+    clearInterval(heartbeat);
     unsubscribe();
   });
 }
