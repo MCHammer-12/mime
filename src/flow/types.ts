@@ -34,6 +34,7 @@ export enum SchemaType {
   REFUND_RETURN_SUBMITTED = "refund_return_submitted",
   EXCHANGE_PROCESSED_WITH_CREDIT = "exchange_processed_with_credit",
   ORDER_TRACKING = "order_tracking",
+  REVIEWS = "reviews",
   // Yotpo Integration triggers — `key` and `schemaType` strings happen to be
   // identical for every Yotpo trigger; defined once here and reused as both.
   // Source: redo/model/src/advanced-flow/integration-triggers.ts.
@@ -51,8 +52,34 @@ export enum SchemaType {
   YOTPO_REVIEW_CREATED = "yotpo_review_created",
 }
 
+// Mirrors redo/model/src/advanced-flow/triggers.ts OrderTrackingTriggerKey.
+// All variants share schemaType: SchemaType.ORDER_TRACKING — only the `key`
+// changes per trigger.
 export enum OrderTrackingTriggerKey {
   ORDER_CREATED = "order_created",
+  ORDER_FULFILLED = "order_fulfilled",
+  ORDER_PRE_TRANSIT = "order_pre_transit",
+  ORDER_IN_TRANSIT = "order_in_transit",
+  ORDER_OUT_FOR_DELIVERY = "order_out_for_delivery",
+  ORDER_DELIVERED = "order_delivered",
+  ORDER_AVAILABLE_FOR_PICKUP = "order_available_for_pickup",
+  ORDER_AVAILABLE_FOR_PICKUP_CARRIER = "order_available_for_pickup_carrier",
+  ORDER_STALLED_IN_TRANSIT = "order_stalled_in_transit",
+  ORDER_STALLED_IN_FULFILLMENT = "order_stalled_in_fulfillment",
+  ORDER_DELAYED = "order_delayed",
+  ORDER_ARRIVING_EARLY = "order_arriving_early",
+  ORDER_RETURN_TO_SENDER = "order_return_to_sender",
+  ORDER_DELIVERY_ATTEMPTED = "order_delivery_attempted",
+  ORDER_DELIVERY_FAILURE = "order_delivery_failure",
+  ORDER_SHIPMENT_CANCELLED = "order_shipment_cancelled",
+  ORDER_SHIPMENT_ERROR = "order_shipment_error",
+}
+
+// Mirrors redo/model/src/advanced-flow/triggers.ts ReviewsTriggerKey. Generic
+// review trigger (category "Reviews") — distinct from the Yotpo-specific
+// YOTPO_REVIEW_CREATED on the Integration category.
+export enum ReviewsTriggerKey {
+  REVIEW_SUBMITTED = "review_submitted",
 }
 
 /**
@@ -82,12 +109,17 @@ export type IntegrationTriggerKey =
   | SchemaType.YOTPO_LOYALTY_POINTS_EARNED
   | SchemaType.YOTPO_REVIEW_CREATED;
 
-export type FlowCategory = "Marketing" | "Order tracking" | "Integration";
+export type FlowCategory =
+  | "Marketing"
+  | "Order tracking"
+  | "Integration"
+  | "Reviews";
 
 export type TriggerKey =
   | MarketingTriggerKey
   | OrderTrackingTriggerKey
-  | IntegrationTriggerKey;
+  | IntegrationTriggerKey
+  | ReviewsTriggerKey;
 
 export enum MarketingTriggerKey {
   EMAIL_SIGNUP = "email_signup",

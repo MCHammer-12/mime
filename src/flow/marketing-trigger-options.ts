@@ -11,7 +11,12 @@
  * Order is curated for picker UX — most common pick types first.
  */
 
-import { MarketingTriggerKey, OrderTrackingTriggerKey, SchemaType } from "./types.js";
+import {
+  MarketingTriggerKey,
+  OrderTrackingTriggerKey,
+  ReviewsTriggerKey,
+  SchemaType,
+} from "./types.js";
 import type { TriggerResolution } from "./trigger-mapping.js";
 
 export interface MarketingTriggerOption {
@@ -263,6 +268,166 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
       key: SchemaType.YOTPO_REVIEW_CREATED,
       schemaType: SchemaType.YOTPO_REVIEW_CREATED,
       category: "Integration",
+    },
+  },
+
+  // ─── Reviews (generic — non-Yotpo platforms) ─────────────────────
+  {
+    value: "review_submitted",
+    label: "Review submitted",
+    resolution: {
+      key: ReviewsTriggerKey.REVIEW_SUBMITTED,
+      schemaType: SchemaType.REVIEWS,
+      category: "Reviews",
+    },
+  },
+
+  // ─── Order tracking — full set ───────────────────────────────────
+  // ORDER_CREATED is already listed above as a top-level picker option
+  // (post-purchase). The rest land here for completeness, ordered
+  // roughly by the customer-journey timeline.
+  {
+    value: "order_fulfilled",
+    label: "Order fulfilled",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_FULFILLED,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_pre_transit",
+    label: "Order pre-transit",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_PRE_TRANSIT,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_in_transit",
+    label: "Order in-transit",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_IN_TRANSIT,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_out_for_delivery",
+    label: "Order out for delivery",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_OUT_FOR_DELIVERY,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_delivered",
+    label: "Order delivered",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_DELIVERED,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_available_for_pickup",
+    label: "Order available for pickup",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_AVAILABLE_FOR_PICKUP,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_available_for_pickup_carrier",
+    label: "Order available for pickup (carrier)",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_AVAILABLE_FOR_PICKUP_CARRIER,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_stalled_in_transit",
+    label: "Order stalled in transit",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_STALLED_IN_TRANSIT,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_stalled_in_fulfillment",
+    label: "Order stalled in fulfillment",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_STALLED_IN_FULFILLMENT,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_delayed",
+    label: "Order delayed",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_DELAYED,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_arriving_early",
+    label: "Order arriving early",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_ARRIVING_EARLY,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_return_to_sender",
+    label: "Order return to sender",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_RETURN_TO_SENDER,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_delivery_attempted",
+    label: "Order delivery attempted",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_DELIVERY_ATTEMPTED,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_delivery_failure",
+    label: "Order delivery failure",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_DELIVERY_FAILURE,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_shipment_cancelled",
+    label: "Order shipment cancelled",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_SHIPMENT_CANCELLED,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
+    },
+  },
+  {
+    value: "order_shipment_error",
+    label: "Order shipment error",
+    resolution: {
+      key: OrderTrackingTriggerKey.ORDER_SHIPMENT_ERROR,
+      schemaType: SchemaType.ORDER_TRACKING,
+      category: "Order tracking",
     },
   },
 ];
