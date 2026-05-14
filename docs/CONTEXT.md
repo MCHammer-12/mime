@@ -4,7 +4,15 @@
 Automation project for manual processes Michael does at Redo. Primary target: Klaviyo → Redo email migration workflow, and improving Redo's existing HTML → JSON email parser.
 
 ## Status
-End-to-end import pipeline running in production via the Replit-deployed migrate UI. As of **2026-05-07**:
+End-to-end import pipeline running in production via the Replit-deployed migrate UI. As of **2026-05-11**:
+
+- **External assist surface at `/`:** branded "redo", per-assistant via `?as=Dennis` / `?as=Toby` URL. Brand-card picker → per-store items list with checkbox + note textarea. Drag-and-drop card priority is per-user. Notes round-trip back into the existing Toby troubleshoot panel via the same `jobs.notes` JSONB column.
+- **Admin moved to `/<ADMIN_URL_TOKEN>/`** (obscure URL + HttpOnly cookie). First-visit modal claims an Austin or Michael slot via `admin_claims` (random token in DB mirrored to HttpOnly cookie). Both slots claimed = dashboard hard-locked; new browsers see disabled modal options and every admin API call returns 401. Reset only via psql.
+- **Header nav** between surfaces — admin has "Assist ↗" (opens `/?as=<adminUser>`) and "View as Dennis/Toby" (preview mode, read-only); assist has "← Admin" link when `/api/me` says the requester is verified admin.
+- **DB additions:** migrations 004-009 — `imported_items` (flat per-store list of imports), `email_count` column on it (drives Hours-saved tally), `assist_completions`, `stores.created_by`, `card_priority`, `admin_claims`.
+- **"Hours saved: X" chip in admin header** — ceil(emails * 20min / 60) summed across all imports.
+
+As of **2026-05-07**:
 
 - **Email parser polish:** ancestor-walking bg detection (catches MJML section bg-divs / body bg); `New York` / `Baskerville` system fonts substitute to Georgia at parse; WCAG contrast guard auto-flips poor-contrast text + links to readable color; double-spaced (`line-height ≥ 1.7`) text simulates with `<br><br>`; split-block image padding falls through to td chain when no `td.spacer`; static product blocks emit a real Products block with `_pendingProducts` (importer-side Shopify name resolution required); adjacent same-shape Products blocks merge across intervening spacers/lines.
 - **Flow parser polish:** drop-policy for un-translatable actions (update-profile / list-update / target-date / heavily-unmapped-webhook → drop + restitch chain, was WAIT stub); ab-test action → extract embedded `main_action` send-email; `{{ event.extra.responsive_checkout_url }}` → `checkoutUrl` dynamic variable; `person|lookup:"X"` Liquid → `customer_X`; `organization.name` substitution now applied to subject + preview (was email body only); 12 Yotpo Integration triggers (Loyalty + Reviews) supported with multi-alias METRIC_NAME_MAP entries.

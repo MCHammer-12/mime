@@ -1,5 +1,90 @@
 # Session Log
 
+## 2026-05-07/11 — External assist surface, admin identity + lockdown, drag-reorder, hours-saved tally
+
+**Context**
+Long session that stood up the external-facing `/assist` UI (note-taking for Dennis/Toby), the admin-side Austin/Michael identity model with a hard slot-lock, drag-and-drop card priority, and a sequence of UX follow-ups against live use. Replit Private Deployment stays the outer fence; everything inside is in-app gating. 18 merged PRs.
+
+**Done — `/assist` external view ([#41](https://github.com/MCHammer-12/mime/pull/41))**
+- `/` serves a new "redo"-branded SPA — brand-card picker + per-brand items list + per-item note textarea. Admin "Toby 2.0" UI moves from `/` to `/<ADMIN_URL_TOKEN>/`; visiting sets an HttpOnly cookie; admin API endpoints gate via `requireAdmin`. `/admin/` is the dev fallback when token is unset.
+- New `imported_items` table (migration 004) — flat per-store list denormalized at the existing `exported` / `flow_imported` / `imported` event points so the assist read path is one indexed query (vs scanning job_events). Replit's stateless filesystem means we can't read off disk anymore.
+- `jobs.notes` JSONB upgrades from `Record<itemId,string>` to `string | {text,author,savedAt}` — assist UI attributes notes via `?as=Dennis` query param; legacy admin notes still read cleanly via `coerceNote`. Bundle exporter coerces both shapes.
+- 4 new endpoints: `GET /api/assist/stores`, `GET /api/assist/stores/:id/items`, `POST .../note`, `POST .../done`.
+
+**Done — "Hours saved" tally + completion toast → removed ([#42](https://github.com/MCHammer-12/mime/pull/42), [#48](https://github.com/MCHammer-12/mime/pull/48), [#53](https://github.com/MCHammer-12/mime/pull/53))**
+- `imported_items.email_count` (migration 005) — 1 for templates/campaign variants, `createdTemplateCount + blankTemplateCount` for flows. `GET /api/admin/metrics` returns SUM. Header chip shows `Hours saved: X` (ceil(emails×20min/60)).
+- Center-screen toast on job completion: "you just did X Nigerian hours of duplication work". Shipped with auto-dismiss (#42) → got a "heck yeah" button (#48) → removed entirely (#53) per Michael. Header counter stayed.
+
+**Done — Assist checkboxes, search, Mine/All filter, completion grayout ([#49](https://github.com/MCHammer-12/mime/pull/49))**
+- Per-item checkbox on the brand detail view, persisted to new `assist_completions` table (migration 006) keyed by `(store_id, item_id, assistant)`. Brand cards gray out + render a green check when the current `?as=` has checked everything off.
+- Search bar (case-insensitive on storeName).
+- "Mine | All" filter — Mine = brands the requesting assistant has engaged (≥1 note OR ≥1 done). Default Mine when `?as=` present.
+
+**Done — Admin Austin/Michael identity + Mine/All on Stores ([#51](https://github.com/MCHammer-12/mime/pull/51))**
+- First-visit modal asks "Who's using this? Austin / Michael". Choice persists via `admin_user` cookie (1y). Header chip with ✕ to switch. `stores.created_by` column (migration 007) populated at create time; admin troubleshoot notes also pick up the author.
+- Mine | All filter on the admin Stores dashboard. Defaults to "Mine". `· by Michael` / `· by Austin` badge on each card.
+- Endpoints: `GET/POST/DELETE /api/admin/identity`.
+
+**Done — View as Dennis/Toby preview ([#54](https://github.com/MCHammer-12/mime/pull/54))**
+- Admin TopBar chip with one link per assistant; opens `/?as=<name>&preview=1` in a new tab. Preview mode shows a banner ("Previewing as Dennis · read-only") and short-circuits `onSaveNote` / `onToggleDone` so writes don't fire.
+
+**Done — Drag-and-drop brand card reorder ([#55](https://github.com/MCHammer-12/mime/pull/55))**
+- Each assistant drags brand cards into priority order; persists per `?as=`. New `card_priority(user_name, store_id, position)` table (migration 008). Native HTML5 drag-drop (no extra deps). Drag disabled when a search or Mine filter would hide cards (with a hint). Drag-end debounces a single POST 250ms.
+
+**Done — Admin lockdown + nav between surfaces ([#56](https://github.com/MCHammer-12/mime/pull/56))**
+- `admin_claims(user_name PK, claim_token, claimed_at)` (migration 009). First browser to pick Austin/Michael claims the slot via a generated random token mirrored into an HttpOnly `admin_claim` cookie. After both slots claimed, no new browser can authenticate — identity modal disables both options; `requireFullAdmin` 401s every other admin endpoint until a valid claim is presented. Reset path is psql-only by design.
+- Admin TopBar adds "Assist ↗"; assist header adds "← Admin" when `/api/me` says the requester is a verified admin. Assistants never see the back link.
+
+**Done — Toast removal + plain-text credential inputs ([#47](https://github.com/MCHammer-12/mime/pull/47), [#50](https://github.com/MCHammer-12/mime/pull/50), [#53](https://github.com/MCHammer-12/mime/pull/53))**
+- Klaviyo key + Redo JWT now render as plain text in the Add/Edit-store modal and the legacy CredentialsBar. Operator pastes them repeatedly while working through merchants; masking added friction without meaningful security on a gated admin route.
+
+**Done — Vercel deploy attempted, then abandoned ([#52](https://github.com/MCHammer-12/mime/pull/52) closed)**
+- Built a parallel Vercel deployment of just the `/assist` UI + 4 endpoints against the same Postgres, with a shared-token gate. Tore it down before going live — assistants got invited to the Replit workspace instead so the existing private-deployment URL suffices. Code branched (`feature/vercel-assist-deploy`) exists if we ever revisit.
+
+**Done — Bugfixes ([#57](https://github.com/MCHammer-12/mime/pull/57), [#58](https://github.com/MCHammer-12/mime/pull/58))**
+- Mine filter on dashboard was always 0 — `mock-stores.js` stripped `createdBy` when normalizing the API response. One-line passthrough fix.
+- JWT-expired indicator now shows in Add mode (not just edit), with a clear "couldn't read store ID" hint when token isn't a JWT — silent disabled-Save was the most-reported Add Store confusion.
+- Mine filter on dashboard includes legacy (null `created_by`) stores — they vanished after #57 made the filter actually work; now treated as "unclaimed, visible to both". Subtitle reads "created by Michael or unclaimed".
+- Admin "Assist ↗" link passes `?as=<adminUser>` so Michael can open assist signed in as himself (writes attribute correctly). View-as preview links unchanged.
+- Brand picker scope defaults to "all" in `preview=1` mode (Michael previewing wants the full set, not just engaged brands).
+
+**Files changed (cross-PR)**
+- `src/migrate/db.ts` — migrations 004-009
+- `src/migrate/auth.ts` — admin_token / admin_user / admin_claim cookie helpers; `appendHeader` for stacking; `ALLOWED_ADMIN_USERS`
+- `src/migrate/claims.ts` (NEW) — tryClaim / userForClaimToken / getClaimStatus
+- `src/migrate/imported-items.ts` (NEW) — listAssistStores / listAssistItemsForStore / setAssistDone / getCardOrder / setCardOrder / getTotalEmailsImported
+- `src/migrate/jobs.ts` — `setNote` accepts optional author; `coerceNote`; `recordImported` on RunController
+- `src/migrate/server.ts` — admin gating; `requireFullAdmin`; `/api/me`; `/api/admin/identity` x 3; `/api/admin/metrics`; `/api/assist/stores/items/note/done`; `/api/assist/cards/order`; admin URL routing
+- `src/migrate/stores.ts` — `createdBy` field through record + summary + create input
+- `src/migrate/ui/index.html`, `src/migrate/ui/assist.html` (NEW) — separate SPAs
+- `src/migrate/ui/components/app.jsx` — ViewAsLinks, IdentityModal, "Assist ↗"
+- `src/migrate/ui/components/dashboard.jsx` — Mine/All filter; createdBy badge
+- `src/migrate/ui/components/assist-app.jsx` / `assist-stores.jsx` / `assist-items.jsx` (NEW)
+- `src/migrate/ui/components/setup-modal.jsx` — JWT-expired/decode-failed indicators
+- `src/migrate/ui/components/credentials.jsx` — plaintext Klaviyo + JWT
+- `src/migrate/ui/components/jobs.jsx` — coerce structured-shape notes in admin troubleshoot panel
+- `src/migrate/ui/mock-stores.js` — pass createdBy through
+- `CLAUDE.md` (NEW project-level)
+- `plans/2026-05-07-assistant-notes-view.md`, `plans/2026-05-08-vercel-assist-deploy.md`
+
+**Decisions (see DECISIONS.md)**
+- Admin obscure-URL token + cookie session (chose over Replit Auth headers — keeps the deployment private and avoids per-seat invite costs).
+- Admin identity (Austin/Michael) claimed first-come-first-served, locked to one browser per slot via random claim_token in DB + HttpOnly cookie. Reset only via psql.
+- Notes shape upgrade: structured `{text, author, savedAt}` coexists with legacy bare strings; readers coerce via `coerceNote`.
+- View-as preview: read-only via `?preview=1` query param — short-circuits writes; banner surfaces "Previewing as X".
+- Assist surface stays on the Replit Private Deployment (Vercel attempt closed). Per-assistant URLs (`/?as=Dennis`, `/?as=Toby`).
+- Drag-reorder is per-user, debounced 250ms, only enabled when no filter is hiding cards.
+- Mine filter on admin Stores includes legacy null-`created_by` rows as "unclaimed, visible to both".
+
+**Next steps (in priority order)**
+1. **Verify lockdown on prod:** after Replit deploys #56, walk through claim flow with both Michael's and Austin's actual browsers; confirm a third browser is blocked. Reset path documented (psql `DELETE FROM admin_claims WHERE user_name = …`).
+2. **"Can't mark flows done" follow-up:** Michael reported on /assist; suspected cause was preview-mode writes disabled. #58 added Assist-as-me link (`/?as=Michael`). Verify after Michael uses that link.
+3. **Empty stores in /assist:** by design they don't show (assist reads `imported_items`, not `stores`). Quikcamo example. Pending decision whether to surface empty cards anyway.
+4. **Replit DB scheme-diff prompt:** noted in CLAUDE.md not to use; reminded once when "DROP TABLE stores CASCADE" was suggested due to dev/prod drift.
+5. Continuing parser/import work from prior session is still pending (Yotpo aliases, importer-side `_pendingProducts` resolution, etc.).
+
+---
+
 ## 2026-05-06/07 — Pretty Cult / Fore All / Gaidama bundle pass: bg, fonts, flow drops, SMS migration, Yotpo, saved templates
 
 **Context**
