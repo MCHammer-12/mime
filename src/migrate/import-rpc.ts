@@ -641,6 +641,12 @@ export async function importFlowRpc(
   let createdTemplateCount = 0;
   let blankTemplateCount = 0;
 
+  // The flow's trigger schemaType determines which dynamic variables the
+  // email builder exposes (e.g. productName/productUrl on
+  // marketing_back_in_stock, cartSubtotal on cart_abandonment). Templates
+  // imported as part of a flow inherit it; exportTemplate's default
+  // (`marketing_email`) is the right answer only for standalone templates.
+  const flowSchemaType = bundle.automation.schemaType ?? "marketing_email";
   for (const ph of bundle.placeholderTemplates) {
     const templateJson = ph.fullTemplate
       ? {
@@ -651,8 +657,9 @@ export async function importFlowRpc(
           subject: ph.subject || ph.fullTemplate.subject || "",
           emailPreview: ph.previewText ?? ph.fullTemplate.emailPreview ?? null,
           name: `${bundle.automation.name} — ${ph.subject || ph.fullTemplate.name || "email"}`.slice(0, 200),
+          schemaType: flowSchemaType,
         }
-      : buildBlankTemplate(bundle.automation.name, ph);
+      : buildBlankTemplate(bundle.automation.name, ph, flowSchemaType);
 
     try {
       const created = await importTemplateRpc(templateJson, options);
@@ -670,7 +677,7 @@ export async function importFlowRpc(
       // already emitted by importTemplateRpc on failure.
       try {
         const blank = await importTemplateRpc(
-          buildBlankTemplate(bundle.automation.name, ph),
+          buildBlankTemplate(bundle.automation.name, ph, flowSchemaType),
           options,
         );
         sentinelToRealId.set(ph.sentinelId, blank.templateId);
@@ -809,6 +816,7 @@ export async function importFlowRpc(
 function buildBlankTemplate(
   flowName: string,
   ph: FlowImportBundle["placeholderTemplates"][number],
+  schemaType: string = "marketing_email",
 ): Record<string, any> {
   return {
     name: `[Placeholder] ${flowName} — ${ph.subject || ph.klaviyoTemplateId || "email"}`.slice(0, 200),
@@ -816,7 +824,9 @@ function buildBlankTemplate(
     emailPreview: ph.previewText ?? null,
     templateType: "marketing",
     category: "Marketing",
-    schemaType: "marketing_email",
+    // Match the parent flow's trigger schemaType so the builder exposes
+    // the right dynamic variables. See importFlowRpc note above.
+    schemaType,
     sections: [],
     emailBackgroundColor: "#f7f7f7",
     contentBackgroundColor: "#ffffff",
