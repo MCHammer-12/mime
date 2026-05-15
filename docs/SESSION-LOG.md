@@ -76,12 +76,19 @@ Long session that stood up the external-facing `/assist` UI (note-taking for Den
 - Drag-reorder is per-user, debounced 250ms, only enabled when no filter is hiding cards.
 - Mine filter on admin Stores includes legacy null-`created_by` rows as "unclaimed, visible to both".
 
+**Parallel session work (other Claude track, merged in same window — not mine, noted for the log)**
+- [#59](https://github.com/MCHammer-12/mime/pull/59) Full Order Tracking trigger set + generic Reviews trigger.
+- [#60](https://github.com/MCHammer-12/mime/pull/60) 10s heartbeat on `/api/jobs/:id/stream` — fixes Replit autoscale proxy killing idle streams during `needs_input` waits (the trigger picker modal would die before the operator could answer).
+- [#61](https://github.com/MCHammer-12/mime/pull/61) Flow-imported templates inherit the flow's `schemaType` (was hardcoded `marketing_email` — broke back-in-stock dynamic vars).
+
 **Next steps (in priority order)**
 1. **Verify lockdown on prod:** after Replit deploys #56, walk through claim flow with both Michael's and Austin's actual browsers; confirm a third browser is blocked. Reset path documented (psql `DELETE FROM admin_claims WHERE user_name = …`).
 2. **"Can't mark flows done" follow-up:** Michael reported on /assist; suspected cause was preview-mode writes disabled. #58 added Assist-as-me link (`/?as=Michael`). Verify after Michael uses that link.
 3. **Empty stores in /assist:** by design they don't show (assist reads `imported_items`, not `stores`). Quikcamo example. Pending decision whether to surface empty cards anyway.
 4. **Replit DB scheme-diff prompt:** noted in CLAUDE.md not to use; reminded once when "DROP TABLE stores CASCADE" was suggested due to dev/prod drift.
 5. Continuing parser/import work from prior session is still pending (Yotpo aliases, importer-side `_pendingProducts` resolution, etc.).
+6. **Verify back-in-stock vars** after #61 — re-import a back-in-stock flow and confirm `productName` / `productUrl` show up as bindable variables.
+7. **Verify needs_input survives long picks** after #60 — re-trigger the Fairechild Review-Request flow that originally hit the network-error and pick from the modal after a delay.
 
 ---
 
