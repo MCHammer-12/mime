@@ -4,7 +4,24 @@
 Automation project for manual processes Michael does at Redo. Primary target: Klaviyo → Redo email migration workflow, and improving Redo's existing HTML → JSON email parser.
 
 ## Status
-End-to-end import pipeline running in production via the Replit-deployed migrate UI. As of **2026-05-11**:
+End-to-end import pipeline running in production via the Replit-deployed migrate UI. As of **2026-05-14**:
+
+- **Flow-imported templates inherit the flow's trigger schemaType** (was hardcoded `marketing_email`). Fixes back-in-stock / cart-abandonment / order-tracking / Yotpo flows so their trigger-specific dynamic variables (`productName`, `cartSubtotal`, etc.) actually appear as bindable in the editor.
+- **NDJSON job stream has 10s heartbeat** — survives Replit proxy's idle-stream killer during the `needs_input` wait (modal open, no bytes flowing). Mirrors the existing `handleFlowsStream` pattern.
+- **15 Order Tracking triggers + generic Reviews trigger** added to the trigger-picker (`marketing-trigger-options.ts` + `types.ts`). Operator can hand-pick when Klaviyo metric name doesn't auto-resolve. Auto-resolve mappings still TODO for live Reviews-app metric names like "Ready to review".
+- **Bare `ANTHROPIC_API_KEY` accepted** (Replit's default Anthropic integration shape) alongside the older `AI_INTEGRATIONS_*` blueprint pair.
+
+As of **2026-05-08**:
+
+- **Klaviyo "Started Checkout" → Redo CART_ABANDONMENT** (was CHECKOUT_ABANDONMENT). Aligned with how merchants name "Abandoned Cart" flows in Klaviyo. Confirmed with Redo eng.
+- **Migrated cart-deeplink buttons emit static `<storeUrl>/cart`**, not `linkType:dynamic-variable, schemaFieldName:checkoutUrl`. Redo eng confirmed `schemaInstance.checkoutUrl` is a Shopify Storefront cart URL that's silently null on cart-fetch failure — would hide the button entirely. `MappedLink.dynamic-variable` variant removed; `ParseContext.storeUrl` plumbed through. See `project_redo_checkout_url_resolution` memory.
+- **Klaviyo `profile-marketing-consent` condition** ("is subscribed to SMS/email") translates to Redo's `customer_attribute` boolean dimension (`subscribed-to-sms` / `subscribed-to-email`).
+- **Klaviyo "Ordered Product" metric** maps to `order-placed` (per-order, since Redo has no per-line-item activity).
+- **SMS templates explicitly emit `autoShortenLinks: false`** (Redo mongoose default is `true`; absence of value = on by default, contrary to operator preference).
+- **Merchant credentials moved from browser localStorage to Postgres** (`stores` table, migration 003). `GET /api/stores/:id` returns the full record for the edit form; `POST /api/debug/resolve-template` lets diagnostics tooling run resolver checks server-side. Dashboard cards get an edit pencil with JWT-expiry hint.
+- **Resolver failures are typed** (`ResolveFailure` with six concrete reasons). Flow parser surfaces per-template warnings explaining why each blank fallback happened.
+
+As of **2026-05-11**:
 
 - **External assist surface at `/`:** branded "redo", per-assistant via `?as=Dennis` / `?as=Toby` URL. Brand-card picker → per-store items list with checkbox + note textarea. Drag-and-drop card priority is per-user. Notes round-trip back into the existing Toby troubleshoot panel via the same `jobs.notes` JSONB column.
 - **Admin moved to `/<ADMIN_URL_TOKEN>/`** (obscure URL + HttpOnly cookie). First-visit modal claims an Austin or Michael slot via `admin_claims` (random token in DB mirrored to HttpOnly cookie). Both slots claimed = dashboard hard-locked; new browsers see disabled modal options and every admin API call returns 401. Reset only via psql.
@@ -20,7 +37,7 @@ As of **2026-05-07**:
 - **Saved templates split:** Standalone template imports + campaign imports now route through `createSavedEmailTemplate` RPC (lands in Saved Templates tab). Flow-attached templates stay as `createEmailTemplate` because `send_email.templateId` references EmailTemplate `_id`.
 - **Troubleshoot bundle on failure:** failed flow imports now include `klaviyo-flow.json`, `parse-result.json` with the parsed automation we tried to send, and `error.txt` with the full Zod stack — was previously empty for failed flows.
 
-Open: importer-side `_pendingProducts` resolution (redoapp `import-klaviyo-templates.ts` doesn't yet swap product names → `manuallySelectedProducts` via Shopify search); discount-code create+attach (blocks both email and SMS UX, parked pending redoapp design); Yotpo metric-name aliases need verification against Gaidama; Toby branch-config warnings + naming + end-as-message; image+product duplication, footer column text padding, bold inversion, GIF → 2 images + 2 text blocks (Roden Gray / nevermindall — most need fresh troubleshoot bundles).
+Open: importer-side `_pendingProducts` resolution (redoapp `import-klaviyo-templates.ts` doesn't yet swap product names → `manuallySelectedProducts` via Shopify search); discount-code create+attach (blocks both email and SMS UX, parked pending redoapp design); Yotpo metric-name aliases need verification against Gaidama; Toby branch-config warnings + naming + end-as-message; image+product duplication, footer column text padding, bold inversion, GIF → 2 images + 2 text blocks (Roden Gray / nevermindall — most need fresh troubleshoot bundles); Replshield blocks `curl` to `/api/debug/resolve-template` (need either Michael logged-in via Chrome MCP or deploy made public); Klaviyo Reviews-app metric "Ready to review" not in `METRIC_NAME_MAP` auto-resolve (picker fires); pre-#61 imports still have wrong template schemaType (needs re-import).
 
 Packages A-D + F (parser polish) + E1 (variable substitution) + E2 (inline coupon → AI rewrite + placeholder discount block) + E4 (REVIEW aggregator) complete. 416 templates in the local corpus parse with 0 failures. Import executor in redoapp (uncommitted) handles product filter creation.
 

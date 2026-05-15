@@ -1,5 +1,78 @@
 # Session Log
 
+## 2026-05-08/14 — Merchant-feedback fixes (Goumikids, Defiance Beauty, Fairechild), DB-backed credentials, schema-type propagation
+
+**Context**
+Multi-day session driven by three live merchant troubleshoot bundles + a structural change to move credentials server-side so diagnostics can run autonomously. 8 merged PRs, one memory added (`project_redo_checkout_url_resolution`).
+
+**Done — Ordered Product, SMS shortening default, resolver diagnostics ([#39](https://github.com/MCHammer-12/mime/pull/39))**
+- `condition-mapping.ts`: Klaviyo "Ordered Product" metric (fires per line item) collapses into Redo's per-order `order-placed` activity. Conditions like "Ordered Product zero times" stop landing as TODOs.
+- `parser.ts` + `import-rpc.ts`: always emit `autoShortenLinks` (true or false) on migrated SMS placeholders. Redo's mongoose schema defaults to `true`, so we send `false` on the wire to land migrated templates with shortening OFF.
+- `template-resolver.ts`: replaced silent null-on-failure with typed `ResolveFailure` (six reasons: `manifest-miss-no-api-key`, `manifest-miss-and-api-miss`, `api-error`, `disk-html-missing`, `html-empty`, `parser-threw`). Manifest-hit-but-disk-miss now falls back to the Klaviyo API instead of giving up. Flow parser surfaces the reason + detail in warnings + per-template `templateWarnings`. Goumikids' 6 silent blank-fallbacks now explain themselves on the next bundle.
+
+**Done — DB-backed merchant credentials ([#40](https://github.com/MCHammer-12/mime/pull/40))**
+- Migration 003: `stores(id, name, merchant_slug UNIQUE, klaviyo_key, redo_jwt, store_id, redo_server_base, ...)` table. Replaces browser-localStorage persistence.
+- New `src/migrate/stores.ts` repo (CRUD + `toSummary` with masked-key listing shape).
+- 5 endpoints: `GET/POST /api/stores`, `GET/PATCH/DELETE /api/stores/:id`. `GET /api/stores/:id` returns the full unmasked record so the edit form can populate. All gated by the existing basic-auth (later layered with admin-token from #41).
+- `POST /api/debug/resolve-template` — takes `{merchantSlug, templateId}`, looks up the Klaviyo key from DB, runs the same resolver path the flow importer uses, returns typed `ResolveFailure` or a parse summary. Lets Claude triage merchant bundles without a key paste.
+- UI: dashboard cards gain an edit pencil that opens the setup modal in edit mode. JWT field shows live expiry hint ("expires in 12 min" / "expired — paste fresh"). `mock-stores.js` chooses backend at boot from `/api/env.dbEnabled`. Anthropic key stays in env (`AI_INTEGRATIONS_ANTHROPIC_API_KEY` / `ANTHROPIC_API_KEY` — not per-merchant).
+
+**Done — Started Checkout → cart abandonment + static `<storeUrl>/cart` links ([#43](https://github.com/MCHammer-12/mime/pull/43))**
+- `trigger-mapping.ts`: collapse Klaviyo "Started Checkout" / "checkout started" into `MARKETING_CART_ABANDONMENT` (was `MARKETING_CHECKOUT_ABANDONMENT`). Klaviyo's stock "Abandoned Cart" flow uses Started Checkout as its trigger event; merchants think of it as cart abandonment. Confirmed with Redo eng.
+- `url-mapping.ts`: drop the `dynamic-variable` branch of `MappedLink` entirely. Klaviyo's four checkout-URL variables (`event.URL`, `event.CheckoutURL`, `event.extra.checkout_url`, `event.extra.responsive_checkout_url`) now rewrite to `<storeUrl>/cart` (linkType `web-page`) when the storeUrl is known. Reason: Redo eng confirmed `schemaInstance.checkoutUrl` is a Shopify Storefront cart URL that's silently `null` on cart-fetch failure (no Storefront token, non-Shopify provider, fetch error) — a null dynamic var hides the button block entirely. Working generic `/cart` beats silently-hidden button.
+- `parser/index.ts` + `parse-template.ts`: ParseContext gains an optional `storeUrl`; export-template plumbs `account.websiteUrl` through. Dead `dynamic-variable` branches in `button.ts` / `image.ts` removed.
+- `referencesCheckoutUrl` in export-template now never fires (no callers emit `schemaFieldName: "checkoutUrl"`) — left in place for future product-block use. Trade-off accepted: loses Klaviyo's customer-specific session token, gains reliability.
+- New `url-mapping.smoke.ts` covers rewrite happy path + no-storeUrl reviewItem fallback + static URL passthrough.
+
+**Done — `profile-marketing-consent` translation ([#44](https://github.com/MCHammer-12/mime/pull/44))**
+- `condition-mapping.ts`: Klaviyo's `profile-marketing-consent` condition (the "can receive SMS marketing" / "is email subscriber" check on conditional-splits) was emitting a TODO warning. Now translates to Redo's `customer_attribute` condition with the matching boolean dimension: `channel: "sms"` + `subscription: "subscribed"` → `subscribed-to-sms = true`; same for email. Unknown channel → warning, no condition.
+- `can_receive_marketing` and `consent_status.filters` intentionally ignored in V1 — Redo's dimension is strict boolean. Broader "contactable" semantics exist on `CAN_RECEIVE_EMAIL_MARKETING` if we need it later.
+- New `condition-mapping.smoke.ts` covers sms-true, email-true, sms-false (unsubscribed), and unknown channel.
+
+**Done — Bare `ANTHROPIC_API_KEY` accepted ([#45](https://github.com/MCHammer-12/mime/pull/45))**
+- `ai-rewrite.ts` strictly required the Replit blueprint pair `AI_INTEGRATIONS_ANTHROPIC_API_KEY` + `AI_INTEGRATIONS_ANTHROPIC_BASE_URL`. Replit's default "Add Anthropic integration" sets only `ANTHROPIC_API_KEY`, so that path rejected valid configs. Now: try blueprint pair first (proxied through Replit), fall back to bare `ANTHROPIC_API_KEY` → SDK defaults to `api.anthropic.com`.
+
+**Done — Order Tracking + Reviews triggers ([#59](https://github.com/MCHammer-12/mime/pull/59))**
+- `types.ts` + `marketing-trigger-options.ts`: 15 new trigger keys for the full Order Tracking enum (order_fulfilled, order_pre_transit, order_in_transit, …, order_shipment_error) + 1 generic `review_submitted` (Klaviyo "Submitted review"). The picker modal now offers them when auto-resolve fails.
+- `trigger-mapping.ts`: added `submitted review` (alongside existing yotpo aliases) — generic Reviews maps to `review_submitted`. Order Tracking metric names not yet wired into auto-resolve; the picker still surfaces them so the operator can choose manually. (Open: pre-mapped names for live merchants that use Klaviyo Reviews app events with custom names like "Ready to review" — Fairechild hit this.)
+
+**Done — Job-stream heartbeat ([#60](https://github.com/MCHammer-12/mime/pull/60))**
+- `handleJobStream` had no idle-keepalive. When the import emits `needs_input` and blocks in `ctrl.prompt()` waiting for the modal pick, no bytes flow on the NDJSON stream. Replit's autoscale proxy kills idle streams in seconds → Chrome throws `TypeError: network error` → modal answer never gets POSTed.
+- Fix: 10s `{kind:"heartbeat",t:Date.now()}` heartbeat, same pattern `handleFlowsStream` already uses. Client's `readNdjsonLines` treats unknown event kinds as no-ops, so it's invisible to the UI. Hit by Fairechild's "Review Request Klaviyo" flow (Klaviyo metric "Ready to review" not in `METRIC_NAME_MAP`, picker fired, stream died).
+
+**Done — Flow-imported template schemaType inheritance ([#61](https://github.com/MCHammer-12/mime/pull/61))**
+- `import-rpc.ts`: templates created via `importFlowRpc` were hardcoded to `schemaType: "marketing_email"`. That's wrong for any flow that needs trigger-specific dynamic variables — most visibly back-in-stock, which exposes `productName` / `productUrl` only when the template's schemaType is `marketing_back_in_stock`.
+- Both branches (full template spread, blank fallback) now inherit `bundle.automation.schemaType` (set by `resolveTrigger`). Standalone template imports keep their `marketing_email` default — reusable, not flow-bound. Benefits every non-`marketing_email` flow type: cart/checkout/browse abandonment, order tracking, Yotpo loyalty, reviews, back-in-stock.
+
+**Files changed (cross-PR)**
+- `src/flow/condition-mapping.ts`, `src/flow/condition-mapping.smoke.ts` (NEW)
+- `src/flow/trigger-mapping.ts`, `src/flow/marketing-trigger-options.ts`, `src/flow/types.ts`
+- `src/flow/parser.ts`, `src/flow/sms.smoke.ts`, `src/flow/template-resolver.ts`
+- `src/parser/url-mapping.ts`, `src/parser/url-mapping.smoke.ts` (NEW)
+- `src/parser/index.ts`, `src/parser/blocks/button.ts`, `src/parser/blocks/image.ts`
+- `src/export-template.ts`, `src/ai-rewrite.ts`
+- `src/migrate/server.ts`, `src/migrate/import-rpc.ts`, `src/migrate/db.ts`
+- `src/migrate/stores.ts` (NEW), `src/migrate/review-variables.ts`
+- `src/migrate/ui/mock-stores.js`, `src/migrate/ui/components/app.jsx`, `dashboard.jsx`, `setup-modal.jsx`, `atoms.jsx`
+
+**Decisions (see DECISIONS.md)**
+- Klaviyo "Started Checkout" maps to Redo's MARKETING_CART_ABANDONMENT (not CHECKOUT_ABANDONMENT) — colloquial merchant naming + Redo eng concurrence.
+- Migrated buttons use static `<storeUrl>/cart` instead of `linkType:dynamic-variable, schemaFieldName:checkoutUrl` — reliability over session-deeplinking.
+- Merchant credentials live in Postgres, not browser localStorage — programmatic diagnostics, multi-device, JWT rotation in one place.
+- Anthropic env: accept either Replit blueprint pair OR bare `ANTHROPIC_API_KEY`.
+- Flow-imported templates inherit the flow's trigger schemaType.
+
+**Memory added**
+- `project_redo_checkout_url_resolution` — Redo's `schemaInstance.checkoutUrl` is a Shopify Storefront cart URL that's silently null on cart-fetch failure (Redo eng confirmation 2026-05-08). Saves future sessions from re-asking.
+
+**Open / next steps**
+1. Replshield still blocks external curl to the Replit deploy (`daniel2-0.replit.app`). To enable autonomous diagnostics via `/api/debug/resolve-template`, Michael either (a) logs into Replit in the Chrome profile Claude-in-Chrome is connected to, or (b) makes the deploy public (admin-token + claim still gate everything sensitive). Currently (b) is the recommended structural fix.
+2. Pre-PR-#61 imports still have wrong `schemaType` on their templates — would need re-import or per-template fix in Redo UI to retroactively expose back-in-stock vars on existing emails.
+3. "Ready to review" Klaviyo metric name still not in `METRIC_NAME_MAP` auto-resolve. Picker now stays alive (heartbeat) but operator still has to pick by hand. Add `"ready to review": review_submitted` next time Fairechild or any other Reviews-app merchant comes through.
+4. Goumikids 2026-05-08 placeholder issue: bundle was captured on a pre-#39 Replit build (no resolver diagnostics yet). Re-run on current deploy will surface per-template `Reason: api-error (Klaviyo /templates/X/ failed: 404)` for each blank fallback.
+
+---
+
 ## 2026-05-07/11 — External assist surface, admin identity + lockdown, drag-reorder, hours-saved tally
 
 **Context**
