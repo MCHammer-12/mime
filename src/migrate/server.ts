@@ -1144,6 +1144,15 @@ async function runImport(
           } catch (e: any) {
             templateImportFail++;
             const msg = e.message ?? String(e);
+            // Rich event for the troubleshoot bundle (error.txt); compact
+            // `fail` event drives the UI's red-row indicator. Same split as
+            // the flow path.
+            emit({
+              kind: "template_failed",
+              id: l.id,
+              name: l.name,
+              error: msg,
+            });
             emit({ kind: "fail", id: l.id, name: l.name, error: `import: ${msg}` });
           }
         }
@@ -1572,11 +1581,18 @@ async function runImport(
               });
             } catch (e: any) {
               variantFailures++;
+              const msg = e.message ?? String(e);
+              emit({
+                kind: "template_failed",
+                id: `${campaignId}:${m.id}`,
+                name: variantName,
+                error: msg,
+              });
               emit({
                 kind: "fail",
                 id: `${campaignId}:${m.id}`,
                 name: variantName,
-                error: `import: ${e.message ?? e}`,
+                error: `import: ${msg}`,
               });
             }
           }

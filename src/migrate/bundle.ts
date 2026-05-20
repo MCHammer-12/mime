@@ -61,6 +61,12 @@ interface FlowFailedEventPayload {
   klaviyoFlow?: unknown;
 }
 
+interface TemplateFailedEventPayload {
+  id?: string;
+  name?: string;
+  error?: string;
+}
+
 /**
  * Write the bundle to res. Caller is responsible for HTTP status + headers
  * before calling (so an error before the first write can still surface as
@@ -179,6 +185,17 @@ function lastFlowFailedFor(job: JobState, flowId: string): FlowFailedEventPayloa
   return null;
 }
 
+function lastTemplateFailedFor(job: JobState, templateId: string): TemplateFailedEventPayload | null {
+  for (let i = job.events.length - 1; i >= 0; i--) {
+    const ev = job.events[i];
+    if (ev.kind === "template_failed") {
+      const p = ev.payload as TemplateFailedEventPayload;
+      if (p.id === templateId) return p;
+    }
+  }
+  return null;
+}
+
 function addTemplateToBundle(
   job: JobState,
   templateId: string,
@@ -212,6 +229,14 @@ function addTemplateToBundle(
     archive.append(JSON.stringify(parseResult, null, 2), {
       name: `${folder}/parse-result.json`,
     });
+  }
+
+  // If the import RPC failed, the error string only lives in job_events.
+  // Surface it here so the bundle has a one-file answer to "why did this
+  // template fail?" (mirrors flow_failed → error.txt).
+  const failedEvent = lastTemplateFailedFor(job, templateId);
+  if (failedEvent?.error) {
+    archive.append(failedEvent.error, { name: `${folder}/error.txt` });
   }
 }
 

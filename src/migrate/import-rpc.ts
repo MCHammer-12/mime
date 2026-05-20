@@ -205,13 +205,16 @@ async function preparePayload(
   options: ImportOptions,
 ): Promise<Record<string, any>> {
   const {
-    _id: _discardId,
     _fontPlan: _discardFontPlan,
     team: _discardTeam, // server sets from JWT
     createdAt: _discardCreatedAt, // server generates
     updatedAt: _discardUpdatedAt,
     ...rest
   } = template;
+  // Keep `_id`: createSavedEmailTemplate's input is `template: emailTemplateSchema`
+  // (full schema, `_id` required as a valid ObjectId). createEmailTemplate's
+  // input is `emailTemplateSchema.omit({_id: true})`, so an `_id` passed there
+  // is silently stripped by Zod and the server still generates its own.
 
   if (options.account && looksLikePlaceholder(rest.address)) {
     rest.address = mapAccountAddress(options.account);
