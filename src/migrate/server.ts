@@ -1122,10 +1122,11 @@ async function runImport(
                   jwt,
                   serverBase,
                   account,
-                  // Temporarily routing standalone templates back through
-                  // createEmailTemplate (Previous Emails) — createSavedEmailTemplate
-                  // throws 500 with no client-visible detail. Re-enable
-                  // `asSavedTemplate: true` once the 500 is diagnosed.
+                  // Standalone templates land in the merchant's "Saved
+                  // templates" library tab, NOT "Previous emails". Per
+                  // redoapp's split (SavedEmailTemplate vs EmailTemplate
+                  // collections), this is just a different RPC.
+                  asSavedTemplate: true,
                   onProgress: (ev: ImportProgressEvent) => {
                     if (ev.kind === "filter_created") {
                       emit({ kind: "log", source: "stdout", text: `filter created: ${ev.productFilterId}` });
@@ -1542,10 +1543,11 @@ async function runImport(
                   jwt,
                   serverBase: bodyRedoServerBase,
                   account,
-                  // Temporarily routing campaigns back through
-                  // createEmailTemplate (Previous Emails) — same 500 issue as
-                  // the template path above. Re-enable `asSavedTemplate: true`
-                  // once the saved-template 500 is diagnosed.
+                  // Campaigns are standalone email sends; they belong in
+                  // the merchant's "Saved templates" library, not in the
+                  // "Previous emails" timeline of past sends. Same RPC
+                  // switch as the standalone template-import phase above.
+                  asSavedTemplate: true,
                   onProgress: (ev: ImportProgressEvent) => {
                     if (ev.kind === "filter_created") {
                       emit({
