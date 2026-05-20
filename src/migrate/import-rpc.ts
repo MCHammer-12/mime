@@ -111,6 +111,32 @@ function resolveServerBase(serverBase: string | undefined | null): string {
   return raw.replace(/\/+$/, "") || DEFAULT_SERVER_BASE;
 }
 
+/** Decode a Redo merchant JWT's `aud` claim — the team ID. Returns null
+ *  for non-JWTs (e.g. `redo_pat_…` personal access tokens) or malformed
+ *  tokens. Matches the priority order used by the credentials editor:
+ *  `aud` ?? `teamId` ?? `team_id` ?? `sub` (see ui/mock-stores.js). */
+function decodeJwtAud(jwt: string | null | undefined): string | null {
+  if (!jwt) return null;
+  const t = jwt.trim();
+  if (t.startsWith("redo_pat_")) return null;
+  const parts = t.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    let s = parts[1];
+    const pad = s.length % 4;
+    if (pad === 2) s += "==";
+    else if (pad === 3) s += "=";
+    else if (pad === 1) return null;
+    const norm = s.replace(/-/g, "+").replace(/_/g, "/");
+    const json = Buffer.from(norm, "base64").toString("utf8");
+    const payload = JSON.parse(json);
+    const v = payload.aud ?? payload.teamId ?? payload.team_id ?? payload.sub;
+    return typeof v === "string" && v.length ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 export type ImportProgressEvent =
   | { kind: "filter_created"; templateName: string; productFilterId: string }
   | { kind: "template_created"; templateName: string; templateId: string }
@@ -167,11 +193,21 @@ export async function importTemplateRpc(
       // adds `templateName`, `source`, `team`, `lastUsed` etc. on the
       // outer doc. Source = "saved" places it in the library tab; the
       // other source values ("forwarded", "uploaded") are filtered out.
+      //
+      // Inject `team` on the embedded template: redoapp's Mongoose schema
+      // (`emailTemplateSchemaDefinition.team` in
+      // redo/marketing/db/schema/src/EmailTemplate.ts) marks it required,
+      // and unlike createEmailTemplate, the createSavedEmailTemplate handler
+      // does NOT inject team from the JWT context onto the embedded doc
+      // (only on the outer wrapper). Without this, Mongoose throws a
+      // validation error → 500.
+      const teamFromJwt = decodeJwtAud(options.jwt);
+      const embedded = teamFromJwt ? { ...prepared, team: teamFromJwt } : prepared;
       created = await postMarketingRpc(
         "createSavedEmailTemplate",
         {
-          template: prepared,
-          name: String(prepared.name ?? template.name ?? "Imported Template"),
+          template: embedded,
+          name: String(embedded.name ?? template.name ?? "Imported Template"),
           source: "saved",
         },
         options,
