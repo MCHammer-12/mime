@@ -108,6 +108,29 @@ function mapWaitTimeUnit(unit: string): WaitTimeUnit {
   }
 }
 
+// First time-delay action in the Klaviyo flow defines the practical
+// "browse abandonment window" — the customer viewed a product N hours/days
+// ago and hasn't converted. Used to seed the viewed-product skip condition
+// on Viewed Product / Active on Site → Browse Abandonment imports.
+// Returns Redo's `before-now-relative` timeframe shape with singular units.
+function extractFirstTimeDelayWindow(
+  flow: KlaviyoFlow,
+): { value: number; units: "minute" | "hour" | "day" } | null {
+  const actions = flow.data.attributes.definition?.actions ?? [];
+  for (const a of actions) {
+    if (a.type !== "time-delay") continue;
+    const value = Number(a.data?.value ?? 0);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    const unit = String(a.data?.unit ?? "hours");
+    const units: "minute" | "hour" | "day" =
+      unit === "days" ? "day" :
+      unit === "minutes" ? "minute" :
+      "hour";
+    return { value, units };
+  }
+  return null;
+}
+
 /**
  * Sentinel returned by convertAction when the action should be dropped from
  * the flow entirely (no WAIT stub, no placeholder). The caller stitches the
@@ -589,6 +612,57 @@ export async function parseFlow(
 
   const state: ParseState = { needsTerminal: false };
 
+  // Build the skip condition list. Both Klaviyo "Viewed Product" and "Active
+  // on Site" map to MARKETING_BROWSE_ABANDONMENT, so we layer a mutually-
+  // exclusive viewed-product activity skip on top of the abandonment skip
+  // to keep the two flows from double-firing on the same customer.
+  const skipConditions: unknown[] = [];
+  if (resolution.autoSkipAbandonmentField) {
+    skipConditions.push({
+      dataSource: "trigger-data",
+      schemaBooleanExpression: {
+        type: "boolean_evaluation",
+        field: resolution.autoSkipAbandonmentField,
+        value: false,
+      },
+    });
+  }
+  if (resolution.klaviyoSource) {
+    let window = extractFirstTimeDelayWindow(flow);
+    if (!window) {
+      warnings.push({
+        kind: "requires-review",
+        message: `${resolution.klaviyoSource === "viewed-product" ? "Viewed Product" : "Active on Site"} flow has no time-delay action — defaulting viewed-product skip window to 24 hours`,
+      });
+      window = { value: 24, units: "hour" };
+    }
+    // Viewed Product flow → skip if customer did NOT view a product in window.
+    // Active on Site flow → skip if customer DID view a product in window.
+    const count =
+      resolution.klaviyoSource === "viewed-product"
+        ? { type: "zero_times" }
+        : { type: "at_least_once" };
+    skipConditions.push({
+      dataSource: "inline-segment",
+      inlineSegment: {
+        mode: "AND",
+        conditions: [
+          {
+            type: "customer_activity",
+            activityType: "viewed-product",
+            count,
+            timeframe: {
+              type: "before-now-relative",
+              value: window.value,
+              units: window.units,
+            },
+            whereConditions: [],
+          },
+        ],
+      },
+    });
+  }
+
   const triggerStep: TriggerStep = {
     type: StepType.TRIGGER,
     id: TRIGGER_STEP_ID,
@@ -596,22 +670,8 @@ export async function parseFlow(
     category: resolution.category,
     key: resolution.key,
     nextId: terminate(firstActionId, state),
-    ...(resolution.autoSkipAbandonmentField
-      ? {
-          skipConditions: {
-            conjunctionMode: "OR",
-            conditions: [
-              {
-                dataSource: "trigger-data",
-                schemaBooleanExpression: {
-                  type: "boolean_evaluation",
-                  field: resolution.autoSkipAbandonmentField,
-                  value: false,
-                },
-              },
-            ],
-          },
-        }
+    ...(skipConditions.length > 0
+      ? { skipConditions: { conjunctionMode: "OR", conditions: skipConditions } }
       : {}),
   };
 
