@@ -18,6 +18,13 @@ export interface TriggerResolution {
   // Auto-generated skip condition the importer will emit on the trigger step.
   // UI auto-inserts this on abandonment flows; repo create does not.
   autoSkipAbandonmentField?: "isCartAbandoned" | "isBrowseAbandoned" | "isCheckoutAbandoned";
+  // Klaviyo "Viewed Product" and "Active on Site" both collapse to Redo's
+  // Browse Abandonment trigger. Both would fire on every browse-abandon event
+  // otherwise — the customer gets two emails. Tag the source so parseFlow can
+  // emit a mutually-exclusive viewed-product skip condition:
+  //   viewed-product   → skip if customer has NOT viewed-product in window
+  //   active-on-site   → skip if customer HAS viewed-product in window
+  klaviyoSource?: "viewed-product" | "active-on-site";
 }
 
 // Well-known Klaviyo metric names → Redo trigger. Keys are case-insensitive.
@@ -233,6 +240,16 @@ function resolveMetricTrigger(
     });
     return null;
   }
+  // Tag the source so parseFlow can emit the mutually-exclusive viewed-product
+  // skip condition for Browse Abandonment flows. Both "Viewed Product" and
+  // "Active on Site" map to MARKETING_BROWSE_ABANDONMENT in Redo.
+  const lowerName = m.name.toLowerCase();
+  const klaviyoSource: TriggerResolution["klaviyoSource"] =
+    lowerName === "viewed product"
+      ? "viewed-product"
+      : lowerName === "active on site"
+        ? "active-on-site"
+        : undefined;
   // CommentSold detection — upgrade to CS variant if the trigger filter matches.
   // CS variants only exist for the marketing abandonment triggers.
   if (
@@ -246,6 +263,7 @@ function resolveMetricTrigger(
       schemaType: cs.schemaType,
       category: "Marketing",
       autoSkipAbandonmentField: ABANDONMENT_SKIP_FIELD[cs.key],
+      klaviyoSource,
     };
   }
   return {
@@ -256,6 +274,7 @@ function resolveMetricTrigger(
       hit.category === "Marketing"
         ? ABANDONMENT_SKIP_FIELD[hit.key as MarketingTriggerKey]
         : undefined,
+    klaviyoSource,
   };
 }
 
