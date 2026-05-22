@@ -74,6 +74,9 @@ export interface PendingInput {
    *  "Apply to other items with the same question" checkbox in the UI —
    *  the cache reuse never fires anyway and showing it just misleads. */
   hideApplyAll?: boolean;
+  /** For type:"boolean" — replace the default "Yes" / "No" button labels. */
+  trueLabel?: string;
+  falseLabel?: string;
 }
 
 export interface JobSummary {

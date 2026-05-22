@@ -299,6 +299,30 @@ export interface FontUploadResult {
 }
 
 /**
+ * Fetch the merchant's brand kit and return which unresolved-font entries
+ * are STILL missing — i.e. not already registered as a custom font family
+ * on the team. Used by the server's preflight gate so we only prompt the
+ * user for fonts they actually need to add.
+ */
+export async function filterFontsNotInBrandKit(
+  unresolved: Array<{ family: string; reason: string; usedBy: string[] }>,
+  options: ImportOptions,
+): Promise<Array<{ family: string; reason: string; usedBy: string[] }>> {
+  if (unresolved.length === 0) return [];
+  const teamResponse = await getTeam(options);
+  const teamDoc: any = teamResponse?.team ?? teamResponse ?? {};
+  const currentFamilies: any[] = Array.isArray(
+    teamDoc?.settings?.brandKit?.customFontFamilies,
+  )
+    ? teamDoc.settings.brandKit.customFontFamilies
+    : [];
+  const existing = new Set(
+    currentFamilies.map((f: any) => String(f.fontFamily ?? "").toLowerCase()),
+  );
+  return unresolved.filter((u) => !existing.has(u.family.toLowerCase()));
+}
+
+/**
  * Upload all resolved fonts referenced by the batch's templates to the target
  * merchant's brand kit. Idempotent by family name — we fetch the current
  * brand kit and merge (skipping families that already exist).

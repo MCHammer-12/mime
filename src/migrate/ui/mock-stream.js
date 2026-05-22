@@ -51,8 +51,10 @@ function unwrapEvent(env) {
       itemId: input.itemId,
       itemName: input.itemLabel,
       hideApplyAll: input.hideApplyAll,
-      // trueLabel / falseLabel are optional — backend doesn't surface them,
-      // so the UI falls back to Yes/No in the modal.
+      // Optional per-prompt overrides for the boolean modal's Yes/No labels.
+      // Backend surfaces them on PendingInput; UI falls back to Yes/No when absent.
+      trueLabel: input.trueLabel,
+      falseLabel: input.falseLabel,
     };
   }
   return { ...base, ...p };
