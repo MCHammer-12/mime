@@ -31,6 +31,7 @@ import { klaviyo, paginate, slug } from "../klaviyo.js";
 import { fetchAllMetrics } from "../extract-metrics.js";
 import type { ImportProgressEvent } from "./import-rpc.js";
 import {
+  filterFontsNotInBrandKit,
   importFlowRpc,
   importTemplateRpc,
   RedoAuthExpiredError,
@@ -877,7 +878,7 @@ async function runImport(
 
     // 1. Fetch account
     emit({ kind: "step", label: "Fetching Klaviyo account…" });
-    let account = null;
+    let account: import("../fetch-account.js").KlaviyoAccount | null = null;
     try {
       account = await fetchAccount(klaviyoKey);
       emit({ kind: "info", text: `Account: ${account.organizationName}` });
@@ -1065,6 +1066,86 @@ async function runImport(
         }
       };
 
+      /**
+       * Preflight gate for unresolved fonts. Klaviyo templates routinely use
+       * proprietary fonts (Futura, Helvetica Neue Mono, custom brand faces)
+       * that aren't on Google Fonts so we can't auto-fetch them — but they
+       * also can't be silently dropped: templates land referencing fonts
+       * that don't exist and rendering falls back to a generic sans/serif,
+       * making the editor unusable until the merchant manually picks a
+       * replacement (see Blackline Car Care 2026-05-21 troubleshoot).
+       *
+       * Behavior: re-check the brand kit so we only block on fonts the user
+       * hasn't already added, then pause with a needs_input modal that
+       * surfaces the missing families. User can:
+       *   - "Continue (added them)" — proceeds; templates will reference
+       *     fonts that now exist in the brand kit.
+       *   - "Import anyway" / Skip — proceeds without adding; rendering
+       *     falls back. Logged as a warn so it shows up in the troubleshoot
+       *     bundle.
+       *
+       * questionKey is scoped by the font set so a later phase encountering
+       * a NEW unresolved font triggers a fresh prompt rather than reusing
+       * an unrelated cached answer.
+       */
+      async function preflightUnresolvedFonts(
+        unresolved: Array<{ family: string; reason: string; usedBy: string[] }>,
+        label: string,
+      ): Promise<void> {
+        if (unresolved.length === 0) return;
+        let stillMissing: typeof unresolved;
+        try {
+          stillMissing = await withFreshJwt(
+            (jwt) =>
+              filterFontsNotInBrandKit(unresolved, { jwt, serverBase, account }),
+            `checking brand kit for ${label} fonts`,
+          );
+        } catch (e: any) {
+          emit({
+            kind: "warn",
+            text: `Could not check brand kit for existing fonts (${e.message ?? e}). Prompting for all unresolved.`,
+          });
+          stillMissing = unresolved;
+        }
+        if (stillMissing.length === 0) {
+          emit({
+            kind: "info",
+            text: `Unresolved ${label} fonts already present in brand kit — proceeding.`,
+          });
+          return;
+        }
+        const fontKey = stillMissing
+          .map((u) => u.family.toLowerCase())
+          .sort()
+          .join("|");
+        const fontList = stillMissing
+          .map((u) => `• ${u.family} — used by ${u.usedBy.join(", ")}`)
+          .join("\n");
+        const plural = stillMissing.length === 1 ? "" : "s";
+        const answer = await ctrl.prompt({
+          questionKey: `font-preflight:${fontKey}`,
+          question: `${stillMissing.length} custom font${plural} couldn't be auto-uploaded. Add ${stillMissing.length === 1 ? "it" : "them"} to your Redo brand kit (Settings → Brand Kit → Fonts), then click "Continue".`,
+          context: `These fonts aren't on Google Fonts so they can't be fetched automatically:\n\n${fontList}\n\nWithout adding them, the imported templates will reference fonts that don't exist and fall back to a generic sans/serif at render time.`,
+          type: "boolean",
+          default: "true",
+          trueLabel: "Continue (added them)",
+          falseLabel: "Import anyway",
+          itemLabel: `${stillMissing.length} unresolved font${plural}`,
+          hideApplyAll: true,
+        });
+        if (answer === "false" || answer === "__skip__") {
+          emit({
+            kind: "warn",
+            text: `Importing ${label} anyway with ${stillMissing.length} unresolved font${plural} (${stillMissing.map((u) => u.family).join(", ")}) — fallback rendering will apply.`,
+          });
+        } else {
+          emit({
+            kind: "info",
+            text: `${label}: proceeding — assuming the ${stillMissing.length} missing font${plural} ${stillMissing.length === 1 ? "has" : "have"} been added to brand kit.`,
+          });
+        }
+      }
+
       // ─── Template phase ────────────────────────────────────────────
       let templateImportOk = 0;
       let templateImportFail = 0;
@@ -1081,8 +1162,9 @@ async function runImport(
           }
         }
 
-        // Font upload (once per batch). Unresolved fonts are reported but do
-        // NOT block import.
+        // Font upload (once per batch). Auto-uploads resolvable fonts to the
+        // brand kit; unresolved ones (not on Google Fonts) trigger a preflight
+        // modal so the merchant can add them manually before templates land.
         try {
           emit({ kind: "step", label: "Uploading brand fonts…" });
           const fontResult = await withFreshJwt(
@@ -1102,12 +1184,7 @@ async function runImport(
             skipped: fontResult.skipped,
             unresolved: fontResult.unresolved,
           });
-          for (const u of fontResult.unresolved) {
-            emit({
-              kind: "warn",
-              text: `unresolved font "${u.family}" (${u.reason}) — used by ${u.usedBy.join(", ")}. Add manually in brand kit.`,
-            });
-          }
+          await preflightUnresolvedFonts(fontResult.unresolved, "templates");
         } catch (e: any) {
           emit({ kind: "warn", text: `font upload failed: ${e.message ?? e}. Continuing with template import.` });
         }
@@ -1320,6 +1397,46 @@ async function runImport(
             emit({
               kind: "info",
               text: `Transactional routing for ${flowName}: ${answer === "true" ? "yes" : "no"}`,
+            });
+          }
+
+          // Font upload + preflight gate (per-flow). Mirrors the template
+          // phase: auto-upload resolvable fonts referenced by this flow's
+          // placeholder templates, then pause if any custom families aren't
+          // on Google Fonts so the merchant can add them manually. Repeated
+          // font sets across flows hit the ask-once cache (questionKey is
+          // scoped by the font list).
+          try {
+            const placeholderJsons = parsed.placeholderTemplates
+              .map((p: any) => p.fullTemplate)
+              .filter((t: any): t is { _fontPlan?: any; name?: string } => !!t);
+            if (placeholderJsons.length > 0) {
+              const fontResult = await withFreshJwt(
+                (jwt) =>
+                  uploadFontsForTemplates(placeholderJsons, {
+                    jwt,
+                    serverBase,
+                    account,
+                    onProgress: onFontProgress,
+                  }),
+                `uploading fonts for flow "${flowName}"`,
+              );
+              emit({
+                kind: "fonts_done",
+                uploaded: fontResult.uploaded,
+                registeredFamilies: fontResult.registeredFamilies,
+                skipped: fontResult.skipped,
+                unresolved: fontResult.unresolved,
+              });
+              await preflightUnresolvedFonts(
+                fontResult.unresolved,
+                `flow "${flowName}"`,
+              );
+            }
+          } catch (e: any) {
+            emit({
+              kind: "warn",
+              text: `font upload failed for flow "${flowName}": ${e.message ?? e}. Continuing with flow import.`,
             });
           }
 

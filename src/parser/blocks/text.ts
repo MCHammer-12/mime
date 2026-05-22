@@ -427,13 +427,34 @@ export function parseTextBlock(
   // Fallback: content that's wrapped in a non-<p> block element (e.g. <div>
   // from Klaviyo's short-text UCBs) won't have any <p> to inject into, so
   // wrap the whole content in a styled <div>.
+  //
+  // When the source <p> already has an inline `style="…"` attribute (e.g.
+  // Klaviyo emits `<p style="font-family: 'Futura', sans-serif">`), we MUST
+  // merge into the existing attribute rather than prepending a second one.
+  // Per HTML5, browsers (and Quill on load) keep only the first style
+  // attribute on a tag with duplicates — the second one's declarations are
+  // silently dropped, so the inline font-family vanishes and the block-level
+  // font becomes the sole controller. Caused the Blackline Car Care
+  // template font weirdness 2026-05-21.
   if (textAlign || lineHeight) {
     const inlineStyle = [
       textAlign ? `text-align:${textAlign}` : "",
       lineHeight ? `line-height:${lineHeight}` : "",
     ].filter(Boolean).join(";");
     if (/<p(?=[\s>])/.test(textHtml)) {
-      textHtml = textHtml.replace(/<p(?=[\s>])/g, `<p style="${inlineStyle}"`);
+      textHtml = textHtml.replace(/<p\b([^>]*)>/gi, (_full, attrs: string) => {
+        const styleMatch = attrs.match(/\sstyle\s*=\s*"([^"]*)"/i);
+        if (styleMatch) {
+          const existing = styleMatch[1]!.trim().replace(/;\s*$/, "");
+          const merged = existing ? `${existing};${inlineStyle}` : inlineStyle;
+          const newAttrs = attrs.replace(
+            /\sstyle\s*=\s*"[^"]*"/i,
+            ` style="${merged}"`,
+          );
+          return `<p${newAttrs}>`;
+        }
+        return `<p style="${inlineStyle}"${attrs}>`;
+      });
     } else {
       textHtml = `<div style="${inlineStyle}">${textHtml}</div>`;
     }
