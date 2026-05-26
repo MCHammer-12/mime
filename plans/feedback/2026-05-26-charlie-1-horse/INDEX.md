@@ -11,7 +11,7 @@ Items: 6 templates + 2 flows, all flagged with notes
 | 1 | done | [Universal block duplication across all 6 templates](universal-block-duplication.md) | `fix/universal-block-duplication` | [#75](https://github.com/MCHammer-12/mime/pull/75) |
 | 2 | unclaimed | [AC product block static instead of dynamic cart-items](ac-product-block-dynamic-cart.md) | `fix/ac-product-block-dynamic-cart` | — |
 | 3 | unclaimed | [Inline anchor in text retains Klaviyo checkout URL](inline-anchor-url-rewrite.md) | `fix/inline-anchor-url-rewrite` | — |
-| 4 | unclaimed | [First text wrong font-size + missing font-family](first-text-font-styling.md) | `fix/first-text-font-styling` | — |
+| 4 | claimed | [First text wrong font-size + missing font-family](first-text-font-styling.md) | `fix/first-text-font-styling` | — |
 | 5 | unclaimed | [Footer buttons joined without spacing](footer-button-spacing.md) | `fix/footer-button-spacing` | — |
 | 6 | unclaimed | [Image click-through links missing](image-clickthrough-links.md) | `fix/image-clickthrough-links` | — |
 | 7 | unclaimed | [Browse abandonment dynamic product variable not mapped](browse-abandonment-dynamic-product.md) | `fix/browse-abandonment-dynamic-product` | — |

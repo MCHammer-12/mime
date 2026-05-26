@@ -1,5 +1,5 @@
 ---
-status: unclaimed
+status: claimed
 branch: fix/first-text-font-styling
 pr: null
 ---
