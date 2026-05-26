@@ -207,6 +207,16 @@ function parseColumnContent(
   findCls($col, "component-wrapper").each((_, wrapper) => {
     const $wrapper = $(wrapper);
 
+    // Skip MJML mobile/desktop variants hidden via inline display:none.
+    // Some Klaviyo templates (e.g. Charlie 1 Horse) ship paired
+    // `desktop-only` + `mobile-only` wrappers per row; the off-client
+    // variant carries `display:none` and a media query flips it at
+    // render time. Parsing both yields a duplicate of every block.
+    const wrapperStyle = ($wrapper.attr("style") || "")
+      .replace(/\s/g, "")
+      .toLowerCase();
+    if (wrapperStyle.includes("display:none")) return;
+
     // Klaviyo-only blocks (video, preview quote, drop shadow) — check
     // before kl-image matching so the drop-shadow img isn't treated as
     // a plain image block.

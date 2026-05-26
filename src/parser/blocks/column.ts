@@ -122,6 +122,11 @@ export function parseColumnRow(
     perColumnBlocks.push(parseColumnContent($, $col, ctx));
   });
 
+  // If every column came back empty (e.g. the whole row is a hidden
+  // mobile-only MJML variant whose wrappers were skipped upstream),
+  // emit nothing rather than an empty ColumnBlock with `null` slots.
+  if (perColumnBlocks.every((arr) => arr.length === 0)) return [];
+
   // Drop decorative non-nestable filler (spacers, dividers) that would
   // otherwise trigger a flatten. We track how many got dropped per column so
   // we can surface a warning when the layout actually loses content.
