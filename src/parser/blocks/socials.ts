@@ -21,6 +21,48 @@ import type * as cheerio from "cheerio";
 
 const DEFAULT_ICON_PADDING = 10;
 
+// Klaviyo stock-icon URL → platform name. The stock-icon path is shaped
+// like `…/assets/email/buttons/<variant>/<platform>_<size>.png` where
+// <variant> is one of subtle / subtleinverse / white / solid / default
+// / original and <platform> is the platform slug. Used as a fallback
+// for socials blocks where the merchant authored the row without any
+// click links (Castle Sports Funnest PE Games template Wnzrvr) — the
+// icons clearly mean "this is a Twitter / Facebook / Instagram row"
+// even though there's no <a href>. We emit a placeholder SocialItem
+// with the right platform and an empty url so the merchant gets a
+// configurable block in Redo's editor instead of a missing chunk.
+const STOCK_ICON_PLATFORM_RE =
+  /\/buttons\/[^/]+\/([a-z0-9_-]+?)_\d+\.(?:png|gif|svg|jpe?g)\b/i;
+
+function detectSocialPlatformFromIconSrc(src: string): SocialPlatform | null {
+  const m = STOCK_ICON_PLATFORM_RE.exec(src);
+  if (!m) return null;
+  const slug = m[1]!.toLowerCase();
+  // Slug → SocialPlatform enum value. Mirrors the URL-based mapping in
+  // SOCIAL_PATTERNS (style-utils.ts) — keep these two in sync.
+  const map: Record<string, string> = {
+    facebook: "facebook",
+    instagram: "instagram",
+    twitter: "twitter",
+    x: "x",
+    youtube: "youtube",
+    tiktok: "tiktok",
+    linkedin: "linkedin",
+    pinterest: "pinterest",
+    snapchat: "snapchat",
+    whatsapp: "whatsapp",
+    telegram: "telegram",
+    discord: "discord",
+    twitch: "twitch",
+    reddit: "reddit",
+    threads: "threads",
+    bluesky: "bluesky",
+    bsky: "bluesky",
+  };
+  const platform = map[slug];
+  return platform ? (platform as SocialPlatform) : null;
+}
+
 export function parseSocialsBlock(
   $: $,
   $wrapper: cheerio.Cheerio<El>,
@@ -58,6 +100,30 @@ export function parseSocialsBlock(
       url: href,
     });
   });
+
+  // Fallback: no <a href>s yielded a platform but the wrapper has stock
+  // social icons. Infer platform from each img src and emit a placeholder
+  // SocialItem with empty url. The merchant fills in URLs in the Redo
+  // editor. Without this, a socials row with bare <img>s gets dropped
+  // entirely.
+  if (socialLinks.length === 0) {
+    let dropped = 0;
+    $wrapper.find("img").each((i, img) => {
+      const src = $(img).attr("src") || "";
+      const platform = detectSocialPlatformFromIconSrc(src);
+      if (!platform) return;
+      if (detectedColor === null) {
+        detectedColor = detectSocialIconColor(src);
+      }
+      socialLinks.push({ id: `social-${i}`, platform, url: "" });
+      dropped++;
+    });
+    if (dropped > 0) {
+      ctx.warnings.push(
+        `Socials block: ${dropped} icon(s) detected by image src but had no <a href> link in the Klaviyo source — emitted with empty URLs for the merchant to fill in.`,
+      );
+    }
+  }
 
   if (socialLinks.length === 0) return null;
 
