@@ -4,7 +4,14 @@
 Automation project for manual processes Michael does at Redo. Primary target: Klaviyo → Redo email migration workflow, and improving Redo's existing HTML → JSON email parser.
 
 ## Status
-End-to-end import pipeline running in production via the Replit-deployed migrate UI. As of **2026-05-14**:
+End-to-end import pipeline running in production via the Replit-deployed migrate UI. As of **2026-05-26**:
+
+- **Font preflight gate replaces silent warn.** Templates / flows referencing fonts not on Google Fonts (Futura, proprietary Adobe faces, etc.) now pause the import with a `needs_input` modal that lists the missing families and re-checks the brand kit before prompting. User clicks "Continue (added them)" once the fonts are uploaded, or "Import anyway" for fallback rendering. Wired into both template and flow phases — the flow phase also gained its own `uploadFontsForTemplates` call, which was previously missing entirely. `questionKey` scoped by font set so new fonts in later phases re-prompt.
+- **Parser duplicate-`<p>`-style fix.** `parseTextBlock` was prepending a fresh `style="text-align:…;line-height:…"` to every `<p>`, including ones with existing inline styles. Per HTML5 spec, browsers and Quill keep only the first `style` attribute and drop the rest — silently losing inline `font-family` declarations. Now merges into any existing attribute. Smoke test `src/parser/blocks/text.smoke.ts` locks in the behavior.
+- **Feedback notes can be marked resolved.** `StoredNote` gains optional `resolvedAt` + `resolvedBy`. Per-item `✓ resolve` / `↺ reopen` button in the troubleshoot panel; resolved rows mute (opacity + strikethrough). `getJobNoteCount` drops resolved notes from the "Has feedback (N)" filter, per-card "N noted" badge, and `select noted` action so the to-do counter goes to zero after fixes ship. Text edits auto-reopen — new content is fresh work.
+- **Jobs panel search + feedback filter.** Text input filters by store name (case-insensitive substring); counter switches `N total` → `N/M` while filtering. "Has feedback (N)" filter pill narrows to jobs with at least one note. Per-card "N noted" badge so review-worthy jobs scan at a glance. `select noted (N)` action pre-selects items with notes for one-click export.
+
+As of **2026-05-14**:
 
 - **Flow-imported templates inherit the flow's trigger schemaType** (was hardcoded `marketing_email`). Fixes back-in-stock / cart-abandonment / order-tracking / Yotpo flows so their trigger-specific dynamic variables (`productName`, `cartSubtotal`, etc.) actually appear as bindable in the editor.
 - **NDJSON job stream has 10s heartbeat** — survives Replit proxy's idle-stream killer during the `needs_input` wait (modal open, no bytes flowing). Mirrors the existing `handleFlowsStream` pattern.
