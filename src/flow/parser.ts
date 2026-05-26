@@ -258,13 +258,30 @@ async function convertAction(
           }
         }
       }
+      // Substitution context (mirrors the fullTemplate branch above) so
+      // {{ first_name }} / {{ organization.name }} in the action-level
+      // subject/preview gets rewritten before it lands in Redo. Without
+      // this the importer prefers the raw `subject` over the substituted
+      // `fullTemplate.subject` (see import-rpc.ts), so a subject like
+      // "Thank you {{ first_name|default:'' }} :)" would ship literal.
+      const phSubVarCtx = {
+        orgName: account?.organizationName ?? "",
+        orgAddress: account ? formatAddress(account) : "",
+        orgUrl: account?.websiteUrl ?? "",
+      };
+      const phSubject = msg.subject_line
+        ? substituteStringVars(msg.subject_line, phSubVarCtx)
+        : "";
+      const phPreview = msg.preview_text
+        ? substituteStringVars(msg.preview_text, phSubVarCtx)
+        : null;
       placeholderTemplates.push({
         sentinelId,
         klaviyoTemplateId: msg.template_id ?? null,
-        subject: msg.subject_line ?? "",
+        subject: phSubject,
         fromEmail: msg.from_email ?? null,
         fromLabel: msg.from_label ?? null,
-        previewText: msg.preview_text ?? null,
+        previewText: phPreview,
         fullTemplate,
         templateWarnings,
       });
