@@ -1,5 +1,5 @@
 ---
-status: unclaimed
+status: claimed
 branch: fix/inline-anchor-url-rewrite
 pr: null
 ---
