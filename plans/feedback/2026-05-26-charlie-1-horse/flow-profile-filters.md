@@ -1,7 +1,7 @@
 ---
-status: blocked
-branch: fix/flow-profile-filters
-pr: null
+status: done
+branch: fix/flow-profile-filter
+pr: https://github.com/MCHammer-12/mime/pull/84
 ---
 
 # Abandoned Cart flow — profile filters not migrated

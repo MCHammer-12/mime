@@ -15,8 +15,8 @@ Items: 6 templates + 2 flows, all flagged with notes
 | 5 | done | [Footer buttons joined without spacing](footer-button-spacing.md) | `fix/footer-button-spacing` | [#80](https://github.com/MCHammer-12/mime/pull/80) |
 | 6 | blocked | [Image click-through links missing](image-clickthrough-links.md) | `fix/image-clickthrough-links` | — |
 | 7 | partial | [Browse abandonment dynamic product variable not mapped](browse-abandonment-dynamic-product.md) | `fix/browse-abandonment-card-fallback` | [#82](https://github.com/MCHammer-12/mime/pull/82) |
-| 8 | blocked | [Abandoned Cart flow — profile filters not migrated](flow-profile-filters.md) | `fix/flow-profile-filters` | — |
-| 9 | blocked | [Browse Abandonment flow — product filter + re-entry criteria not migrated](flow-product-filter-reentry.md) | `fix/flow-product-filter-reentry` | — |
+| 8 | done | [Abandoned Cart flow — profile filters not migrated](flow-profile-filters.md) | `fix/flow-profile-filter` | [#84](https://github.com/MCHammer-12/mime/pull/84) |
+| 9 | done | [Browse Abandonment flow — product filter + re-entry criteria not migrated](flow-product-filter-reentry.md) | `fix/flow-reentry-criteria` | [#85](https://github.com/MCHammer-12/mime/pull/85) |
 
 ## Cross-cutting notes
 

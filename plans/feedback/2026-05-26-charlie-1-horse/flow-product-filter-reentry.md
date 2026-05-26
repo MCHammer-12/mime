@@ -1,7 +1,7 @@
 ---
-status: blocked
-branch: fix/flow-product-filter-reentry
-pr: null
+status: done
+branch: fix/flow-reentry-criteria
+pr: https://github.com/MCHammer-12/mime/pull/85
 ---
 
 # Browse Abandonment flow — product filter + re-entry criteria not migrated
