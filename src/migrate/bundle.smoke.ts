@@ -94,6 +94,27 @@ async function eventFallbackMode() {
     }
   }
   console.log(`✓ event-payload fallback: klaviyo source served from event payload (${statSync(outPath).size} bytes)`);
+
+  // Assert post-export prune cleared klaviyoHtml + klaviyoMeta from the in-memory
+  // `exported` event but left the flow_imported event's klaviyoFlow intact
+  // (flows not in the prune scope).
+  const exportedEv = job.events.find((e) => e.kind === "exported");
+  const flowEv = job.events.find((e) => e.kind === "flow_imported");
+  const expPayload = exportedEv?.payload as { klaviyoHtml?: unknown; klaviyoMeta?: unknown };
+  const flowPayload = flowEv?.payload as { klaviyoFlow?: unknown };
+  if (expPayload?.klaviyoHtml !== undefined) {
+    console.error("FAIL: klaviyoHtml should have been pruned from exported event");
+    process.exit(1);
+  }
+  if (expPayload?.klaviyoMeta !== undefined) {
+    console.error("FAIL: klaviyoMeta should have been pruned from exported event");
+    process.exit(1);
+  }
+  if (flowPayload?.klaviyoFlow === undefined) {
+    console.error("FAIL: klaviyoFlow should NOT have been pruned from flow_imported event");
+    process.exit(1);
+  }
+  console.log(`✓ post-export prune: exported.klaviyoHtml/Meta cleared, flow_imported.klaviyoFlow kept`);
 }
 
 async function main() {
