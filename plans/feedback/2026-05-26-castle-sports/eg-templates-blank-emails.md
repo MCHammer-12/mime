@@ -14,40 +14,68 @@ Castle Sports flagged 3 flows:
 - Xm2TP7 `[EG] Checkout Abandonment Flow`: "Non of the Emails had images"
 - R9iyHp `[EG] Checkout Abandonment Flow [No Discount Code]`: "Non of emails had images"
 
-## Root cause
+## Root cause — CONFIRMED
 
-Merchant says "no images" but the parse-result reveals **the entire email is blank**:
+**The blank-template templates are `editor_type: CODE`.** Verified live via Klaviyo API during planning:
 
-- WrazNX: `blankTemplateCount: 2`
-- Xm2TP7: `createdTemplateCount: 0, blankTemplateCount: 5`
-- R9iyHp: not yet sampled — assume similar
+- Xm2TP7 (`[EG] Checkout Abandonment Flow`) Email 1 → template `RYCBtZ` → `editor_type: CODE` (HTML ~440KB)
+- UQJH6z (`[EG] Post Purchase Flow`) Email 1 → template `RUpF6R` → `editor_type: SYSTEM_DRAGGABLE` (parses normally — see Tasks 2 + 3 for its issues)
 
-The importer counts a template as `blank` when parsing produces an empty `Section[]`. The flow shell migrated (trigger + conditions + wait steps + send-email step pointers), but every email's content came out as zero sections.
+So the `[EG]` prefix is a red herring. The real differentiator is `editor_type`. CODE templates fall through mime's existing CODE-template gate to blank output.
 
-The `[EG]` prefix on the flow names is the strongest signal — these templates likely came from a Klaviyo template-pack (possibly "Email Generator" / "EG", or a third-party marketplace template, or merchant's own theme). The template HTML uses a structure mime's parser doesn't recognize, so it falls through to no-block-emitted.
+**Per memory `project_code_template_parser`:** mime has a CODE-template parser at [`src/parser/code-template.ts`](src/parser/code-template.ts) (built 2026-04-20) that handles both table-based + div-based dialects. Tested on Otishi: 368/368 parse with 0 failures. Block detection works. **But visual fidelity in the Redo builder was deemed insufficient to ship** — image widths, column gaps, and per-span text styling are wrong. The parser was gated off behind an `editor_type: CODE` / no-kl-class heuristic, intentionally inert for block-editor migrations.
 
-Compare with `[EG] Post Purchase Flow` (UQJH6z) which uses the same `[EG]` prefix BUT has `createdTemplateCount: 3, blankTemplateCount: 0` — content was extracted. So either:
-1. `[EG]` is just a naming convention and the abandonment templates happen to use different markup
-2. Only the abandonment-shaped `[EG]` templates fail (cart-context blocks the parser doesn't handle)
+Castle Sports just made CODE migration a real blocker — 3 of their abandonment flows are unusable in Redo until something changes.
 
-Relevant files (likely culprits):
-- [`src/parser/index.ts`](src/parser/index.ts) — dispatcher; if no kl-* class is recognized, may produce empty output silently
-- [`src/parser/code-template.ts`](src/parser/code-template.ts) — CODE-template parser (paused per memory `project_code_template_parser`). The `[EG]` templates may be `editor_type: CODE` templates that hit the CODE detection but fall through because CODE is gated off
-- [`src/parser/blocks/klaviyo-specific.ts`](src/parser/blocks/klaviyo-specific.ts) — Klaviyo-specific block routing
-- [`src/migrate/template-resolver.ts`](src/migrate/template-resolver.ts) — resolver failure modes; check if `html-empty` or `parser-threw` fired (they would show in `templateWarnings`)
+The merchant says "no images" because the entire email is empty content (parse-result.blankTemplateCount confirms): WrazNX has 2 blank, Xm2TP7 has 5 blank, R9iyHp likely similar.
 
-## Proposed change
+Relevant files:
+- [`src/parser/code-template.ts`](src/parser/code-template.ts) — the gated CODE parser (table-based + div-based)
+- [`src/parser/code-template-{smoke,warnings,debug,emit}.ts`](src/parser/) — batch harnesses
+- [`src/parser/index.ts`](src/parser/index.ts) — dispatcher; check the editor_type gate
+- [`src/migrate/template-resolver.ts`](src/migrate/template-resolver.ts) — resolver failure modes (`ResolveFailure` variants)
 
-1. **Pull source HTML for one `[EG]` template.** Use the bundled flow JSON to find the actual Klaviyo template IDs behind the `__PLACEHOLDER_X__` strings in the parse-result. Pull the HTML via `/api/debug/resolve-template` or Klaviyo API (Michael will need to provide a key for Castle Sports).
-2. **Identify the template's `editor_type`.** Klaviyo distinguishes:
-   - `editor_type: PARENT_AND_CHILD` or `DRAG_DROP` → block-editor templates, handled by mime's main parser
-   - `editor_type: CODE` → inline-styled HTML, currently gated off (see CODE parser memory)
-   - `editor_type: HTML` → raw HTML, unsupported  
-   If `[EG]` templates are CODE or HTML, the parser correctly returns empty. The bug is then: the operator should be warned that this template family won't migrate, not have it silently blank.
-3. **If block-editor**: identify the specific block pattern the parser is missing. Add support.
-4. **If CODE / HTML**: surface a clear preflight warning ("This template uses a non-block-editor format — content won't migrate. Skip or convert manually first."). Mark the flow's emails with `templateWarnings` carrying a specific reason like `unsupported-editor-type`.
-5. **Update [`src/migrate/template-resolver.ts`](src/migrate/template-resolver.ts)** with a new `ResolveFailure` variant if a new reason is needed (e.g. `unsupported-editor-type`).
-6. **Smoke test.** Synthetic `[EG]`-shaped template → expected output (either parsed sections OR a clear warning, not silent blank).
+## Proposed change — needs Michael's decision before executor codes
+
+Three options, ranked by my read of cost/benefit:
+
+**Option A: Ship the CODE parser as-is, accept fidelity gaps.**
+- Remove the gate in [`src/parser/index.ts`](src/parser/index.ts). CODE templates now flow through `code-template.ts`.
+- Surface the known fidelity issues (image widths, column gaps, per-span text styling) as a `templateWarning` so the operator + merchant know to review.
+- Pro: Castle's abandonment flows become usable today.
+- Pro: 0 risk to existing block-editor migrations (still go through the main parser).
+- Con: Merchants will see imperfect rendering in the Redo editor and may flag follow-up bugs.
+
+**Option B: Clear preflight warning, no parser change.**
+- Detect `editor_type: CODE` in [`template-resolver.ts`](src/migrate/template-resolver.ts) and emit a typed `ResolveFailure` (e.g. `unsupported-editor-type`).
+- Surface in the preflight modal so the operator chooses to skip or proceed-with-blank.
+- Pro: Honest about what mime can't do.
+- Con: Castle Sports still can't migrate these flows — net no progress for the merchant.
+
+**Option C: Fix CODE parser fidelity first.**
+- Image width extraction, column gap handling, per-span text styling — the open items in `project_code_template_parser` memory.
+- Then ship + ungate.
+- Pro: Best end-state.
+- Con: Largest investment; Castle is blocked until it lands.
+
+**My recommendation: Option A.** Castle Sports has 5+ unusable emails right now. Imperfect rendering + a "review me" warning beats silent blank. The fidelity issues can ship as follow-up tasks once we see what merchants actually flag in real usage.
+
+**Executor steps once Michael picks:**
+
+For Option A:
+1. Read [`src/parser/index.ts`](src/parser/index.ts) — find the `editor_type` gate that currently routes CODE to no-op
+2. Replace with call into [`src/parser/code-template.ts`](src/parser/code-template.ts) (the existing parser)
+3. Add a `templateWarning` emission with a fixed message: "CODE-template parser is in beta — image widths, column gaps, and per-span text may render differently in Redo. Review each email after import."
+4. Re-run [`src/parser/code-template-smoke.ts`](src/parser/) on the Otishi corpus to confirm no regression (368/368 should still pass)
+5. Smoke test with one of Castle's templates via `/api/debug/resolve-template` or local cached HTML
+6. Patch any new failures from Castle's specific markup
+
+For Option B:
+1. Add new `ResolveFailure` variant `unsupported-editor-type` to [`template-resolver.ts`](src/migrate/template-resolver.ts)
+2. Wire to the preflight modal so operator chooses skip / proceed-with-blank
+3. Ensure flow imports without crashing when blank is chosen
+
+For Option C: separate planning task — too large for this batch.
 
 ## Verify
 
@@ -58,9 +86,11 @@ Relevant files (likely culprits):
 
 ## Notes
 
-- **Talk to Michael before the fix lands** — if `[EG]` is CODE/HTML, the fix is operator-facing UX (preflight warning). The parser-pause memory for CODE templates says "first-pass parser landed, visual fidelity insufficient, inert behind editor_type gate". This task may want to revisit whether to ship the CODE parser even with imperfect fidelity, vs. just warning.
-- Don't conflate with GPA Task 1 (`customer-thank-you-no-emails`). GPA's flow has `blankTemplateCount: 0` (placeholder rewrite/template-link issue) — different surface from Castle's `blankTemplateCount: 2-5` (parser produced empty Section[]).
-- The 4th `[EG]` flow (`Post Purchase`, UQJH6z) is NOT in this task — it parses to content. Tasks 2 + 3 cover that flow's separate issues.
+- **Decision needs Michael before code starts.** Pick Option A / B / C. My recommendation is A.
+- Don't conflate with GPA Task 1 (`customer-thank-you-no-emails`). GPA's flow has `blankTemplateCount: 0` (placeholder rewrite/template-link issue) — different surface from Castle's `blankTemplateCount: 2-5` (CODE templates hit gate, produce empty Section[]).
+- The 4th `[EG]` flow (`Post Purchase`, UQJH6z) is NOT in this task — its template is `SYSTEM_DRAGGABLE` (block-editor), parses to content. Tasks 2 + 3 cover that flow's separate content issues.
+- The CODE parser was paused because of fidelity — not safety. Shipping it means existing block-editor merchants are unaffected (their templates take the block path); only CODE-using merchants newly get content (imperfect) instead of blank.
+- Diagnosis was done live via Klaviyo API during planning; the Klaviyo key Michael provided for Castle Sports was used to fetch templates `RYCBtZ` (CODE, blank case) and `RUpF6R` (SYSTEM_DRAGGABLE, non-blank case). The key isn't persisted in any file.
 
 ## Done
 
