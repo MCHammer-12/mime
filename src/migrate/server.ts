@@ -95,6 +95,7 @@ import {
   setAssistDone,
   setCardOrder,
 } from "./imported-items.js";
+import { getReviewerByToken, type ReviewerRecord } from "./reviewers.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
 const DEFAULT_REDOAPP_DIR = join(homedir(), "code/redoapp");
@@ -113,6 +114,21 @@ const IS_HOSTED_DEPLOY = Boolean(
 const AI_AVAILABLE = Boolean(
   process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY,
 );
+
+// Surface mode — which deployment is this process running as?
+//   "admin"          → existing internal deployment (Toby 2.0, import wizard,
+//                      assist surface). Default; matches pre-2026-05-26 behavior.
+//   "public_review"  → external reviewer deployment. Only /r/<token>/, /dashboard,
+//                      and /api/r/* routes are reachable; admin/assist/import
+//                      endpoints 404. Same repo + Postgres, different Replit
+//                      Autoscale deployment with MIME_SURFACE=public_review.
+//
+// The split exists because external reviewers (non-Redo employees) can't be
+// added to the Replit workspace and so can't reach the private deploy at all.
+// See plans/2026-05-26-reviewer-dashboard.md for the full architecture.
+type MimeSurface = "admin" | "public_review";
+const MIME_SURFACE: MimeSurface =
+  process.env.MIME_SURFACE === "public_review" ? "public_review" : "admin";
 
 // Optional HTTP Basic auth. Gated on BASIC_AUTH_USER + BASIC_AUTH_PASS env vars;
 // if either is unset, auth is skipped entirely (local dev).
@@ -2504,6 +2520,183 @@ async function handleDebugResolveTemplate(
   }
 }
 
+// ─── Reviewer surface (MIME_SURFACE=public_review) ─────────────────────────
+//
+// Public-facing deploy for external reviewers. Per-reviewer URL token sets a
+// HttpOnly cookie; subsequent /api/r/* calls authenticate via the cookie.
+// See plans/2026-05-26-reviewer-dashboard.md.
+
+const REVIEWER_COOKIE = "reviewer_token";
+
+function parseCookie(req: IncomingMessage, name: string): string | null {
+  const header = req.headers["cookie"] ?? "";
+  for (const part of String(header).split(/;\s*/)) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    if (part.slice(0, eq) === name) {
+      return decodeURIComponent(part.slice(eq + 1));
+    }
+  }
+  return null;
+}
+
+function setReviewerCookie(res: ServerResponse, token: string): void {
+  // 1-year expiry, HttpOnly + SameSite=Lax. The public deploy may not
+  // be on HTTPS during dev — Secure flag is set only when we can detect
+  // HTTPS (Replit Autoscale terminates TLS and sets x-forwarded-proto).
+  const cookie = [
+    `${REVIEWER_COOKIE}=${encodeURIComponent(token)}`,
+    "Path=/",
+    `Max-Age=${60 * 60 * 24 * 365}`,
+    "HttpOnly",
+    "SameSite=Lax",
+  ].join("; ");
+  res.setHeader("set-cookie", cookie);
+}
+
+async function requireReviewer(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<ReviewerRecord | null> {
+  const token = parseCookie(req, REVIEWER_COOKIE);
+  if (!token) {
+    json(res, 401, { error: "no reviewer cookie — visit your /r/<token>/ link" });
+    return null;
+  }
+  const reviewer = await getReviewerByToken(token);
+  if (!reviewer) {
+    json(res, 401, { error: "reviewer token invalid or disabled" });
+    return null;
+  }
+  return reviewer;
+}
+
+// GET /r/<token>/ — handshake. Looks up the reviewer, sets the cookie,
+// redirects to /dashboard. Bad tokens render a plain "invalid link" page
+// so the operator can spot the issue without curl.
+async function handleReviewerHandshake(
+  req: IncomingMessage,
+  res: ServerResponse,
+  token: string,
+): Promise<void> {
+  const reviewer = await getReviewerByToken(token);
+  if (!reviewer) {
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("link invalid or revoked");
+    return;
+  }
+  setReviewerCookie(res, token);
+  res.writeHead(302, { location: "/dashboard" });
+  res.end();
+}
+
+// GET /api/r/me — minimum payload the dashboard needs to render a header.
+async function handleReviewerMe(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  return json(res, 200, {
+    reviewerId: reviewer.id,
+    reviewerName: reviewer.name,
+  });
+}
+
+// Phase 1 stub — the real reviewer dashboard UI lands in Phase 2+. For now
+// this is enough to verify the auth handshake end-to-end: visit
+// /r/<token>/, get the cookie, get redirected here, see your name.
+const REVIEWER_DASHBOARD_STUB = /* html */ `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>mime · review</title>
+  <style>
+    body { font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           background: #0d1117; color: #e6edf3; padding: 4rem;
+           max-width: 640px; margin: 0 auto; }
+    h1 { font-weight: 400; font-size: 28px; margin: 0 0 1rem; }
+    .who { color: #8b949e; font-size: 13px; }
+    .stub { margin-top: 3rem; padding: 1.5rem; border: 1px solid #21262d;
+            border-radius: 6px; color: #8b949e; font-size: 13px; line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <h1>mime · review</h1>
+  <div class="who" id="who">…</div>
+  <div class="stub">
+    <strong>Phase 1 stub.</strong> Auth handshake is live.
+    Store CRUD, flow/template picker, import pipeline, and feedback land
+    in subsequent phases — see <code>plans/2026-05-26-reviewer-dashboard.md</code>.
+  </div>
+  <script>
+    fetch("/api/r/me", { credentials: "same-origin" })
+      .then((r) => r.ok ? r.json() : Promise.reject(r.status))
+      .then((me) => {
+        document.getElementById("who").textContent =
+          "Signed in as " + me.reviewerName + " (" + me.reviewerId + ")";
+      })
+      .catch(() => {
+        document.getElementById("who").textContent =
+          "Not signed in — open your /r/<token>/ link.";
+      });
+  </script>
+</body>
+</html>`;
+
+// GET /dashboard — Phase 1 stub HTML. Phase 2 replaces with the real SPA.
+function handleReviewerDashboard(res: ServerResponse): void {
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  res.end(REVIEWER_DASHBOARD_STUB);
+}
+
+// Surface dispatch. Returns true if the request was handled (response
+// already sent); false if it should fall through to the admin routes.
+// On the public_review surface, returns true for ANY request — admin
+// endpoints get a 404 instead of falling through. On admin surface,
+// returns false so existing routing runs unchanged.
+async function dispatchReviewerSurface(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<boolean> {
+  if (MIME_SURFACE !== "public_review") return false;
+
+  const rawUrl = req.url ?? "";
+  const path = rawUrl.split("?")[0];
+
+  // GET /r/<token>/ — handshake. Token is the URL segment after /r/.
+  const handshake = path.match(/^\/r\/([^/]+)\/?$/);
+  if (req.method === "GET" && handshake) {
+    await handleReviewerHandshake(req, res, decodeURIComponent(handshake[1]));
+    return true;
+  }
+  if (req.method === "GET" && (path === "/dashboard" || path === "/dashboard/")) {
+    handleReviewerDashboard(res);
+    return true;
+  }
+  if (req.method === "GET" && path === "/api/r/me") {
+    await handleReviewerMe(req, res);
+    return true;
+  }
+  if (req.method === "GET" && path === "/") {
+    // Landing page: no useful UI without a token. The reviewer should
+    // hit /r/<token>/ from their emailed link.
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><meta charset="utf-8"><title>mime · review</title>
+<body style="font:14px system-ui;background:#0d1117;color:#e6edf3;padding:4rem;max-width:640px;margin:0 auto">
+<h1 style="font-weight:400">mime · review</h1>
+<p style="color:#8b949e">This is the reviewer surface. Open the personalized link you were emailed.</p>
+</body>`);
+    return true;
+  }
+
+  // Anything else on the public surface 404s — admin/assist/import
+  // routes physically don't get evaluated here.
+  res.writeHead(404, { "content-type": "text/plain" });
+  res.end("not found");
+  return true;
+}
+
 // ─── HTML ──────────────────────────────────────────────────────────────────
 
 const HTML = /* html */ `<!doctype html>
@@ -3161,6 +3354,10 @@ function tryServeStatic(
 const server = createServer(async (req, res) => {
   try {
     if (!checkBasicAuth(req, res)) return;
+    // Public-review surface short-circuits here — admin/assist/import
+    // routes physically don't get evaluated on that deploy. See
+    // plans/2026-05-26-reviewer-dashboard.md.
+    if (await dispatchReviewerSurface(req, res)) return;
     // Strip query string for path-only matches below; handlers that care
     // about the query (like `/api/jobs?storeId=`) re-parse from req.url.
     const rawUrl = req.url ?? "";
@@ -3373,6 +3570,7 @@ async function startup() {
   server.listen(PORT, HOST, () => {
     const displayHost = HOST === "0.0.0.0" ? "localhost" : HOST;
     console.log(`Migration UI: http://${displayHost}:${PORT}`);
+    console.log(`(surface: ${MIME_SURFACE})`);
     if (IS_HOSTED_DEPLOY) console.log("(hosted deploy — import disabled)");
     if (BASIC_AUTH_ENABLED) console.log("(basic auth enabled)");
     console.log(`(ctrl-c to stop)`);

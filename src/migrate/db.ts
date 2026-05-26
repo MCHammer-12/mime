@@ -257,6 +257,43 @@ const MIGRATIONS: Array<{ name: string; sql: string }> = [
       );
     `,
   },
+  {
+    // Reviewers: external (non-Redo, non-Replit) people who get access via
+    // a per-reviewer URL token on the public-facing review deploy
+    // (MIME_SURFACE=public_review). The token in the URL exchanges for a
+    // reviewer_token HttpOnly cookie. Admin mints these rows (psql or a
+    // small admin endpoint later). disabled_at revokes without deleting
+    // the row (so old jobs still attribute to a name).
+    name: "010_reviewers",
+    sql: `
+      CREATE TABLE IF NOT EXISTS reviewers (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        token       TEXT NOT NULL UNIQUE,
+        email       TEXT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        disabled_at TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS idx_reviewers_token
+        ON reviewers (token);
+    `,
+  },
+  {
+    // Tag stores with the reviewer who created them so reviewers see only
+    // their own stores and admin sees everything (with a badge). Nullable
+    // — existing stores stay unscoped, behavior unchanged on the admin
+    // deploy. Partial index keeps the index small on production where
+    // most stores are admin-created.
+    name: "011_stores_reviewer",
+    sql: `
+      ALTER TABLE stores
+        ADD COLUMN IF NOT EXISTS created_by_reviewer TEXT
+          REFERENCES reviewers(id) ON DELETE SET NULL;
+      CREATE INDEX IF NOT EXISTS idx_stores_created_by_reviewer
+        ON stores(created_by_reviewer)
+        WHERE created_by_reviewer IS NOT NULL;
+    `,
+  },
 ];
 
 /**
