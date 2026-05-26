@@ -490,6 +490,93 @@ export function parseLineItemsUcbBlock(
   };
 }
 
+// ─── Browse Abandonment card: hand-built kl-table with event.* vars ─
+//
+// Klaviyo's Browse Abandonment templates often skip kl-product entirely
+// and lay out the viewed product as a hand-built kl-table card with
+// inline {{ event.Name }} / {{ event.ImageURL }} / {{ event.Price }}
+// variables (no Liquid for-loop — there's only one viewed product). The
+// dispatcher otherwise falls through to "Unknown block type".
+//
+// PROPER target: an `interactive-cart` block with a `viewed_products`
+// productRecommendationType + `schemaFieldName: "browseContext"`. That
+// filter type doesn't yet exist in Redo's ProductsBlock schema (only
+// best_sellers / products_added_to_cart / collection are defined at
+// renderer/types.ts). Until Redo adds it, emit a Products block with
+// Best Sellers as a fallback filter. The merchant gets a configurable
+// block in the editor instead of a missing chunk; the emitted warning
+// makes the fallback explicit so they can swap to the real BA filter
+// once schema support lands.
+
+const BROWSE_ABANDON_EVENT_RE =
+  /\{\{\s*event\.(?:Name|Title|Price|ImageURL|URL|Image)\b/;
+
+export function parseBrowseAbandonmentCardBlock(
+  $: $,
+  $wrapper: cheerio.Cheerio<El>,
+  ctx: ParseContext,
+): ProductsBlock | null {
+  const wrapperHtml = $wrapper.html() || "";
+  if (!BROWSE_ABANDON_EVENT_RE.test(wrapperHtml)) return null;
+  // Must be the kl-table layout, not e.g. a text block that happens to
+  // mention an event variable inline.
+  if (!$wrapper.find(".kl-table, .gxp-kl-table").length) return null;
+
+  const $sectionTd = $wrapper.children("table").find("> tbody > tr > td").first();
+  const outerStyle = parseInlineStyles($sectionTd.attr("style"));
+  const sectionPadding = parsePadding(outerStyle);
+  const sectionColor =
+    outerStyle["background-color"] ||
+    findAncestorBackgroundColor($sectionTd.length ? $sectionTd : $wrapper) ||
+    "#ffffff";
+
+  ctx.warnings.push(
+    `Browse Abandonment card ({{ event.Name }} / {{ event.ImageURL }}) → Products block with Best Sellers fallback. Redo's ProductsBlock schema doesn't yet expose a "viewed_products" recommendation type — manually swap to the viewed-product filter once schema support lands.`,
+  );
+
+  const fontFamily = extractPrimaryFont(wrapperHtml) ?? "Arial";
+
+  const lineItemBtn: InlineButton = {
+    ...defaultLineItemButton(),
+    fontFamily,
+  };
+  const checkoutBtn: InlineButton = {
+    ...lineItemBtn,
+    buttonText: "Checkout",
+    padding: { top: 16, right: 16, bottom: 16, left: 16 },
+  };
+
+  return {
+    type: EmailBlockType.PRODUCTS,
+    blockId: nextId(),
+    sectionPadding,
+    sectionColor,
+    textColor: "#000000",
+    fontFamily,
+    showCheckoutButton: false,
+    titleFontSize: 16,
+    imageCornerRadius: 8,
+    checkoutButton: checkoutBtn,
+    lineItemButtons: lineItemBtn,
+    // BA fires for exactly one viewed product — preview to 1.
+    numberOfProducts: 1,
+    imageSize: "medium" as ProductImageSize,
+    productSelectionType: "dynamic",
+    showPrice: true,
+    showTitle: true,
+    showImage: true,
+    showButton: false,
+    layoutType: "rows",
+    alignment: Alignment.CENTER,
+    columns: 1,
+    stackOnMobile: true,
+    manuallySelectedProducts: [],
+    imageObjectFit: "cover",
+    provider: "shopify",
+    _pendingFilter: BEST_SELLERS_FILTER,
+  };
+}
+
 // ─── Static: emit image-row + title-row, NO mobile stacking ───────
 //
 // Klaviyo static product blocks are hardcoded product grids (merchant

@@ -24,7 +24,11 @@ import { parseLineBlock } from "./blocks/line.js";
 import { parseSpacerBlock } from "./blocks/spacer.js";
 import { parseSocialsBlock } from "./blocks/socials.js";
 import { parseColumnRow, parseSplitBlock } from "./blocks/column.js";
-import { parseProductBlock, parseLineItemsUcbBlock } from "./blocks/product.js";
+import {
+  parseProductBlock,
+  parseLineItemsUcbBlock,
+  parseBrowseAbandonmentCardBlock,
+} from "./blocks/product.js";
 import { tryParseDiscountFromText } from "./blocks/discount.js";
 import { tryParseKlaviyoSpecific } from "./blocks/klaviyo-specific.js";
 
@@ -324,6 +328,17 @@ function parseColumnContent(
     const lineItemsBlock = parseLineItemsUcbBlock($, $wrapper, ctx);
     if (lineItemsBlock) {
       blocks.push(lineItemsBlock);
+      return;
+    }
+
+    // Browse-abandonment "product card": hand-built kl-table with inline
+    // {{ event.Name }} / {{ event.ImageURL }} variables (no Liquid loop).
+    // Best Sellers fallback until Redo's schema adds a viewed_products
+    // recommendation type — see parseBrowseAbandonmentCardBlock for
+    // context.
+    const baCardBlock = parseBrowseAbandonmentCardBlock($, $wrapper, ctx);
+    if (baCardBlock) {
+      blocks.push(baCardBlock);
       return;
     }
 
