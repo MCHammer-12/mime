@@ -307,19 +307,30 @@ export function setStatus(
  * written before the assist view shipped); newer entries are objects with
  * an optional author so the assist UI can attribute notes. All readers
  * should funnel through `coerceNote` rather than touching the raw value.
+ *
+ * `resolvedAt` (ISO timestamp) marks a note as addressed — Michael's
+ * workflow is: assistants leave feedback → he exports + ships a fix →
+ * marks the note resolved so it drops out of the "Has feedback" tally
+ * but the text stays for history.
  */
-export type StoredNote = string | { text: string; author?: string; savedAt: string };
+export type StoredNote =
+  | string
+  | { text: string; author?: string; savedAt: string; resolvedAt?: string; resolvedBy?: string };
 
 export interface CoercedNote {
   text: string;
   author: string | null;
   savedAt: string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
 }
 
 /** Normalize whatever's in `jobs.notes[itemId]` into a uniform shape. */
 export function coerceNote(value: unknown): CoercedNote | null {
   if (typeof value === "string") {
-    return value.length > 0 ? { text: value, author: null, savedAt: null } : null;
+    return value.length > 0
+      ? { text: value, author: null, savedAt: null, resolvedAt: null, resolvedBy: null }
+      : null;
   }
   if (value && typeof value === "object") {
     const v = value as Record<string, unknown>;
@@ -328,6 +339,8 @@ export function coerceNote(value: unknown): CoercedNote | null {
         text: v.text,
         author: typeof v.author === "string" ? v.author : null,
         savedAt: typeof v.savedAt === "string" ? v.savedAt : null,
+        resolvedAt: typeof v.resolvedAt === "string" ? v.resolvedAt : null,
+        resolvedBy: typeof v.resolvedBy === "string" ? v.resolvedBy : null,
       };
     }
   }
@@ -339,6 +352,11 @@ export function coerceNote(value: unknown): CoercedNote | null {
  * clears the note. When `author` is provided the stored value is the
  * structured shape; when omitted it remains a bare string for compatibility
  * with existing admin-side callers and the Toby panel's local cache.
+ *
+ * Text edits IMPLICITLY REOPEN a previously-resolved note (drops the
+ * resolvedAt/resolvedBy fields). The reasoning: if there's new text to
+ * read, the prior resolution is stale — the assistant has come back with
+ * additional context that needs Michael's attention again.
  */
 export function setNote(
   jobId: string,
@@ -370,6 +388,45 @@ export function setNote(
         JSON.stringify(job.notes),
       ])
       .catch((err) => console.warn("[jobs] persist setNote failed:", err));
+  }
+  return true;
+}
+
+/**
+ * Flip a note's resolved state without touching its text. Sets resolvedAt
+ * to now (with the resolver's name) when `resolved` is true; drops both
+ * fields when false. No-op if the item has no note.
+ *
+ * Preserves the existing text + author + savedAt so reopening doesn't lose
+ * the assistant's original attribution. Plain-string notes get migrated
+ * to the structured shape so we have somewhere to hang resolvedAt.
+ */
+export function setNoteResolved(
+  jobId: string,
+  itemId: string,
+  resolved: boolean,
+  resolver?: string,
+): boolean {
+  const job = jobs.get(jobId);
+  if (!job) return false;
+  const raw = job.notes[itemId];
+  const coerced = coerceNote(raw);
+  if (!coerced) return false; // no note to resolve
+  const next: Record<string, string> = { text: coerced.text };
+  if (coerced.author) next.author = coerced.author;
+  next.savedAt = coerced.savedAt ?? new Date().toISOString();
+  if (resolved) {
+    next.resolvedAt = new Date().toISOString();
+    if (resolver && resolver.trim()) next.resolvedBy = resolver.trim();
+  }
+  job.notes[itemId] = next as unknown as string;
+  if (isDbEnabled()) {
+    getPool()
+      .query(`UPDATE jobs SET notes = $2::jsonb WHERE id = $1`, [
+        jobId,
+        JSON.stringify(job.notes),
+      ])
+      .catch((err) => console.warn("[jobs] persist setNoteResolved failed:", err));
   }
   return true;
 }

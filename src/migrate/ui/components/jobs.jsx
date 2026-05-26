@@ -26,10 +26,12 @@
 
 const { useState: useStateJobs, useEffect: useEffectJobs, useRef: useRefJobs } = React;
 
-// Count items on a job that carry a non-empty feedback note. Used by the
-// "Has feedback" filter + the per-card badge. Handles both note shapes:
-// plain-string (admin-written) and {text, author, savedAt} (assistant-written
-// via the /assist surface).
+// Count items on a job that carry an UNRESOLVED feedback note. Used by
+// the "Has feedback" filter + the per-card badge. Notes marked resolved
+// (resolvedAt set) drop out so Michael's "what still needs my attention"
+// counter goes back to zero after he ships fixes. Handles both shapes:
+// plain-string (admin-written, legacy) and {text, author, savedAt,
+// resolvedAt?, resolvedBy?} (assistant-written or post-resolve).
 function getJobNoteCount(job) {
   if (!job || !job.notes) return 0;
   let n = 0;
@@ -37,13 +39,22 @@ function getJobNoteCount(job) {
     if (typeof v === "string") {
       if (v.trim()) n++;
     } else if (v && typeof v === "object" && typeof v.text === "string") {
-      if (v.text.trim()) n++;
+      if (v.text.trim() && !v.resolvedAt) n++;
     }
   }
   return n;
 }
 
-function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, onToggleCollapsed, onOpenLog, onOpenWarnings, onSaveNote, onExportBundle, scopeLabel }) {
+// Pull the resolvedAt timestamp (if any) for the local mirror's initial
+// state. Returns null for plain-string / missing / unresolved notes.
+function getNoteResolvedAt(value) {
+  if (value && typeof value === "object" && typeof value.resolvedAt === "string") {
+    return value.resolvedAt;
+  }
+  return null;
+}
+
+function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, onToggleCollapsed, onOpenLog, onOpenWarnings, onSaveNote, onResolveNote, onExportBundle, scopeLabel }) {
   const activeCount = jobs.filter(j => j.status === "running").length;
   const failedCount = jobs.reduce((s, j) => s + j.items.filter(i => i.state === "failed").length, 0);
   const waitingCount = jobs.filter(j => j.status === "waiting_input").length;
@@ -181,6 +192,7 @@ function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, on
               onOpenLog={onOpenLog}
               onOpenWarnings={onOpenWarnings}
               onSaveNote={onSaveNote}
+              onResolveNote={onResolveNote}
               onExportBundle={onExportBundle}
             />
           ))}
@@ -190,7 +202,7 @@ function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, on
   );
 }
 
-function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpenWarnings, onSaveNote, onExportBundle }) {
+function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpenWarnings, onSaveNote, onResolveNote, onExportBundle }) {
   const running = job.items.filter(i => i.state === "running" || i.state === "queued");
   const failed  = job.items.filter(i => i.state === "failed");
   const done    = job.items.filter(i => i.state === "imported");
@@ -421,6 +433,7 @@ function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpe
         <TroubleshootPanel
           job={job}
           onSaveNote={onSaveNote}
+          onResolveNote={onResolveNote}
           onExportBundle={onExportBundle}
         />
       )}
@@ -428,7 +441,7 @@ function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpe
   );
 }
 
-function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
+function TroubleshootPanel({ job, onSaveNote, onResolveNote, onExportBundle }) {
   // Default-expanded so successfully-imported items are immediately visible
   // for feedback. Failed items already get attention via the inline error
   // display; the panel's main job is to capture notes on imports that
@@ -446,6 +459,17 @@ function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
     }
     return out;
   });
+  // Per-item resolved timestamp. Mirrors what the server has stored so
+  // that flipping resolve state shows instantly. Editing text auto-clears
+  // (matches setNote's auto-reopen behavior on the server).
+  const [localResolved, setLocalResolved] = useStateJobs(() => {
+    const out = {};
+    for (const [k, v] of Object.entries(job.notes || {})) {
+      const r = getNoteResolvedAt(v);
+      if (r) out[k] = r;
+    }
+    return out;
+  });
   const [exporting, setExporting] = useStateJobs(false);
   const saveTimers = useRefJobs({});
 
@@ -453,6 +477,9 @@ function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
   // (imported or failed). Queued/running items aren't ready to debug.
   const items = job.items.filter(i => i.state === "imported" || i.state === "failed");
   if (items.length === 0) return null;
+
+  const isUnresolvedNoted = (id) =>
+    (localNotes[id] || "").trim().length > 0 && !localResolved[id];
 
   const toggleSelected = (id) => {
     setSelected(s => {
@@ -465,25 +492,45 @@ function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
 
   const selectAll = () => setSelected(new Set(items.map(i => i.id)));
   const clearAll = () => setSelected(new Set());
-  // Select every item that currently has a non-empty note. Lets the operator
-  // turn "the assistants flagged 3 things here" into one click + Export zip.
+  // Select every item with a non-empty UNRESOLVED note. Lets the operator
+  // turn "the assistants flagged 3 things here" into one click + Export
+  // zip. Items already marked resolved are skipped on purpose — they've
+  // been actioned, no need to re-export them.
   const selectNoted = () => {
-    const noted = new Set(
-      items
-        .map(i => i.id)
-        .filter(id => (localNotes[id] || "").trim().length > 0),
-    );
-    setSelected(noted);
+    setSelected(new Set(items.map(i => i.id).filter(isUnresolvedNoted)));
   };
-  const notedCount = items.filter(i => (localNotes[i.id] || "").trim().length > 0).length;
+  const notedCount = items.filter(i => isUnresolvedNoted(i.id)).length;
+  const resolvedCount = items.filter(i =>
+    (localNotes[i.id] || "").trim().length > 0 && !!localResolved[i.id]
+  ).length;
 
   const updateNote = (itemId, text) => {
     setLocalNotes(n => ({ ...n, [itemId]: text }));
+    // Edits to a previously-resolved note implicitly reopen it (new
+    // content is fresh work). Mirrors the server's setNote behavior.
+    if (localResolved[itemId]) {
+      setLocalResolved(r => {
+        const n = { ...r };
+        delete n[itemId];
+        return n;
+      });
+    }
     // Debounce save: wait 500ms after the last keystroke before POSTing.
     if (saveTimers.current[itemId]) clearTimeout(saveTimers.current[itemId]);
     saveTimers.current[itemId] = setTimeout(() => {
       onSaveNote && onSaveNote(job.id, itemId, text);
     }, 500);
+  };
+
+  const toggleResolved = (itemId) => {
+    const next = localResolved[itemId] ? null : new Date().toISOString();
+    setLocalResolved(r => {
+      const n = { ...r };
+      if (next) n[itemId] = next;
+      else delete n[itemId];
+      return n;
+    });
+    onResolveNote && onResolveNote(job.id, itemId, !!next);
   };
 
   const flushAndExport = async () => {
@@ -518,11 +565,18 @@ function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
           ? <Icon.chevronDown width="10" height="10"/>
           : <Icon.chevronRight width="10" height="10"/>}
         Add feedback · any item ({items.length})
-        {Object.values(localNotes).filter(n => (n||"").trim()).length > 0 && (
-          <span className="ml-auto text-[10px] text-[#58a6ff] normal-case tracking-normal">
-            {Object.values(localNotes).filter(n => (n||"").trim()).length} noted
-          </span>
-        )}
+        <span className="ml-auto flex items-center gap-2 normal-case tracking-normal">
+          {notedCount > 0 && (
+            <span className="text-[10px] text-[#58a6ff]">
+              {notedCount} noted
+            </span>
+          )}
+          {resolvedCount > 0 && (
+            <span className="text-[10px] text-[#3fb950]">
+              {resolvedCount} resolved
+            </span>
+          )}
+        </span>
       </button>
       {open && (
         <div className="space-y-2 pb-2">
@@ -555,8 +609,19 @@ function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
           </div>
           {items.map(item => {
             const noteVal = localNotes[item.id] ?? "";
+            const hasNote = noteVal.trim().length > 0;
+            const resolvedAt = localResolved[item.id];
+            const isResolved = hasNote && !!resolvedAt;
             return (
-              <div key={item.id} className="border border-[#21262d] rounded-[3px] p-2 bg-[#0d1117]">
+              <div
+                key={item.id}
+                className={
+                  "border rounded-[3px] p-2 " +
+                  (isResolved
+                    ? "border-[#21262d] bg-[#010409] opacity-60"
+                    : "border-[#21262d] bg-[#0d1117]")
+                }
+              >
                 <div className="flex items-start gap-2">
                   <input
                     type="checkbox"
@@ -569,7 +634,21 @@ function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
                       <span className="text-[10px] uppercase tracking-wider text-[#484f58] w-[40px]">
                         {item.kind === "flow" ? "flow" : "tmpl"}
                       </span>
-                      <span className="truncate text-[#e6edf3]">{item.name}</span>
+                      <span className={"truncate " + (isResolved ? "text-[#8b949e] line-through" : "text-[#e6edf3]")}>{item.name}</span>
+                      {hasNote && (
+                        <button
+                          onClick={() => toggleResolved(item.id)}
+                          title={isResolved ? "Reopen this feedback" : "Mark this feedback resolved"}
+                          className={
+                            "text-[10px] px-1.5 py-0.5 border rounded-[3px] leading-none " +
+                            (isResolved
+                              ? "text-[#8b949e] border-[#30363d] hover:text-[#e6edf3] hover:border-[#58a6ff]"
+                              : "text-[#3fb950] border-[#3fb95040] hover:bg-[#3fb95015]")
+                          }
+                        >
+                          {isResolved ? "↺ reopen" : "✓ resolve"}
+                        </button>
+                      )}
                       <span className="text-[10px] text-[#6e7681] tabular-nums ml-auto">{item.id}</span>
                     </div>
                     {item.state === "failed" && item.error && (
@@ -582,7 +661,10 @@ function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
                       onChange={e => updateNote(item.id, e.target.value)}
                       placeholder="What's wrong with this one? (footer padding off, button in wrong column, …)"
                       rows={2}
-                      className="w-full mt-1 bg-[#010409] border border-[#30363d] focus:border-[#388bfd] outline-none rounded-[3px] px-2 py-1 text-[11px] text-[#e6edf3] placeholder:text-[#484f58] resize-y"
+                      className={
+                        "w-full mt-1 bg-[#010409] border border-[#30363d] focus:border-[#388bfd] outline-none rounded-[3px] px-2 py-1 text-[11px] placeholder:text-[#484f58] resize-y " +
+                        (isResolved ? "text-[#8b949e] line-through" : "text-[#e6edf3]")
+                      }
                     />
                   </div>
                 </div>

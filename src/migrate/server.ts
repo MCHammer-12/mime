@@ -47,6 +47,7 @@ import {
   listJobs,
   resolveInput,
   setNote,
+  setNoteResolved,
   setStatus,
   subscribe,
   type JobSummary,
@@ -2023,6 +2024,32 @@ async function handleJobNotes(
   json(res, 200, { ok: true });
 }
 
+// ─── API: POST /api/jobs/:id/notes-resolve — toggle a note's resolved state ──
+// Body: { itemId: string, resolved: boolean }. Preserves text + author;
+// only flips the resolvedAt/resolvedBy fields. Returns 404 if the item has
+// no note to resolve.
+
+async function handleJobNoteResolve(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+) {
+  const body = await readJsonBody(req);
+  const itemId = body.itemId;
+  const resolved = body.resolved;
+  if (typeof itemId !== "string" || typeof resolved !== "boolean") {
+    return json(res, 400, { error: "itemId (string) and resolved (boolean) required" });
+  }
+  const resolver = getAdminUser(req) ?? undefined;
+  const ok = setNoteResolved(jobId, itemId, resolved, resolver);
+  if (!ok) {
+    return json(res, 404, {
+      error: `no note to ${resolved ? "resolve" : "reopen"} on job ${jobId} item ${itemId}`,
+    });
+  }
+  json(res, 200, { ok: true });
+}
+
 /**
  * Full admin gate — admin_token cookie AND a valid claim. Used on every
  * endpoint except the identity-pick flow and /api/me (which need to be
@@ -3262,7 +3289,7 @@ const server = createServer(async (req, res) => {
       if (!(await requireFullAdmin(req, res))) return;
       return handleJobList(req, res);
     }
-    const jobPath = url.match(/^\/api\/jobs\/([^/?]+)(\/[a-z]+)?(\?.*)?$/);
+    const jobPath = url.match(/^\/api\/jobs\/([^/?]+)(\/[a-z-]+)?(\?.*)?$/);
     if (jobPath) {
       if (!(await requireFullAdmin(req, res))) return;
       const jobId = jobPath[1];
@@ -3272,6 +3299,7 @@ const server = createServer(async (req, res) => {
       if (req.method === "GET" && sub === "/stream") return handleJobStream(req, res, jobId);
       if (req.method === "POST" && sub === "/inputs") return handleJobInput(req, res, jobId);
       if (req.method === "POST" && sub === "/notes") return handleJobNotes(req, res, jobId);
+      if (req.method === "POST" && sub === "/notes-resolve") return handleJobNoteResolve(req, res, jobId);
       if (req.method === "POST" && sub === "/bundle") return handleJobBundle(req, res, jobId);
     }
     // Assist API — read-only stores/items list + note write. No admin

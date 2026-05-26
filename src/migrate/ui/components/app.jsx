@@ -896,6 +896,43 @@ function App() {
       console.warn("save note failed:", e);
     }
   }, []);
+  // Toggle a note's resolved state. Mirrors the structured note shape
+  // locally so the badge/filter update immediately; the server's
+  // setNoteResolved preserves text + author + savedAt and only mutates
+  // the resolvedAt/resolvedBy fields.
+  const resolveJobNote = useC(async (jobId, itemId, resolved) => {
+    setJobs(js => js.map(j => {
+      if (j.id !== jobId) return j;
+      const prev = (j.notes || {})[itemId];
+      // Coerce whatever shape the local mirror has into an object so we
+      // have somewhere to hang resolvedAt. Plain strings come in from
+      // saveJobNote; the server returns structured objects on refetch.
+      let next;
+      if (typeof prev === "string" && prev.length > 0) {
+        next = { text: prev };
+      } else if (prev && typeof prev === "object" && typeof prev.text === "string") {
+        next = { ...prev };
+      } else {
+        return j; // no note to resolve
+      }
+      if (resolved) {
+        next.resolvedAt = new Date().toISOString();
+      } else {
+        delete next.resolvedAt;
+        delete next.resolvedBy;
+      }
+      return { ...j, notes: { ...(j.notes || {}), [itemId]: next } };
+    }));
+    try {
+      await fetch(`/api/jobs/${jobId}/notes-resolve`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ itemId, resolved }),
+      });
+    } catch (e) {
+      console.warn("resolve note failed:", e);
+    }
+  }, []);
   // Trigger a zip download from the bundle endpoint. Posts the selected
   // item ids/types and saves the resulting blob as a download.
   const exportJobBundle = useC(async (jobId, items) => {
@@ -1025,6 +1062,7 @@ function App() {
           onOpenLog={setLogJobId}
           onOpenWarnings={(jobId, itemId) => setWarningsView({ jobId, itemId })}
           onSaveNote={saveJobNote}
+          onResolveNote={resolveJobNote}
           onExportBundle={exportJobBundle}
         />
       </div>
