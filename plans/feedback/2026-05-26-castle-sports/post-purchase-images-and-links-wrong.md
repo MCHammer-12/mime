@@ -1,5 +1,5 @@
 ---
-status: unclaimed
+status: blocked
 branch: fix/post-purchase-images-and-links-wrong
 pr: null
 ---
@@ -57,6 +57,63 @@ Relevant files:
 - Coordinate with Charlie Task 3 (inline-anchor-url-rewrite) — if their fix lands first, may resolve part of this. Read their PR + see if the same anchor pattern Castle hits is covered.
 - Post Purchase Email 1 is also covered by Task 2 (subject/preview). If both Tasks 2 + 3 land at once for the same email, fine — but coordinate the verification step so each PR has the right scope.
 - The "fonts not accurate" piece of the original merchant note is intentionally NOT in this task — that's covered by the existing cross-merchant font tasks (Charlie Task 4, Blackline, etc).
+
+## Notes — executor investigation 2026-05-26
+
+**The parser is doing what it should on every image + link** for all 3
+Post Purchase emails. Comparing Klaviyo source vs. post-transform output:
+
+**Email 1 (RUpF6R)** — 3 images, 1 button:
+
+| # | Element | Klaviyo source | Post-transform |
+|---|---------|----------------|----------------|
+| 1 | img `aac790db…gif` (alt "CASTLE SPORTS - THANK YOU") | href `https://castlesports.com/` | clickthroughUrl `https://castlesports.com/` ✓ |
+| 2 | img `4c8700d9…gif` (alt "Any Place, Any Time") | href `https://castlesports.com/` | ✓ |
+| 3 | img `910de595…gif` (alt "Any place, any time!") | href `https://castlesports.com/` | ✓ |
+| 4 | button "SHOP NOW" | href `https://castlesports.com/` | buttonLink ✓ |
+
+**Email 2 (SqEd95)** — 2 images, **no buttons in source**:
+
+| # | Klaviyo source | Post-transform |
+|---|----------------|----------------|
+| 1 | img `62e18d3e…gif` href `https://castlesports.com/` | clickthroughUrl ✓ |
+| 2 | img `48989021…gif` href `https://castlesports.com/` | ✓ |
+
+**Email 3 (Ugb6QN)** — 2 images, no buttons in source:
+
+| # | Klaviyo source | Post-transform |
+|---|----------------|----------------|
+| 1 | img `17aca2de…gif` href `https://castlesports.com` (no trailing slash) | ✓ |
+| 2 | img `abd9097b…png` href `https://castlesports.com` | ✓ |
+
+Body text `{{ first_name|default:'there' }}` also correctly rewrites to
+`{{ customer_first_name |default:'there' }}` via the existing
+`mapProfileVars` path in [`src/transform.ts`](../../../src/transform.ts).
+
+**Why the merchant says it's wrong is unclear from this side:**
+
+- Possibly the merchant authored these emails in Klaviyo with all 3
+  hero/banner images pointing at `castlesports.com` (their homepage) and
+  was hoping mime would magically rewrite them to product-specific URLs.
+  That's not something a parser can do without per-image intent — would
+  need merchant input or AI.
+- Possibly downstream (Redo importer or editor) shows the images
+  differently than expected — animated GIFs may not render in some
+  preview contexts.
+- Possibly the troubleshoot bundle (captured 2026-05-20) reflected
+  pre-Task-2 state where `{{ first_name|default:'X' }}` showed
+  literally in the SUBJECT and merchant conflated that with body / image
+  issues.
+
+**Recommended unblock path:**
+
+Re-import Castle Sports Post Purchase flow post-#89 (Task 2 fix) merge
+and have the merchant point at the specific image/link they consider
+"wrong." Without that, mime has no actionable target — every
+mechanically-extractable URL already matches Klaviyo source.
+
+Marking `blocked` — needs merchant clarification on which specific
+image/link is wrong, or a re-import bundle showing the discrepancy.
 
 ## Done
 

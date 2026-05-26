@@ -10,7 +10,7 @@ Items: 6 flows flagged (40 emails total imported)
 |---|--------|------|--------|----|
 | 1 | blocked | [`[EG]` templates produce blank emails (3 flows, ~12 emails affected)](eg-templates-blank-emails.md) | `fix/eg-templates-blank-emails` | — |
 | 2 | done | [Post Purchase Email 1: subject line + preview text wrong](post-purchase-subject-preview-wrong.md) | `fix/post-purchase-subject-preview-wrong` | [#89](https://github.com/MCHammer-12/mime/pull/89) |
-| 3 | unclaimed | [Post Purchase Email 1 images wrong + Email 2-3 links wrong](post-purchase-images-and-links-wrong.md) | `fix/post-purchase-images-and-links-wrong` | — |
+| 3 | blocked | [Post Purchase Email 1 images wrong + Email 2-3 links wrong](post-purchase-images-and-links-wrong.md) | `fix/post-purchase-images-and-links-wrong` | — |
 | 4 | unclaimed | [Funnest PE Games email — socials block dropped](socials-block-missing.md) | `fix/socials-block-dropped` | — |
 
 ## Collapsed into other batches
