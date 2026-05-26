@@ -147,6 +147,39 @@ function parseFontList(raw: string): string[] {
 }
 
 /**
+ * If every inline `font-size:` declaration in the text HTML (on `<span>` /
+ * `<p>` / `<hN>` tags) agrees on the same value, return that value.
+ *
+ * Klaviyo commonly emits a block-level `<div>` wrapper with a "reset" size
+ * (14px or 18px) and lets inner spans declare the real intended size
+ * (e.g. Charlie 1 Horse's first text wraps `font-size:32px` in a span
+ * inside a 14px outer div, where 32px is the merchant's intent). Hoisting
+ * the unanimous inline size to the block level makes Redo's UI dropdown
+ * reflect what the merchant authored.
+ *
+ * The unanimity requirement is the safety net: a text block that mixes
+ * sizes (e.g. a heading span + a body span at different sizes) has no
+ * single "intent" to hoist — promoting the most-common size would silently
+ * grow or shrink whichever spans disagree. In that case return null and
+ * let the caller fall back to the outer div's size.
+ */
+const INLINE_FONT_SIZE_RE =
+  /<(?:span|p|h[1-6])\b[^>]*style\s*=\s*"[^"]*\bfont-size:\s*(\d+(?:\.\d+)?)px[^"]*"/gi;
+
+export function extractDominantInlineFontSize(html: string): number | null {
+  const sizes = new Set<number>();
+  INLINE_FONT_SIZE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = INLINE_FONT_SIZE_RE.exec(html)) !== null) {
+    const px = Math.round(parseFloat(m[1]!));
+    if (!px) continue;
+    sizes.add(px);
+  }
+  if (sizes.size !== 1) return null;
+  return [...sizes][0]!;
+}
+
+/**
  * Walk every `font-family:` declaration in the text HTML and pick the
  * custom (non-web-safe) font that appears most often as the primary
  * (first non-web-safe) entry of each stack. Returns null if nothing
@@ -470,6 +503,14 @@ export function parseTextBlock(
   const inlineCustomFont = extractDominantCustomFont(textHtml);
   const fontFamily = inlineCustomFont ?? divFontFamily;
 
+  // Same idea for font-size: Klaviyo's outer block-level div is often a
+  // "reset" (14px) wrapper, with inner `<span style="font-size: 32px">`
+  // declaring the intended visual size. Reading only the outer drops the
+  // headline to body size in Redo's renderer.
+  const inlineFontSize = extractDominantInlineFontSize(textHtml);
+  const divFontSize = parseFontSize(divStyle["font-size"]);
+  const fontSize = inlineFontSize ?? divFontSize;
+
   const sectionColor =
     tdStyle["background-color"] ||
     tdStyle["background"] ||
@@ -503,7 +544,7 @@ export function parseTextBlock(
     sectionColor,
     text: textHtml,
     textColor,
-    fontSize: parseFontSize(divStyle["font-size"]),
+    fontSize,
     fontFamily,
     linkColor,
     ...(textAlign ? { textAlign } : {}),
