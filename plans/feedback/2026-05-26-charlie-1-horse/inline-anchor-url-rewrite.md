@@ -1,7 +1,7 @@
 ---
-status: claimed
+status: done
 branch: fix/inline-anchor-url-rewrite
-pr: null
+pr: https://github.com/MCHammer-12/mime/pull/77
 ---
 
 # Inline anchor in text block retains Klaviyo checkout URL
@@ -41,4 +41,36 @@ Don't change `mapKlaviyoLink` itself or the static-vs-dynamic mapping logic. Jus
 
 ## Done
 
-(filled by executor on completion)
+- PR: https://github.com/MCHammer-12/mime/pull/77
+- Confirmed root cause exactly as written: text-block inline `<a href>` was
+  the only Klaviyo-variable carrier that didn't run through
+  [`classifyKlaviyoUrl`](../../../src/parser/url-mapping.ts) (button + image
+  already do). Charlie 1 Horse WgXbn6/U3cE5u both have
+  `<a href="{{ event.extra.checkout_url }}">complete your purchase.</a>`
+  inside the second text block.
+- Fix shape:
+  - Added `rewriteAnchorHrefs` in
+    [`src/parser/blocks/text.ts`](../../../src/parser/blocks/text.ts) that
+    walks every `<a href="...">` (or `<a href='...'>`) in the text HTML
+    and runs Klaviyo-variable hrefs through the existing mapper.
+  - Slotted in **before** `suppressUrlAutolink` so any future downstream
+    AI / coupon rewrite sees the final Redo URL, not the Klaviyo variable.
+  - Renamed `_ctx` → `ctx` in `parseTextBlock` since the context is now used.
+- Verification:
+  - WgXbn6 + U3cE5u with `storeUrl="http://www.charlie1horsehats.com"`:
+    both "complete your purchase" anchors resolve to
+    `http://www.charlie1horsehats.com/cart`. No reviewItems pushed (clean
+    rewrite). Without storeUrl: variable preserved, 2 reviewItems pushed
+    — matches button/image behavior.
+  - [`text.smoke.ts`](../../../src/parser/blocks/text.smoke.ts) extended
+    with 6 new cases: all four Klaviyo checkout variables, unsupported
+    variables (reviewItem), static URL passthrough, single-quoted href,
+    no-storeUrl behavior. All assertions pass.
+  - batch-test on 416-template corpus: 0 failures, identical clean/warned.
+- **Not in scope (deferred):**
+  - Footer-variable resolution (`{% unsubscribe %}` etc.) is handled via a
+    different path (per memory `project_klaviyo_footer_variables`); this
+    PR doesn't touch it.
+  - AI pass for inline coupons (memory `project_coupon_to_discount`) isn't
+    wired into the text pipeline yet; once it is, the anchor rewrite needs
+    to stay before it — comment in the pipeline call site spells this out.
