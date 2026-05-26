@@ -17,6 +17,7 @@ import { join } from "node:path";
 import type { ServerResponse } from "node:http";
 import archiver from "archiver";
 import { coerceNote, type JobState } from "./jobs.js";
+import { isDbEnabled, getPool } from "./db.js";
 
 const MIGRATIONS_DIR = "migrations";
 
@@ -150,6 +151,51 @@ export async function streamBundle(
   archive.append(readmeChunks.join("\n"), { name: "README.md" });
 
   await archive.finalize();
+
+  // Post-export prune: once the bundle has been written into res, the
+  // klaviyo template source the operator just got isn't useful again. Drop
+  // klaviyoHtml + klaviyoMeta from `exported` event payloads (in-memory +
+  // DB) to keep job_events from accumulating 200KB/template forever on
+  // Postgres. Scoped to the template items in THIS bundle so a partial
+  // bundle doesn't strip data the operator hasn't downloaded.
+  //
+  // Failure tolerance: wrap in try/catch — the bundle has already streamed,
+  // so a prune error must not bubble up and confuse the client. The next
+  // bundle re-bundle of these items will be degraded (parse-result.json
+  // only) — that's the explicit trade-off, the zip is the canonical copy.
+  const templateIds = items.filter((it) => it.type === "template").map((it) => it.id);
+  if (templateIds.length > 0) {
+    try {
+      await pruneTemplateSourceForJob(job, templateIds);
+    } catch (err) {
+      console.warn("[bundle] post-export prune failed:", err);
+    }
+  }
+}
+
+async function pruneTemplateSourceForJob(
+  job: JobState,
+  templateIds: string[],
+): Promise<void> {
+  // In-memory: strip the fields so any subsequent bundle in the same
+  // process sees the pruned state.
+  for (const ev of job.events) {
+    if (ev.kind !== "exported") continue;
+    const p = ev.payload as { id?: string; klaviyoHtml?: unknown; klaviyoMeta?: unknown };
+    if (!p.id || !templateIds.includes(p.id)) continue;
+    delete p.klaviyoHtml;
+    delete p.klaviyoMeta;
+  }
+  // DB: same prune, JSONB key removal. Survives process restart.
+  if (!isDbEnabled()) return;
+  await getPool().query(
+    `UPDATE job_events
+        SET payload = payload - 'klaviyoHtml' - 'klaviyoMeta'
+      WHERE job_id = $1
+        AND kind   = 'exported'
+        AND payload->>'id' = ANY($2)`,
+    [job.id, templateIds],
+  );
 }
 
 function itemName(job: JobState, itemId: string): string {
