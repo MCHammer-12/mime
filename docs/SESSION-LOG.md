@@ -1,5 +1,55 @@
 # Session Log
 
+## 2026-05-26 — Font preflight gate, parser duplicate-`<p>`-style fix, feedback resolve workflow
+
+**Context**
+One troubleshoot bundle (Blackline Car Care, Austin) surfaced two compounding font bugs in a single template. Fix turned into both a parser correctness fix AND the architectural follow-through on the previously-deferred preflight gate. Plus three Jobs-panel UX additions to make the assistant-feedback loop actually closable. 4 merged PRs.
+
+**Done — Font preflight + parser `<p>` style merge ([#66](https://github.com/MCHammer-12/mime/pull/66))**
+Blackline template referenced Futura inline; rendered as a patchwork of fallbacks in the editor. Two root causes:
+- `text.ts` was prepending a fresh `style="text-align:…;line-height:…"` to every `<p>`, INCLUDING ones that already had inline styles from Klaviyo. Per HTML5 spec, browsers (and Quill on load) keep only the FIRST `style` attribute when there are duplicates — the inline `font-family: 'Futura'` got silently dropped, leaving block-level font as sole controller. Now merges into the existing attribute. Smoke test (`src/parser/blocks/text.smoke.ts`) locks in: bare `<p>`, `<p>` with existing style, mixed, trailing semicolons, other-attributes-preserved cases.
+- `server.ts` unresolved-font handling was a non-blocking `warn` that Austin missed. Replaced with a `needs_input` modal that pauses the import, lists missing families, links to the brand-kit page. User clicks "Continue (added them)" or "Import anyway". Re-checks the brand kit before prompting so already-added fonts don't trigger the modal. Wired into both the template phase (existing font-upload step) and the flow phase, which previously didn't upload fonts at all. `questionKey` scoped by the font set so a later phase with new unresolved fonts re-prompts.
+- New `filterFontsNotInBrandKit` helper in `import-rpc.ts`. `trueLabel` / `falseLabel` plumbed through `PendingInput` + `mock-stream.js` so the modal can render "Continue (added them)" / "Import anyway" instead of generic Yes/No.
+
+**Done — Jobs panel store search ([#67](https://github.com/MCHammer-12/mime/pull/67))**
+- Admin dashboard pools every store's jobs into one scrollable list — once the count grows past a screenful it becomes scroll-forever. Added a text input under the panel header that filters by `storeName` (case-insensitive substring). Counter switches from `N total` → `N/M` while filtering. × clears.
+
+**Done — "Has feedback" filter + select-noted shortcut ([#70](https://github.com/MCHammer-12/mime/pull/70))**
+- Filter pill under the search: "Has feedback (N)" — toggles the panel to jobs with at least one note. Disabled when N=0.
+- Per-card `N noted` badge next to the store name so review-worthy jobs scan at a glance.
+- "select noted (N)" action in the Troubleshoot panel — one click pre-selects all items with notes for export. Skips the manual tick-each-box flow.
+- Shared `getJobNoteCount` helper counts both plain-string admin notes and `{text, author, savedAt}` assistant notes.
+
+**Done — Mark feedback notes resolved ([#72](https://github.com/MCHammer-12/mime/pull/72))**
+- `StoredNote` gains optional `resolvedAt` + `resolvedBy`. Plain-string notes migrate to the structured shape on resolve.
+- New `setNoteResolved` + `POST /api/jobs/:id/notes-resolve` endpoint. Preserves text + author + savedAt — only flips the resolve fields. Job-route regex widened to `[a-z-]+` to allow hyphenated subpaths.
+- `getJobNoteCount` drops resolved notes from the "Has feedback" tally and per-card "N noted" badge. Separate green "N resolved" counter on the troubleshoot header keeps the history visible.
+- Per-item `✓ resolve` button (only when there's a note). Click → row mutes (opacity + strikethrough), button flips to `↺ reopen`. Editing a resolved note's text auto-reopens (new content is fresh work).
+- "select noted" now picks UNRESOLVED only so re-exports don't re-bundle work that's already shipped.
+
+**Files changed (cross-PR)**
+- `src/parser/blocks/text.ts`, `src/parser/blocks/text.smoke.ts` (NEW)
+- `src/migrate/import-rpc.ts` (added `filterFontsNotInBrandKit`)
+- `src/migrate/jobs.ts` (`trueLabel`/`falseLabel`; `resolvedAt`/`resolvedBy` on `StoredNote` + `CoercedNote`; `setNoteResolved`)
+- `src/migrate/server.ts` (`preflightUnresolvedFonts` helper; `handleJobNoteResolve` route; per-flow font upload; widened job-route regex)
+- `src/migrate/ui/components/app.jsx` (`resolveJobNote` callback)
+- `src/migrate/ui/components/jobs.jsx` (search, feedback filter, "N noted" badge, resolve UI, "select noted")
+- `src/migrate/ui/mock-stream.js` (trueLabel/falseLabel pass-through)
+- `src/migrate/ui/index.html` (cache busters: `jobs.jsx?v=7`, `mock-stream.js?v=7`)
+
+**Decisions (see DECISIONS.md)**
+- Inline `<p>` styles must be MERGED with our text-align/line-height — duplicate `style=` attributes are dropped silently per HTML5 spec.
+- Unresolved-font flow blocks import via `needs_input` instead of warn-and-continue. The architectural fallback half of "auto-upload + prompt" that had been deferred.
+- Flow phase gains per-flow font upload (was missing entirely).
+- Note resolution preserves text + author + savedAt; text edits auto-reopen.
+
+**Open / next steps**
+1. Watch production after deploy: confirm Blackline-style imports actually block on Futura preflight instead of silently warning past it.
+2. Brand-kit upload flow is still merchant-driven for non-Google-Fonts families — no auto-fetch from Adobe / Linotype etc. (rights issues). The preflight prompt is as far as we go.
+3. Note resolution UI lives only on admin troubleshoot panel; assistants on `/assist` can't see resolved state. Consider surfacing per-item resolved status there if the workflow needs it.
+
+---
+
 ## 2026-05-08/14 — Merchant-feedback fixes (Goumikids, Defiance Beauty, Fairechild), DB-backed credentials, schema-type propagation
 
 **Context**
