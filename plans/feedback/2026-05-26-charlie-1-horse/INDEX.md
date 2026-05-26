@@ -12,7 +12,7 @@ Items: 6 templates + 2 flows, all flagged with notes
 | 2 | blocked | [AC product block static instead of dynamic cart-items](ac-product-block-dynamic-cart.md) | `fix/ac-product-block-dynamic-cart` | — |
 | 3 | done | [Inline anchor in text retains Klaviyo checkout URL](inline-anchor-url-rewrite.md) | `fix/inline-anchor-url-rewrite` | [#77](https://github.com/MCHammer-12/mime/pull/77) |
 | 4 | done | [First text wrong font-size + missing font-family](first-text-font-styling.md) | `fix/first-text-font-styling` | [#76](https://github.com/MCHammer-12/mime/pull/76) |
-| 5 | unclaimed | [Footer buttons joined without spacing](footer-button-spacing.md) | `fix/footer-button-spacing` | — |
+| 5 | done | [Footer buttons joined without spacing](footer-button-spacing.md) | `fix/footer-button-spacing` | [#80](https://github.com/MCHammer-12/mime/pull/80) |
 | 6 | blocked | [Image click-through links missing](image-clickthrough-links.md) | `fix/image-clickthrough-links` | — |
 | 7 | unclaimed | [Browse abandonment dynamic product variable not mapped](browse-abandonment-dynamic-product.md) | `fix/browse-abandonment-dynamic-product` | — |
 | 8 | unclaimed | [Abandoned Cart flow — profile filters not migrated](flow-profile-filters.md) | `fix/flow-profile-filters` | — |
