@@ -446,3 +446,169 @@ export function translateConditionalSplitExpression(
     inlineSegment: { mode: "AND", conditions: redoConditions },
   };
 }
+
+// ---------- Klaviyo flow-level `definition.profile_filter` → Redo skip ----------
+//
+// Klaviyo flows can carry a top-level `profile_filter` that says "ONLY run
+// this flow for profiles matching these conditions" (e.g. customers who
+// have placed 0 orders). The flow-action graph parser doesn't touch this
+// — it lives at `definition.profile_filter`, not on any action.
+//
+// Redo's equivalent: a SKIP condition on the trigger step
+// (`trigger.skipConditions[]`). Skip semantics are the LOGICAL INVERSE of
+// Klaviyo's include filter:
+//
+//   Klaviyo: "run if (g1) OR (g2)"      where each group is c1 AND c2 ...
+//   Redo:    "skip if NOT((g1) OR (g2))"
+//            = "skip if NOT(g1) AND NOT(g2)"     De Morgan
+//            = "skip if (NOT c1 OR NOT c2 OR ...) AND (NOT c1' OR ...)"
+//
+// V1 handles single-group profile-metric conditions fully (invert each
+// operator, mode flips from AND→OR). Other condition types
+// (profile-marketing-consent, profile-property, profile-group-membership)
+// warn-only because their inversion requires per-type logic the per-
+// action translator hasn't generalized to negation. Multi-group (OR'd
+// groups) warns and processes only the first group. Per memory
+// `feedback_flow_status_mapping`, imported flows land inactive regardless,
+// so an imperfect translation can't accidentally fire.
+
+const INVERT_KLAVIYO_OPERATOR: Record<string, string> = {
+  "equals": "not-equals",
+  "not-equals": "equals",
+  "greater-than": "less-than-or-equal",
+  "greater-than-or-equal": "less-than",
+  "less-than": "greater-than-or-equal",
+  "less-than-or-equal": "greater-than",
+};
+
+function invertKlaviyoCondition(c: any): any {
+  const op = c.measurement_filter?.operator;
+  if (!op || !(op in INVERT_KLAVIYO_OPERATOR)) return c;
+  return {
+    ...c,
+    measurement_filter: {
+      ...c.measurement_filter,
+      operator: INVERT_KLAVIYO_OPERATOR[op],
+    },
+  };
+}
+
+function translateKlaviyoCondition(
+  kc: any,
+  metrics: MetricLookup,
+  warnings: ParseWarning[],
+): unknown | null {
+  const inverted = invertKlaviyoCondition(kc);
+  switch (inverted.type) {
+    case "profile-metric":
+      return translateProfileMetricCondition(
+        inverted,
+        metrics,
+        warnings,
+        "flow-profile-filter",
+      );
+    case "profile-marketing-consent":
+    case "profile-property":
+    case "profile-group-membership":
+    case "profile-not-in-flow":
+      warnings.push({
+        kind: "requires-review",
+        message: `flow profile_filter condition type "${inverted.type}" not yet translated — manual config required in the Redo flow builder`,
+      });
+      return null;
+    default:
+      warnings.push({
+        kind: "requires-review",
+        message: `flow profile_filter condition type "${inverted.type}" not recognized — manual config required`,
+      });
+      return null;
+  }
+}
+
+export function translateFlowProfileFilter(
+  profileFilter: unknown,
+  metrics: MetricLookup,
+  warnings: ParseWarning[],
+): unknown | null {
+  const pf = profileFilter as any;
+  const groups = pf?.condition_groups ?? [];
+  if (groups.length === 0) return null;
+
+  // De Morgan from Klaviyo "include" to Redo "skip":
+  //
+  //   Klaviyo: include if G1 OR G2 OR ...   where each Gn is c1 AND c2 ...
+  //   Redo:    skip    if NOT(G1) AND NOT(G2) AND ...
+  //                    where NOT(Gn) = NOT c1 OR NOT c2 OR ...
+  //
+  // Redo's inline-segment supports a flat `mode: "AND"|"OR"` — not nested
+  // groups. So:
+  //
+  //  - Single group → emit one inline-segment with mode "OR" containing
+  //    each condition inverted (NOT of an AND-group).
+  //  - Multi-group where every group has exactly 1 condition → flatten
+  //    to one inline-segment with mode "AND" and each inverted condition.
+  //  - Multi-group with any multi-condition group → would need nested
+  //    AND-of-ORs which inline-segment can't express. Warn + process the
+  //    first group only.
+  //
+  // Per memory `feedback_flow_status_mapping`, imported flows land
+  // inactive — an imperfect filter still gets reviewed before going live.
+
+  const everyGroupHasOneCondition = groups.every(
+    (g: any) => (g.conditions ?? []).length === 1,
+  );
+
+  if (groups.length === 1) {
+    const klaviyoConditions = groups[0].conditions ?? [];
+    if (klaviyoConditions.length === 0) return null;
+    const redoConditions: unknown[] = [];
+    for (const kc of klaviyoConditions) {
+      const rc = translateKlaviyoCondition(kc, metrics, warnings);
+      if (rc) redoConditions.push(rc);
+    }
+    if (redoConditions.length === 0) return null;
+    return {
+      dataSource: "inline-segment",
+      inlineSegment: {
+        // De Morgan: AND inside Klaviyo include → OR for the inverted skip.
+        mode: "OR",
+        conditions: redoConditions,
+      },
+    };
+  }
+
+  if (everyGroupHasOneCondition) {
+    const redoConditions: unknown[] = [];
+    for (const g of groups) {
+      const kc = g.conditions[0];
+      const rc = translateKlaviyoCondition(kc, metrics, warnings);
+      if (rc) redoConditions.push(rc);
+    }
+    if (redoConditions.length === 0) return null;
+    return {
+      dataSource: "inline-segment",
+      inlineSegment: {
+        // De Morgan: OR across Klaviyo groups → AND for the inverted skip.
+        mode: "AND",
+        conditions: redoConditions,
+      },
+    };
+  }
+
+  // Multi-group with at least one multi-condition group — can't flatten.
+  warnings.push({
+    kind: "requires-review",
+    message: `flow profile_filter has ${groups.length} OR'd groups where at least one group has multiple AND'd conditions — V1 migrates only the first group; the rest need manual config in the Redo flow builder`,
+  });
+  const klaviyoConditions = groups[0].conditions ?? [];
+  const redoConditions: unknown[] = [];
+  for (const kc of klaviyoConditions) {
+    const rc = translateKlaviyoCondition(kc, metrics, warnings);
+    if (rc) redoConditions.push(rc);
+  }
+  if (redoConditions.length === 0) return null;
+  return {
+    dataSource: "inline-segment",
+    inlineSegment: { mode: "OR", conditions: redoConditions },
+  };
+}

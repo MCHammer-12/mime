@@ -2,6 +2,7 @@ import { ObjectId } from "bson";
 import type { MetricLookup } from "../extract-metrics.js";
 import {
   translateConditionalSplitExpression,
+  translateFlowProfileFilter,
   translateTriggerSplitExpression,
 } from "./condition-mapping.js";
 import type { TemplateResolver } from "./template-resolver.js";
@@ -627,6 +628,21 @@ export async function parseFlow(
       },
     });
   }
+  // Flow-level profile_filter: Klaviyo says "only run for profiles
+  // matching these conditions". Redo expresses it as a skipCondition on
+  // the trigger step (semantically inverted: "skip if the profile does
+  // NOT match"). See translateFlowProfileFilter for the De Morgan logic.
+  // Push BEFORE the abandonment + activity skips so the filter applies
+  // alongside them under OR conjunction at the trigger level.
+  const profileFilterSkip = translateFlowProfileFilter(
+    defn?.profile_filter,
+    metrics,
+    warnings,
+  );
+  if (profileFilterSkip) {
+    skipConditions.push(profileFilterSkip);
+  }
+
   if (resolution.klaviyoSource) {
     let window = extractFirstTimeDelayWindow(flow);
     if (!window) {
