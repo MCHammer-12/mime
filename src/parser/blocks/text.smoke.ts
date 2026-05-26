@@ -12,13 +12,13 @@ import * as cheerio from "cheerio";
 import { parseTextBlock } from "./text.js";
 import type { ParseContext } from "../index.js";
 
-function emptyCtx(): ParseContext {
+function emptyCtx(storeUrl: string | null = null): ParseContext {
   return {
     warnings: [],
     unsupportedFeatures: [],
     reviewItems: [],
     skippedBlocks: [],
-    storeUrl: null,
+    storeUrl,
   };
 }
 
@@ -29,7 +29,7 @@ function assert(cond: boolean, msg: string) {
   }
 }
 
-function run(innerHtml: string): string {
+function run(innerHtml: string, ctx?: ParseContext): string {
   // Build a minimal kl-text wrapper td → div structure that parseTextBlock expects.
   const html = `
     <table><tbody><tr>
@@ -40,7 +40,7 @@ function run(innerHtml: string): string {
   `;
   const $ = cheerio.load(html);
   const $td = $("td.kl-text");
-  const block = parseTextBlock($, $td, emptyCtx());
+  const block = parseTextBlock($, $td, ctx ?? emptyCtx());
   if (!block) throw new Error("parseTextBlock returned null");
   return block.text;
 }
@@ -107,6 +107,111 @@ function run(innerHtml: string): string {
   assert(/data-x="1"/.test(out), `data-* survived in ${out}`);
   const styleAttrs = (out.match(/style\s*=/g) || []).length;
   assert(styleAttrs === 1, `single style attr, got ${styleAttrs}`);
+}
+
+// ─── Inline anchor Klaviyo-URL rewrite ────────────────────────────────────
+
+// Klaviyo checkout-URL variable in inline <a href> with storeUrl → /cart.
+{
+  const ctx = emptyCtx("https://charlie1horsehats.com");
+  const out = run(
+    `<p>Click here to <a href="{{ event.extra.checkout_url }}">complete your purchase.</a></p>`,
+    ctx,
+  );
+  assert(
+    out.includes('href="https://charlie1horsehats.com/cart"'),
+    `inline href rewritten to /cart, got: ${out}`,
+  );
+  assert(
+    !out.includes("{{ event.extra.checkout_url }}"),
+    `original Klaviyo variable removed, got: ${out}`,
+  );
+  assert(
+    ctx.reviewItems.length === 0,
+    `no reviewItem after clean rewrite, got ${ctx.reviewItems.length}`,
+  );
+}
+
+// All four Klaviyo checkout variables get rewritten.
+for (const v of [
+  "event.URL",
+  "event.CheckoutURL",
+  "event.extra.checkout_url",
+  "event.extra.responsive_checkout_url",
+]) {
+  const ctx = emptyCtx("https://store.com");
+  const out = run(`<p><a href="{{ ${v} }}">go</a></p>`, ctx);
+  assert(
+    out.includes('href="https://store.com/cart"'),
+    `${v}: rewritten to /cart, got: ${out}`,
+  );
+}
+
+// Unsupported Klaviyo variable in href → reviewItem pushed, href left
+// untouched so the operator can fix it manually.
+{
+  const ctx = emptyCtx("https://store.com");
+  const out = run(
+    `<p><a href="{{ customer.account_url }}">my account</a></p>`,
+    ctx,
+  );
+  assert(
+    out.includes('href="{{ customer.account_url }}"'),
+    `unknown variable left untouched, got: ${out}`,
+  );
+  assert(
+    ctx.reviewItems.length === 1,
+    `unknown variable pushes reviewItem, got ${ctx.reviewItems.length}`,
+  );
+  assert(
+    ctx.reviewItems[0]!.variableName === "customer.account_url",
+    `reviewItem carries variable name, got ${ctx.reviewItems[0]!.variableName}`,
+  );
+}
+
+// Static URL passes through untouched.
+{
+  const ctx = emptyCtx("https://store.com");
+  const out = run(
+    `<p><a href="https://example.com/foo">link</a></p>`,
+    ctx,
+  );
+  assert(
+    out.includes('href="https://example.com/foo"'),
+    `static URL untouched, got: ${out}`,
+  );
+  assert(ctx.reviewItems.length === 0, "static URL: no reviewItem");
+}
+
+// Single-quoted href is also rewritten (Klaviyo usually emits double, but
+// don't assume).
+{
+  const ctx = emptyCtx("https://store.com");
+  const out = run(
+    `<p><a href='{{ event.URL }}'>go</a></p>`,
+    ctx,
+  );
+  assert(
+    /href=["']https:\/\/store\.com\/cart["']/.test(out),
+    `single-quoted href also rewritten, got: ${out}`,
+  );
+}
+
+// No storeUrl → variable stays + reviewItem (matches button/image behavior).
+{
+  const ctx = emptyCtx(null);
+  const out = run(
+    `<p><a href="{{ event.URL }}">go</a></p>`,
+    ctx,
+  );
+  assert(
+    out.includes('href="{{ event.URL }}"'),
+    `no storeUrl: variable preserved, got: ${out}`,
+  );
+  assert(
+    ctx.reviewItems.length === 1,
+    `no storeUrl: reviewItem pushed, got ${ctx.reviewItems.length}`,
+  );
 }
 
 console.log("text.smoke.ts: all assertions passed");
