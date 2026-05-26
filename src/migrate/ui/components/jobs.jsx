@@ -31,6 +31,16 @@ function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, on
   const failedCount = jobs.reduce((s, j) => s + j.items.filter(i => i.state === "failed").length, 0);
   const waitingCount = jobs.filter(j => j.status === "waiting_input").length;
 
+  // Local search — filters the list to jobs whose store name contains the
+  // query (case-insensitive). On the dashboard this drops a 30-job scroll
+  // down to just the relevant store; on a per-store screen the panel is
+  // already scoped and the search is mostly a no-op but doesn't hurt.
+  const [query, setQuery] = useStateJobs("");
+  const q = query.trim().toLowerCase();
+  const visibleJobs = q
+    ? jobs.filter(j => (j.storeName || "").toLowerCase().includes(q))
+    : jobs;
+
   if (collapsed) {
     return (
       <div className="w-[40px] border-l border-[#21262d] bg-[#010409] flex flex-col items-center py-3 gap-3">
@@ -64,7 +74,7 @@ function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, on
           {scopeLabel && <span className="text-[10px] text-[#6e7681]">scope: {scopeLabel}</span>}
         </div>
         <span className="text-[11px] text-[#6e7681] tabular-nums ml-2">
-          {jobs.length} total
+          {q ? `${visibleJobs.length}/${jobs.length}` : `${jobs.length} total`}
           {activeCount > 0 && <span className="text-[#388bfd]"> · {activeCount} running</span>}
           {waitingCount > 0 && <span className="text-[#58a6ff]"> · {waitingCount} waiting</span>}
           {failedCount > 0 && <span className="text-[#f85149]"> · {failedCount} failed</span>}
@@ -78,6 +88,27 @@ function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, on
         </button>
       </div>
 
+      {jobs.length > 0 && (
+        <div className="px-3 py-2 border-b border-[#21262d] bg-[#0d1117]">
+          <div className="relative">
+            <input
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search by store…"
+              className="w-full bg-[#010409] border border-[#30363d] focus:border-[#388bfd] outline-none rounded-[3px] pl-2 pr-7 py-1 text-[11px] text-[#e6edf3] placeholder:text-[#484f58]"
+            />
+            {query && (
+              <button
+                onClick={() => setQuery("")}
+                title="Clear search"
+                className="absolute right-1 top-1/2 -translate-y-1/2 text-[#6e7681] hover:text-[#e6edf3] text-[14px] leading-none px-1"
+              >×</button>
+            )}
+          </div>
+        </div>
+      )}
+
       {jobs.length === 0 ? (
         <div className="flex-1 flex items-center justify-center px-8 text-center">
           <div className="text-[11px] text-[#484f58] leading-relaxed">
@@ -85,9 +116,15 @@ function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, on
             Jobs run concurrently — start a second batch anytime.
           </div>
         </div>
+      ) : visibleJobs.length === 0 ? (
+        <div className="flex-1 flex items-center justify-center px-8 text-center">
+          <div className="text-[11px] text-[#484f58] leading-relaxed">
+            No jobs match “{query}”.
+          </div>
+        </div>
       ) : (
         <div className="flex-1 overflow-y-auto">
-          {jobs.map(job => (
+          {visibleJobs.map(job => (
             <JobCard
               key={job.id}
               job={job}
