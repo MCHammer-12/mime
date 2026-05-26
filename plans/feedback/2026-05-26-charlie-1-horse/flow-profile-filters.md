@@ -1,5 +1,5 @@
 ---
-status: unclaimed
+status: blocked
 branch: fix/flow-profile-filters
 pr: null
 ---
@@ -53,6 +53,85 @@ Relevant files:
 
 - Memory `feedback_flow_status_mapping`: imported flows land inactive regardless. So even if the filter migrates correctly, the merchant won't accidentally start a misconfigured campaign.
 - Coordinate with Task 9 (Browse Abandonment flow — product filter + re-entry). They likely share the same parser entry point. They can land as separate PRs; just don't conflict in `src/flow/parser.ts` edits.
+
+## Notes — executor investigation 2026-05-26
+
+**Confirmed planner premise.** Fetched UN3tf7's Klaviyo flow JSON via
+`/api/flows/UN3tf7/?additional-fields[flow]=definition`. Real shape:
+
+```json
+{
+  "definition": {
+    "triggers": [{ "type": "metric", "id": "UZjNmf", "trigger_filter": null }],
+    "profile_filter": {
+      "condition_groups": [{
+        "conditions": [{
+          "type": "profile-metric",
+          "metric_id": "VCkQXS",
+          "measurement": "count",
+          "measurement_filter": {
+            "type": "numeric", "operator": "equals", "value": 0
+          }
+        }],
+        "conjunction_mode": "and"
+      }]
+    },
+    "actions": [...],
+    "entry_action_id": "..."
+  }
+}
+```
+
+The Klaviyo semantics: "only run this flow for profiles where the count of
+metric VCkQXS equals 0" (likely the "Placed Order" metric — i.e. only run
+for customers who haven't yet placed an order).
+
+**Parser gap.** `src/flow/parser.ts` walks `definition.actions` but does
+not read `definition.profile_filter`. `KlaviyoFlow` in
+[`src/flow/types.ts:274`](../../../src/flow/types.ts#L274) acknowledges
+the field (`profile_filter: unknown`) but the parser never touches it.
+There IS existing handling of `action.data.profile_filter` — that's the
+per-step conditional-split filter, a different field entirely.
+
+**Why this can't ship as a parser-only fix:**
+
+Redo's `AdvancedFlow` ([`src/flow/types.ts:250`](../../../src/flow/types.ts#L250))
+has no obvious slot for flow-level profile audience:
+- `steps[].skipConditions` is step-level and the existing handlers wire
+  it to trigger-data fields (`isCartAbandoned`, `isBrowseAbandoned`),
+  not profile-metric counts.
+- `audience?: string[]` on `KlaviyoTrigger` is unused on the parsed side.
+- Redo's flow builder UI almost certainly has a settings panel for
+  audience filters, but the schema field name + shape isn't visible from
+  the mime side. Needs Redo eng confirmation.
+
+**Mapping considerations (for whoever unblocks this):**
+
+- Klaviyo `profile-metric` count==0 → Redo's "exclude profiles who have
+  done X" or "include only profiles who have done 0× X". The metric_id
+  needs a Redo equivalent (Klaviyo metric IDs aren't portable; Redo
+  likely uses semantic field names like `hasPlacedOrder`).
+- Klaviyo profile_filter is conjunctive (`condition_groups` AND-ed
+  together, conditions within a group OR-ed). Need to confirm Redo's
+  combinator semantics.
+- Per memory `feedback_flow_status_mapping`, imported flows land
+  inactive — so even an imperfect translation won't fire a misconfigured
+  campaign without merchant review.
+
+**Recommended unblock path:**
+
+1. Michael/Redo eng confirms (or extends) Redo's flow schema with a
+   flow-level audience filter field on `AdvancedFlow` (working name:
+   `profileFilter?: SchemaCondition[]`).
+2. Mime extends [`src/flow/parser.ts`](../../../src/flow/parser.ts) to
+   read `definition.profile_filter`, translate each clause via the
+   existing `condition-mapping.ts` (extend the type map as needed —
+   `profile-metric` count→ord operators), and attach to the parsed
+   automation.
+3. Surface unrecognized clauses as warnings (existing pattern; uses
+   `ParseResult.warnings`).
+
+Marking `blocked` — Redo schema confirmation needed.
 
 ## Done
 
