@@ -643,6 +643,68 @@ export async function parseFlow(
     skipConditions.push(profileFilterSkip);
   }
 
+  // Flow-level `definition.reentry_criteria`: Klaviyo's "wait N days
+  // before letting the same profile re-enter THIS flow". Redo has no
+  // native flow-level re-entry interval field; the closest available
+  // shape is a skip condition on the trigger that excludes profiles
+  // who have RECEIVED ANY EMAIL within the window. Imperfect — Redo's
+  // skip checks all emails, not just this flow's — but better than
+  // dropping the field entirely. The warning makes the approximation
+  // explicit so the merchant can refine in the Redo flow builder.
+  //
+  // Per memory `feedback_flow_status_mapping`, imported flows land
+  // inactive — so this approximation gets human review before going
+  // live regardless of how broad it is in the wrong direction.
+  const reentry = (defn as any)?.reentry_criteria as
+    | { duration?: number; unit?: string }
+    | undefined;
+  if (reentry && Number.isFinite(reentry.duration) && (reentry.duration ?? 0) > 0) {
+    const rawUnit = String(reentry.unit ?? "day").toLowerCase();
+    const units: "minute" | "hour" | "day" =
+      rawUnit === "minute" || rawUnit === "minutes" ? "minute" :
+      rawUnit === "hour" || rawUnit === "hours" ? "hour" :
+      "day";
+    skipConditions.push({
+      dataSource: "inline-segment",
+      inlineSegment: {
+        mode: "AND",
+        conditions: [
+          {
+            type: "customer_activity",
+            activityType: "received-email",
+            count: { type: "at_least_once" },
+            timeframe: {
+              type: "before-now-relative",
+              value: reentry.duration,
+              units,
+            },
+            whereConditions: [],
+          },
+        ],
+      },
+    });
+    const unitLabel = reentry.duration === 1 ? units : `${units}s`;
+    warnings.push({
+      kind: "requires-review",
+      message: `Klaviyo flow has reentry_criteria duration=${reentry.duration} ${unitLabel}; Redo has no native flow-level re-entry interval, so this PR approximates it as "skip if customer received any email in the last ${reentry.duration} ${unitLabel}". The Redo skip is broader than Klaviyo's "only this flow" scope — refine in the flow builder if needed.`,
+    });
+  }
+
+  // Klaviyo's per-trigger `trigger_filter` (a product/event filter that
+  // gates which trigger events fire the flow). When present, surface it
+  // for manual review; mime doesn't yet translate it to a trigger-data
+  // schemaBooleanExpression at the flow level. Charlie 1 Horse's flows
+  // have trigger_filter: null, so this branch never fires for them.
+  const triggers = defn?.triggers ?? [];
+  for (const t of triggers) {
+    if (t.trigger_filter) {
+      warnings.push({
+        kind: "requires-review",
+        message: `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter (product/event filter) that mime doesn't yet translate at the flow level — configure manually in the Redo flow builder`,
+      });
+    }
+  }
+
   if (resolution.klaviyoSource) {
     let window = extractFirstTimeDelayWindow(flow);
     if (!window) {
