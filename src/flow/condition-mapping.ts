@@ -77,9 +77,15 @@ function translateTimeframe(
     case "all-time":
       return { type: "all-time" };
     case "in-the-last":
+      // Klaviyo's `in-the-last` timeframe shape uses `quantity` (verified
+      // across every flow in the corpus). `tf.value` was a misread of the
+      // shape and always resolved to undefined → 1 day. SHOC bundle
+      // 2026-05-21 surfaced this — merchant set "in last 30 days" but
+      // Redo received "in last 1 day". Keep the `value` fallback for any
+      // future Klaviyo API revision that introduces it.
       return {
         type: "before-now-relative",
-        value: Number(tf.value ?? 1),
+        value: Number(tf.quantity ?? tf.value ?? 1),
         units: TIMEFRAME_UNITS[tf.unit ?? "day"] ?? "day",
       };
     default:

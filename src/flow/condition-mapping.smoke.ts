@@ -119,3 +119,30 @@ function fail(msg: string): never {
 }
 
 console.log("✓ profile-marketing-consent smoke tests pass");
+
+// ─── profile-metric timeframe.quantity (regression for SHOC bug) ─────────
+// Klaviyo's in-the-last filter uses `quantity`, not `value`. Before fix,
+// every conditional-split timeframe defaulted to 1 day.
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-metric",
+        metric_id: "m1",
+        measurement: "count",
+        measurement_filter: { type: "numeric", operator: "greater-than", value: 74 },
+        timeframe_filter: { type: "date", operator: "in-the-last", unit: "day", quantity: 30 },
+      },
+    ]),
+    { m1: { id: "m1", name: "Added to Cart", integration_name: null } } as any,
+    warnings,
+  ) as any;
+  const c = out.inlineSegment.conditions[0];
+  if (c?.type !== "customer_activity") fail(`quantity: type=${c?.type}`);
+  if (c.activityType !== "added-product-to-cart") fail(`quantity: activityType=${c.activityType}`);
+  if (c.timeframe?.value !== 30) fail(`quantity: timeframe.value=${c.timeframe?.value} (expected 30)`);
+  if (c.timeframe?.units !== "day") fail(`quantity: units=${c.timeframe?.units}`);
+  if (c.count?.type !== "greater_than_n" || c.count?.n !== 74) fail(`quantity: count=${JSON.stringify(c.count)}`);
+  console.log("✓ profile-metric in-the-last reads tf.quantity (30 days, not 1)");
+}
