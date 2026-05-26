@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: done
 branch: fix/post-purchase-subject-preview-wrong
-pr: null
+pr: https://github.com/MCHammer-12/mime/pull/89
 ---
 
 # Post Purchase Email 1: subject line + preview text wrong
@@ -54,4 +54,47 @@ Relevant files:
 
 ## Done
 
-(filled by executor on completion)
+- PR: https://github.com/MCHammer-12/mime/pull/89
+- **Root cause: regex mismatch on Liquid filters.**
+  [`substituteStringVars`](../../../src/transform.ts) (used on subject +
+  preview) walked `Object.entries(TEXT_VAR_MAP)` building a regex
+  `\{\{\s*first_name\s*\}\}` per variable. That shape doesn't match
+  `{{ first_name|default:'' }}` (Castle's actual subject line for Email 1
+  in flow UQJH6z). The body-HTML path
+  ([`mapProfileVars`](../../../src/transform.ts)) had a different,
+  filter-tolerant regex `\{\{\s*(<name>)\s*(\|[^}]*)?\}\}` that
+  preserves filters during rewriting — body text rendered fine, only
+  subject/preview shipped the raw Klaviyo token.
+- Confirmed Klaviyo source for the 3 Post Purchase emails by fetching
+  the flow definition via API:
+  - Email 1 (RUpF6R): `subject_line: "Thank you {{ first_name|default:'' }} :)"`, preview `"Welcome to the family!"`
+  - Email 2 (SqEd95): `subject_line: "Let the games begin ;)"`, preview `">>>"`
+  - Email 3 (Ugb6QN): `subject_line: "Wow, thank you again, {{ first_name|default:'' }},"`, preview `"We couldn't have done it without you"`
+- Fix shape:
+  1. Switched `substituteStringVars` customer-profile substitution to the
+     same filter-tolerant regex `mapProfileVars` uses. Var rewrites to
+     its Redo equivalent (`first_name` → `customer_first_name`); filter
+     preserved verbatim.
+  2. In [`src/flow/parser.ts`](../../../src/flow/parser.ts), ran
+     `substituteStringVars` on the action-level subject + preview
+     **before** placing them on the `placeholderTemplate`. The
+     importer prefers `ph.subject || ph.fullTemplate.subject` at
+     [`import-rpc.ts:720`](../../../src/migrate/import-rpc.ts), so
+     without substitution at the placeholder level the raw Klaviyo
+     variable was what landed in Redo.
+- Verification:
+  - End-to-end on UQJH6z: Email 1's emitted subject is now
+    `"Thank you {{ customer_first_name |default:'' }} :)"` (was the
+    literal Klaviyo source).
+  - [`src/transform.smoke.ts`](../../../src/transform.smoke.ts) pins
+    9 cases (bare / filter / different filters / dotted-path / unknown
+    var / unknown var w/ filter / org.name regression / shop.name
+    regression / mixed).
+  - `parser.smoke.ts` still passes; batch-test 416 templates: 0
+    failures, identical clean/warned counts.
+- **Not in scope (already covered elsewhere):**
+  - Body-text variables with filters (`mapProfileVars` already handles
+    them; existing behavior).
+  - Cross-merchant font issues — separate Charlie-Task-4-family.
+
+## Done
