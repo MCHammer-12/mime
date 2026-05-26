@@ -49,6 +49,16 @@ worth revisiting, that's a separate decision — discuss with Michael first.
 - `/admin/` — dev-mode shortcut to the admin UI when `ADMIN_URL_TOKEN` is
   unset. Only used locally.
 
+## Feedback workflow
+
+When a batch of feedback / fixes is ≥5 items or will run across multiple
+Claude sessions in parallel, use the planner/executor pattern. One session
+plans + writes task files under `plans/feedback/<YYYY-MM-DD>-<short-name>/`;
+other sessions execute one task each. Full workflow + templates in
+[`plans/feedback/README.md`](plans/feedback/README.md).
+
+For <5 items, do them inline — the structure is overhead.
+
 ## Code style
 
 - TypeScript + Node ESM, `tsx` for execution.

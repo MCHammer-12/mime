@@ -26,20 +26,42 @@
 
 const { useState: useStateJobs, useEffect: useEffectJobs, useRef: useRefJobs } = React;
 
+// Count items on a job that carry a non-empty feedback note. Used by the
+// "Has feedback" filter + the per-card badge. Handles both note shapes:
+// plain-string (admin-written) and {text, author, savedAt} (assistant-written
+// via the /assist surface).
+function getJobNoteCount(job) {
+  if (!job || !job.notes) return 0;
+  let n = 0;
+  for (const v of Object.values(job.notes)) {
+    if (typeof v === "string") {
+      if (v.trim()) n++;
+    } else if (v && typeof v === "object" && typeof v.text === "string") {
+      if (v.text.trim()) n++;
+    }
+  }
+  return n;
+}
+
 function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, onToggleCollapsed, onOpenLog, onOpenWarnings, onSaveNote, onExportBundle, scopeLabel }) {
   const activeCount = jobs.filter(j => j.status === "running").length;
   const failedCount = jobs.reduce((s, j) => s + j.items.filter(i => i.state === "failed").length, 0);
   const waitingCount = jobs.filter(j => j.status === "waiting_input").length;
+  const jobsWithFeedback = jobs.filter(j => getJobNoteCount(j) > 0);
 
   // Local search — filters the list to jobs whose store name contains the
   // query (case-insensitive). On the dashboard this drops a 30-job scroll
   // down to just the relevant store; on a per-store screen the panel is
   // already scoped and the search is mostly a no-op but doesn't hurt.
   const [query, setQuery] = useStateJobs("");
+  // Feedback filter — narrows the list to jobs with at least one assistant
+  // or admin note attached. Lets the operator jump from "the assistants left
+  // 3 things to look at" → exporting just those bundles without scrolling.
+  const [feedbackOnly, setFeedbackOnly] = useStateJobs(false);
   const q = query.trim().toLowerCase();
-  const visibleJobs = q
-    ? jobs.filter(j => (j.storeName || "").toLowerCase().includes(q))
-    : jobs;
+  let visibleJobs = jobs;
+  if (q) visibleJobs = visibleJobs.filter(j => (j.storeName || "").toLowerCase().includes(q));
+  if (feedbackOnly) visibleJobs = visibleJobs.filter(j => getJobNoteCount(j) > 0);
 
   if (collapsed) {
     return (
@@ -89,7 +111,7 @@ function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, on
       </div>
 
       {jobs.length > 0 && (
-        <div className="px-3 py-2 border-b border-[#21262d] bg-[#0d1117]">
+        <div className="px-3 py-2 border-b border-[#21262d] bg-[#0d1117] space-y-1.5">
           <div className="relative">
             <input
               type="text"
@@ -106,6 +128,27 @@ function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, on
               >×</button>
             )}
           </div>
+          <button
+            onClick={() => setFeedbackOnly(v => !v)}
+            disabled={jobsWithFeedback.length === 0}
+            className={
+              "w-full flex items-center justify-between px-2 py-1 rounded-[3px] text-[11px] border transition-colors " +
+              (feedbackOnly
+                ? "border-[#58a6ff] bg-[#58a6ff15] text-[#58a6ff]"
+                : jobsWithFeedback.length === 0
+                ? "border-[#21262d] text-[#484f58] cursor-not-allowed"
+                : "border-[#30363d] text-[#8b949e] hover:border-[#58a6ff] hover:text-[#e6edf3]")
+            }
+            title={jobsWithFeedback.length === 0 ? "No jobs have feedback notes" : "Show only jobs with assistant or admin feedback"}
+          >
+            <span className="flex items-center gap-1.5">
+              <span className={feedbackOnly ? "w-1.5 h-1.5 rounded-full bg-[#58a6ff]" : "w-1.5 h-1.5 rounded-full border border-[#30363d]"}/>
+              Has feedback
+            </span>
+            <span className="tabular-nums">
+              {jobsWithFeedback.length}
+            </span>
+          </button>
         </div>
       )}
 
@@ -119,7 +162,11 @@ function JobsPanel({ jobs, onRetryItem, onDismissJob, onCancelJob, collapsed, on
       ) : visibleJobs.length === 0 ? (
         <div className="flex-1 flex items-center justify-center px-8 text-center">
           <div className="text-[11px] text-[#484f58] leading-relaxed">
-            No jobs match “{query}”.
+            {feedbackOnly && !q
+              ? "No jobs with feedback right now."
+              : feedbackOnly
+              ? <>No jobs with feedback match “{query}”.</>
+              : <>No jobs match “{query}”.</>}
           </div>
         </div>
       ) : (
@@ -150,6 +197,7 @@ function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpe
   const flaggedCount = job.items.filter(i => (i.itemWarnings || []).length > 0).length;
   const firstFlaggedId = (job.items.find(i => (i.itemWarnings || []).length > 0) || {}).id;
   const jobWarningCount = (job.warnings || []).length;
+  const feedbackCount = getJobNoteCount(job);
   // Total surfaces of "needs your attention" — item warnings + job-level
   // warnings. Used to gate the Review banner so users can always reach the
   // warnings panel when *any* warning has been emitted, not just when an
@@ -183,6 +231,14 @@ function JobCard({ job, onRetryItem, onDismissJob, onCancelJob, onOpenLog, onOpe
           <div className="flex items-baseline gap-1.5">
             <span className="font-serif text-[15px] leading-none text-[#e6edf3] tabular-nums">{job.storeName || "Job"}</span>
             <span className="text-[11px] text-[#6e7681] tabular-nums">· Job {job.shortId}</span>
+            {feedbackCount > 0 && (
+              <span
+                className="text-[10px] text-[#58a6ff] bg-[#58a6ff15] border border-[#58a6ff40] rounded-[3px] px-1 py-0 leading-[1.4] tabular-nums"
+                title={`${feedbackCount} item${feedbackCount === 1 ? "" : "s"} with feedback notes`}
+              >
+                {feedbackCount} noted
+              </span>
+            )}
           </div>
           <span className="text-[10px] text-[#6e7681] truncate mt-0.5">
             {job.templateCount + job.flowCount} items
@@ -409,6 +465,17 @@ function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
 
   const selectAll = () => setSelected(new Set(items.map(i => i.id)));
   const clearAll = () => setSelected(new Set());
+  // Select every item that currently has a non-empty note. Lets the operator
+  // turn "the assistants flagged 3 things here" into one click + Export zip.
+  const selectNoted = () => {
+    const noted = new Set(
+      items
+        .map(i => i.id)
+        .filter(id => (localNotes[id] || "").trim().length > 0),
+    );
+    setSelected(noted);
+  };
+  const notedCount = items.filter(i => (localNotes[i.id] || "").trim().length > 0).length;
 
   const updateNote = (itemId, text) => {
     setLocalNotes(n => ({ ...n, [itemId]: text }));
@@ -459,10 +526,22 @@ function TroubleshootPanel({ job, onSaveNote, onExportBundle }) {
       </button>
       {open && (
         <div className="space-y-2 pb-2">
-          <div className="flex items-center gap-2 text-[10px] text-[#8b949e]">
+          <div className="flex items-center gap-2 text-[10px] text-[#8b949e] flex-wrap">
             <button onClick={selectAll} className="hover:text-[#e6edf3]">select all</button>
             <span className="text-[#30363d]">·</span>
             <button onClick={clearAll} className="hover:text-[#e6edf3]">clear</button>
+            {notedCount > 0 && (
+              <>
+                <span className="text-[#30363d]">·</span>
+                <button
+                  onClick={selectNoted}
+                  className="text-[#58a6ff] hover:text-[#79c0ff]"
+                  title="Select every item with a feedback note"
+                >
+                  select noted ({notedCount})
+                </button>
+              </>
+            )}
             <span className="ml-auto tabular-nums">
               {selected.size} selected
             </span>
