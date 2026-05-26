@@ -1,7 +1,7 @@
 ---
-status: blocked
-branch: fix/browse-abandonment-dynamic-product
-pr: null
+status: partial
+branch: fix/browse-abandonment-card-fallback
+pr: https://github.com/MCHammer-12/mime/pull/82
 ---
 
 # Browse Abandonment dynamic product variable not mapped — "Product image not found"

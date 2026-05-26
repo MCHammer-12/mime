@@ -14,7 +14,7 @@ Items: 6 templates + 2 flows, all flagged with notes
 | 4 | done | [First text wrong font-size + missing font-family](first-text-font-styling.md) | `fix/first-text-font-styling` | [#76](https://github.com/MCHammer-12/mime/pull/76) |
 | 5 | done | [Footer buttons joined without spacing](footer-button-spacing.md) | `fix/footer-button-spacing` | [#80](https://github.com/MCHammer-12/mime/pull/80) |
 | 6 | blocked | [Image click-through links missing](image-clickthrough-links.md) | `fix/image-clickthrough-links` | — |
-| 7 | blocked | [Browse abandonment dynamic product variable not mapped](browse-abandonment-dynamic-product.md) | `fix/browse-abandonment-dynamic-product` | — |
+| 7 | partial | [Browse abandonment dynamic product variable not mapped](browse-abandonment-dynamic-product.md) | `fix/browse-abandonment-card-fallback` | [#82](https://github.com/MCHammer-12/mime/pull/82) |
 | 8 | blocked | [Abandoned Cart flow — profile filters not migrated](flow-profile-filters.md) | `fix/flow-profile-filters` | — |
 | 9 | blocked | [Browse Abandonment flow — product filter + re-entry criteria not migrated](flow-product-filter-reentry.md) | `fix/flow-product-filter-reentry` | — |
 
