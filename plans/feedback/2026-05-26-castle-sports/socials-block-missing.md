@@ -1,7 +1,7 @@
 ---
-status: unclaimed
-branch: fix/socials-block-dropped
-pr: null
+status: done
+branch: fix/socials-from-icon-src
+pr: https://github.com/MCHammer-12/mime/pull/90
 ---
 
 # Funnest PE Games email — socials block dropped
@@ -47,4 +47,35 @@ Relevant files:
 
 ## Done
 
-(filled by executor on completion)
+- PR: https://github.com/MCHammer-12/mime/pull/90
+- **Confirmed Case A (kl-socials variant the parser couldn't fully
+  handle).** Castle's Wnzrvr socials row uses 3 stock Klaviyo icons
+  from `…/assets/email/buttons/subtle/{twitter,facebook,instagram}_96.png`,
+  laid out as bare `<img>` tags with **no `<a href>` wrappers**. The
+  dispatcher correctly routed the wrapper to `parseSocialsBlock` (icon
+  src matched the `/assets/email/buttons/` heuristic), but the parser
+  then iterated `<a>` tags looking for known social-network URLs, found
+  none (no `<a>` at all), and returned null. The wrapper was silently
+  dropped.
+- Fix shape: added a fallback path in
+  [`parseSocialsBlock`](../../../src/parser/blocks/socials.ts). When the
+  anchor loop yields zero socialLinks, walk `<img>` tags and infer
+  platform from the stock-icon URL filename
+  (`/buttons/<variant>/<platform>_<size>.png`). Emit a SocialItem per
+  detected platform with `url: ""`. A `ctx.warnings` line surfaces the
+  fallback so the operator knows URLs need filling.
+- Verification:
+  - Castle Wnzrvr now emits 3 SocialItems (twitter / facebook /
+    instagram) with empty URLs. Was dropped silently before.
+  - batch-test on 416-template corpus: 0 failures. 4 historical
+    corpus templates (RexyU6 / RQiCcF / SX2Gn7 / QPETZp — same Klaviyo
+    template family judging by name) had previously-silent missing
+    socials; they now correctly emit placeholder blocks with the
+    fallback warning. Clean/warned shifts -6/+6 reflecting that.
+  - Existing socials parsing (with anchors) unchanged — the fallback
+    only fires when the anchor loop produced zero links.
+- **Not in scope (deferred):**
+  - **Filling in URLs.** The fallback emits empty URLs. If a follow-up
+    pattern is "merchant socials usually point at $brand.com/$platform",
+    that's a per-merchant config that doesn't belong in the parser. The
+    merchant fills them in via the Redo editor.
