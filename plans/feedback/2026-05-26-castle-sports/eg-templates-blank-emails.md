@@ -1,8 +1,11 @@
 ---
-status: unclaimed
+status: blocked
 branch: fix/eg-templates-blank-emails
 pr: null
 ---
+
+**Status note (2026-05-26):** Michael chose Option C — fix CODE parser fidelity first, then ungate. This task is blocked pending a separate "CODE parser fidelity" planning batch covering image widths, column gaps, and per-span text styling (the open items in memory `project_code_template_parser`). Castle Sports' 3 abandonment flows remain unusable until that batch ships.
+
 
 # `[EG]` templates produce blank emails across 3 flows
 
