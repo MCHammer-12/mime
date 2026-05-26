@@ -1,7 +1,7 @@
 ---
-status: claimed
+status: done
 branch: fix/first-text-font-styling
-pr: null
+pr: https://github.com/MCHammer-12/mime/pull/76
 ---
 
 # First text block has wrong font-size and missing font-family
@@ -57,4 +57,48 @@ Relevant files:
 
 ## Done
 
-(filled by executor on completion)
+- PR: https://github.com/MCHammer-12/mime/pull/76
+- Confirmed Scenario B (real font issue, not solely a duplication artifact).
+  After Task 1's fix, the first-text fontSize is still wrong on all 6
+  templates. Investigated each template's HTML structure:
+  - **Welcome 1/2/3** (RYhKut, WeieJr, SxWYeY): `<div font-size:14px>` wrapper
+    with `<span style="font-size: 32px">` inside. Parser was reading the 14
+    from the outer; the 32 is what the merchant authored.
+  - **AC/Browse** (WgXbn6, U3cE5u, VRDxJu): `<div font-size:14px>` wrapper
+    with `<h2>` inside but **no inline font-size on the span inside the h2**.
+    No inline value to hoist — the merchant's intent is the h2 browser
+    default size.
+- Fix shape:
+  - Added `extractDominantInlineFontSize` in
+    [`src/parser/blocks/text.ts`](../../../src/parser/blocks/text.ts) that
+    scans inline `font-size` declarations on `<span>` / `<p>` / `<hN>` tags.
+  - Hoists the inline value **only when all inline sizes agree on one
+    value** (single distinct). The unanimity guard is the safety net: a
+    block mixing heading + body sizes has no single intent to promote, so
+    it falls back to the outer div size — keeps body text from silently
+    growing into the heading's size.
+  - Mirrors the existing inline-font-FAMILY hoist at
+    [text.ts:496](../../../src/parser/blocks/text.ts#L496).
+- Verification:
+  - Charlie RYhKut first text: `fontSize: 14 → 32` (matches merchant intent)
+  - WeieJr / SxWYeY: will resolve to 32 after Task 1 (#75) lands — their
+    mobile-only variants currently show up first in the section list with
+    their mobile-optimized 19/20px sizes
+  - batch-test on 416 templates: 0 failures, same clean/warned counts
+  - Sample diffs (Quikcamo YjRTWe / X57xAh / H76ZS6): all fontSize changes
+    are from a Klaviyo-reset value to a single-distinct-inline value the
+    merchant authored. No body sizes grown into headings.
+- **Not in scope (deferred):**
+  - **`<h2>` wrapping without inline span font-size** (WgXbn6 / U3cE5u /
+    VRDxJu first text). Adding heading-default fallback (h1=32, h2=24,
+    h3=19) would address these but changes behavior for ~10% of the
+    historical corpus (31 + 10 templates in test-account + merchant-2).
+    Unclear how Redo's Quill renders `<h2>` inside a text block —
+    if it honors heading tags natively, the merchant might already see
+    big text and the complaint may be about font-family instead. Park
+    as separate task pending confirmation of Quill's behavior.
+  - **Font-family "not selected" report** — parser emits
+    `fontFamily: 'Aleo SemiBold'` which matches Redo's brand-kit weight
+    convention. If Charlie 1 Horse's brand kit doesn't have the SemiBold
+    weight registered, that's a font-plan / import-side bug separate
+    from this parser fix.
