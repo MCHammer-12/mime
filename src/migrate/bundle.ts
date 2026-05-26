@@ -38,6 +38,13 @@ interface ExportedEventPayload {
   substitutions?: string[];
   fontPlanEntries?: unknown[];
   outputPath?: string;
+  // Klaviyo source snapshot. Populated since 2026-05-26. Replit deploys have
+  // a stateless filesystem; the snapshot lets the bundle endpoint serve
+  // Klaviyo source even when migrations/<slug>/templates/ is empty by the
+  // time the operator opens it. Older job events won't have these — fall
+  // back to disk when missing.
+  klaviyoHtml?: string;
+  klaviyoMeta?: unknown;
 }
 
 interface FlowImportedEventPayload {
@@ -49,6 +56,9 @@ interface FlowImportedEventPayload {
   warningCount?: number;
   warningList?: unknown[];
   parsedAutomation?: unknown;
+  // Same Replit-statelessness fix as ExportedEventPayload.klaviyoHtml.
+  // Populated since 2026-05-26.
+  klaviyoFlow?: unknown;
 }
 
 interface FlowFailedEventPayload {
@@ -216,6 +226,20 @@ function addTemplateToBundle(
   }
 
   const exportedEvent = lastExportedFor(job, templateId);
+  // Event-payload fallback for Replit (stateless FS). If disk had no source
+  // but the `exported` event captured it, write it from the payload.
+  if (exportedEvent) {
+    if (candidates.sourceHtml.length === 0 && exportedEvent.klaviyoHtml) {
+      archive.append(exportedEvent.klaviyoHtml, {
+        name: `${folder}/klaviyo-source.html`,
+      });
+    }
+    if (candidates.sourceJson.length === 0 && exportedEvent.klaviyoMeta) {
+      archive.append(JSON.stringify(exportedEvent.klaviyoMeta, null, 2), {
+        name: `${folder}/klaviyo-meta.json`,
+      });
+    }
+  }
   if (exportedEvent) {
     const parseResult = {
       sectionCount: exportedEvent.sectionCount ?? null,
@@ -257,6 +281,14 @@ function addFlowToBundle(
   // and the per-flow warnings.
   const flowEvent = lastFlowImportedFor(job, flowId);
   if (flowEvent) {
+    // Event-payload fallback for Replit (stateless FS). If disk had no flow
+    // JSON but the `flow_imported` event captured it, write it from the
+    // payload. Mirrors the flow_failed fallback below.
+    if (candidates.sourceJson.length === 0 && flowEvent.klaviyoFlow) {
+      archive.append(JSON.stringify(flowEvent.klaviyoFlow, null, 2), {
+        name: `${folder}/klaviyo-flow.json`,
+      });
+    }
     const parseResult = {
       createdTemplateCount: flowEvent.createdTemplateCount ?? null,
       blankTemplateCount: flowEvent.blankTemplateCount ?? null,

@@ -945,6 +945,12 @@ async function runImport(
           skippedList: result.skippedBlocks,
           substitutions: result.substitutions,
           outputPath: result.outPath,
+          // Snapshot Klaviyo source so the troubleshoot bundle can serve it
+          // later even when migrations/<slug>/templates/ is empty (Replit's
+          // filesystem is stateless across process restarts). bundle.ts reads
+          // these as a fallback when the on-disk files are missing.
+          klaviyoHtml: html,
+          klaviyoMeta: full.data,
         });
       } catch (e: any) {
         const msg = e.message ?? String(e);
@@ -1501,6 +1507,12 @@ async function runImport(
               // tree so we can re-construct a per-flow report without re-running.
               warningList: parsed.warnings,
               parsedAutomation: parsed.automation,
+              // Snapshot Klaviyo source. Mirrors flow_failed payload — lets the
+              // troubleshoot bundle include klaviyo-flow.json for successful
+              // imports too (Replit's filesystem is stateless across restarts,
+              // so the migrations/<slug>/flows/ dir is empty by the time the
+              // operator opens the bundle endpoint).
+              klaviyoFlow: flowDetail,
             });
           } catch (e: any) {
             flowImportFail++;
