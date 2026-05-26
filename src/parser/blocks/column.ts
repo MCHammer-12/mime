@@ -187,6 +187,19 @@ export function parseColumnRow(
 
   const rowCount = Math.max(1, ...nestablePerColumn.map((a) => a.length));
 
+  // When every column slot in every zipper row is a Button block, treat
+  // the row as a "button row" and add a small inter-column gap. Klaviyo's
+  // footer-style nav (e.g. CONTACT US / SHIPPING & RETURNS / STORE
+  // LOCATOR) authors buttons with the same background color in adjacent
+  // columns at gap:0, producing a single visually-joined bar in the
+  // rendered email. A small gap restores a per-button silhouette without
+  // affecting any non-button column layout in the corpus (verified 0 of
+  // 370 existing column blocks are all-button).
+  const allColsAreButtons = nestablePerColumn.every((arr) =>
+    arr.length > 0 && arr.every((b) => b.type === EmailBlockType.BUTTON),
+  );
+  const columnGap = allColsAreButtons ? 8 : 0;
+
   const sections: ColumnBlock[] = [];
   for (let r = 0; r < rowCount; r++) {
     const isFirstRow = r === 0;
@@ -236,7 +249,7 @@ export function parseColumnRow(
       sectionColor,
       columns: cols,
       columnCount: $columns.length,
-      gap: 0,
+      gap: columnGap,
       stackOnMobile,
       alignment,
       columnWidths: widths,
