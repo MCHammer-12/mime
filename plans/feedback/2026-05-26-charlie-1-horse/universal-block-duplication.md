@@ -1,7 +1,7 @@
 ---
-status: claimed
+status: done
 branch: fix/universal-block-duplication
-pr: null
+pr: https://github.com/MCHammer-12/mime/pull/75
 ---
 
 # Universal block duplication across all 6 Charlie 1 Horse templates
@@ -59,4 +59,38 @@ The first-text font-size + missing font-family complaint (Task 4) is suspicious 
 
 ## Done
 
-(filled by executor on completion)
+- PR: https://github.com/MCHammer-12/mime/pull/75
+- Root cause: Charlie 1 Horse's Klaviyo templates ship paired
+  `desktop-only` + `mobile-only` `component-wrapper` divs in every row.
+  The mobile variant carries inline `display:none`; a media query flips
+  it at render time. The parser walked both, so each block was emitted
+  twice. Not a "newer Klaviyo export format" — same MJML pattern that
+  exists in two test-corpus templates already (Quikcamo `YjRTWe`,
+  `X57xAh`), which just happened to be silently self-skipping there
+  because their hidden social wrappers used custom URLs that didn't
+  match the social-href regex in [`parseSocialsBlock`](../../../src/parser/blocks/socials.ts).
+- Fix shape:
+  1. In [`parseColumnContent`](../../../src/parser/index.ts), skip any
+     `component-wrapper` whose inline style contains `display:none`.
+  2. In [`parseColumnRow`](../../../src/parser/blocks/column.ts), if
+     every column came back empty, return `[]` instead of emitting a
+     `ColumnBlock` with `null` slots — handles rows where ALL columns
+     were the mobile-only variant (e.g. VRDxJu's footer-link row 6).
+- Verification:
+  - All 6 Charlie templates re-parsed: VRDxJu 24→12, RYhKut 35→19,
+    WeieJr →16, SxWYeY →17, WgXbn6 →14, U3cE5u →14. No duplicate
+    blocks in the smoke output.
+  - `npx tsx src/parser/batch-test.ts` on the 416-template historical
+    corpus: 0 failures, identical clean/warned counts (75 / 341).
+  - Two test-corpus templates with `display:none` wrappers parsed
+    byte-identical to pre-fix output (their hidden wrappers were
+    already self-skipping for unrelated reasons — proven by stash/
+    restore diff).
+- **Not in scope (deferred):**
+  - The first-text font-size + missing font-family suspicion (Task 4)
+    did NOT resolve with this fix — Task 4's first-text is now
+    unduplicated but still shows the original styling issue. So
+    Task 4 is a real, separate bug and should be picked up next.
+  - Charlie 1 Horse re-import via migrate server + fresh troubleshoot
+    bundle capture — left as the remaining unchecked item on the PR
+    test plan; needs a deploy + merchant-side trigger.

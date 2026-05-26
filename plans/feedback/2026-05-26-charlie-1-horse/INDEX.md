@@ -8,7 +8,7 @@ Items: 6 templates + 2 flows, all flagged with notes
 
 | # | Status | Task | Branch | PR |
 |---|--------|------|--------|----|
-| 1 | claimed | [Universal block duplication across all 6 templates](universal-block-duplication.md) | `fix/universal-block-duplication` | — |
+| 1 | done | [Universal block duplication across all 6 templates](universal-block-duplication.md) | `fix/universal-block-duplication` | [#75](https://github.com/MCHammer-12/mime/pull/75) |
 | 2 | unclaimed | [AC product block static instead of dynamic cart-items](ac-product-block-dynamic-cart.md) | `fix/ac-product-block-dynamic-cart` | — |
 | 3 | unclaimed | [Inline anchor in text retains Klaviyo checkout URL](inline-anchor-url-rewrite.md) | `fix/inline-anchor-url-rewrite` | — |
 | 4 | unclaimed | [First text wrong font-size + missing font-family](first-text-font-styling.md) | `fix/first-text-font-styling` | — |
