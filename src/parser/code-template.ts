@@ -57,21 +57,25 @@ type $El = cheerio.Cheerio<El>;
 
 // ─── Entry point ─────────────────────────────────────────────────
 
+/** Strip trailing slashes; reject obviously-empty / non-http URLs. */
+function normalizeStoreUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = String(raw).trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(trimmed)) return null;
+  return trimmed;
+}
+
 export function parseCodeTemplateHtml(
   html: string,
   opts: { storeUrl?: string | null } = {},
 ): ParseResult {
   const $ = cheerio.load(html);
-  // Strip trailing slashes; reject non-http so the url-mapping cart-link
-  // fallback only fires on a real store URL (mirrors index.ts).
-  const rawStore = (opts.storeUrl ?? "").trim().replace(/\/+$/, "");
-  const storeUrl = /^https?:\/\//i.test(rawStore) ? rawStore : null;
   const ctx: ParseContext = {
     warnings: [],
     unsupportedFeatures: [],
     reviewItems: [],
     skippedBlocks: [],
-    storeUrl,
+    storeUrl: normalizeStoreUrl(opts.storeUrl),
   };
 
   const bodyStyle = parseInlineStyles($("body").attr("style"));
@@ -82,7 +86,7 @@ export function parseCodeTemplateHtml(
     ctx.warnings.push(
       "CODE template: could not locate 600px container; deep-walking body",
     );
-    const fallback = deepWalkContent($, $("body").first(), ctx);
+    const fallback = deepWalkContent($, $("body").first(), ctx, true);
     return {
       sections: fallback,
       ...ctx,
@@ -134,24 +138,37 @@ export function parseCodeTemplateHtml(
 
 type ContainerKind = "table" | "div";
 
+/**
+ * Find the email's 600px container. Preference order:
+ *   1. Zaymo / Stripo root: `<div id="bodyTable">` or `<div class="root-container">`.
+ *      Picking this first deduplicates Zaymo-built templates that emit two
+ *      parallel content trees (one inside #bodyTable, one bare in body).
+ *   2. `<table>` constrained to ~600px (`max-width:600`, `width:600px`, or
+ *      `width="600"` attr).
+ *   3. `<div>` constrained to ~600px (`max-width:600px` inline).
+ *
+ * Outlook-only candidates (class `kl-section-outlook`) are skipped. They're
+ * normally inside `<!--[if mso]>` blocks and hence stripped as comments by
+ * cheerio, but the filter guards the cases where MSO comment parsing diverges.
+ */
 function findContainer($: $): { kind: ContainerKind; $el: $El } | null {
-  // Prefer the inner table that's constrained to email width.
-  // ─────────────────────────────────────────────────────────────────
-  // KEEP THIS FIRST and unchanged. ~270 of Otishi's CODE templates find
-  // their container here; reordering or broadening the table match would
-  // shift their section output. The Zaymo / inline-width fallbacks below
-  // only fire for templates that currently find NO table and deep-walk
-  // the whole body (the double-emit case — see #1/#2 in the CODE-fidelity
-  // plan), so they're additive, not a behavior change for table templates.
+  // 1. Zaymo / Stripo root marker — single canonical email body.
+  const root = $("div#bodyTable, div.root-container").first();
+  if (root.length > 0) {
+    return { kind: "div", $el: root };
+  }
+
+  // 2. Inner table constrained to email width.
   const tableCandidates = $("table")
     .toArray()
     .map((el) => $(el))
+    .filter(($t) => !isOutlookOnly($t))
     .filter(($t) => {
       const style = parseInlineStyles($t.attr("style"));
       const widthAttr = ($t.attr("width") || "").trim();
       return (
-        /max-width\s*:\s*600/.test(style["max-width"] || "") ||
-        /max-width\s*:\s*600/.test($t.attr("style") || "") ||
+        is600(style["max-width"]) ||
+        is600(style["width"]) ||
         widthAttr === "600"
       );
     });
@@ -159,36 +176,32 @@ function findContainer($: $): { kind: ContainerKind; $el: $El } | null {
     return { kind: "table", $el: tableCandidates[0]! };
   }
 
-  // Zaymo "root-container" convention. Zaymo (app.zaymo.com) renders a
-  // Klaviyo email as TWO parallel copies directly under <body> — one in a
-  // generic `<div style="display:table">` and one in `<div id="bodyTable"
-  // class="root-container">`. Without a recognized container we'd deep-walk
-  // the body and emit BOTH copies (Castle Sports RYCBtZ: 33 sections, every
-  // block twice). Scoping to the single root-container div deduplicates.
-  // Prefer the id'd outer wrapper, else the first .root-container.
-  const $byId = $("div#bodyTable").first();
-  if ($byId.length > 0) return { kind: "div", $el: $byId };
-  const $rootContainer = $("div.root-container").first();
-  if ($rootContainer.length > 0) return { kind: "div", $el: $rootContainer };
-
-  // Fallback for div-wrapped templates (Hypermatic / Stripo / MSO-heavy).
-  // Match both `max-width:600` and a bare inline `width:600px` — Zaymo and
-  // some builders constrain the content div with the latter.
+  // 3. Div-wrapped templates (Hypermatic / Stripo / MSO-heavy).
   const divCandidates = $("div")
     .toArray()
     .map((el) => $(el))
+    .filter(($d) => !isOutlookOnly($d))
     .filter(($d) => {
       const style = parseInlineStyles($d.attr("style"));
-      return (
-        /max-width\s*:\s*600/.test(style["max-width"] || "") ||
-        /(?:^|[^-])width\s*:\s*600px/.test($d.attr("style") || "")
-      );
+      return is600(style["max-width"]) || is600(style["width"]);
     });
   if (divCandidates.length > 0) {
     return { kind: "div", $el: divCandidates[0]! };
   }
 
   return null;
+}
+
+/** True if the CSS value starts with "600" (e.g. "600px", "600"). */
+function is600(value: string | undefined): boolean {
+  if (!value) return false;
+  return /^\s*600(?:\s|px|;|$)/i.test(value);
+}
+
+/** True if this element is part of the Outlook-only render branch. */
+function isOutlookOnly($el: $El): boolean {
+  const cls = ($el.attr("class") || "").toLowerCase();
+  return cls.includes("kl-section-outlook");
 }
 
 function tryNestedContainer($: $, $td: $El): $El | null {
@@ -294,6 +307,7 @@ function parseSectionTd(
         sectionPadding,
         sectionColor,
         tdAlign,
+        ctx,
       );
       if (img) out.push(img);
       continue;
@@ -314,6 +328,7 @@ function parseSectionTd(
           sectionPadding,
           sectionColor,
           tdAlign,
+          ctx,
         );
         if (img) out.push(img);
         continue;
@@ -527,6 +542,7 @@ function buildImageBlock(
   sectionPadding: { top: number; right: number; bottom: number; left: number },
   sectionColor: string,
   tdAlign: string,
+  ctx: ParseContext,
 ): ImageBlock | null {
   const src = $img.attr("src") || "";
   if (!src) return null;
@@ -534,18 +550,36 @@ function buildImageBlock(
   const widthAttr = $img.attr("width");
   const heightAttr = $img.attr("height");
   const style = parseInlineStyles($img.attr("style"));
-  const maxWidth = parsePx(style["max-width"]);
   const widthPx = parsePx(style["width"]) ?? parsePx(widthAttr ?? "");
   const heightPx = parsePx(style["height"]) ?? parsePx(heightAttr ?? "");
   const aspectRatio =
     widthPx && heightPx && heightPx > 0 ? widthPx / heightPx : undefined;
 
-  // Alignment: tdAlign wins if set, else margin auto means center
-  let alignment: Alignment = Alignment.CENTER;
-  if (tdAlign === "left") alignment = Alignment.LEFT;
-  else if (tdAlign === "right") alignment = Alignment.RIGHT;
+  // Shrink the image to its declared width by widening sectionPadding —
+  // Redo's renderer sizes <img width="..."> as
+  // (EMAIL_MAX_WIDTH_PX - sectionPadding.left - sectionPadding.right).
+  // Honor td/img align for asymmetric padding (left-align dumps the slack
+  // on the right, etc.).
+  applyImageWidth(sectionPadding, widthPx, tdAlign);
 
-  const block: ImageBlock = {
+  // No width information at all → renders full-width (600px). Common in
+  // hand-coded CODE templates where the merchant assumed defaults; flag
+  // for review so they can decide per-image.
+  if (!widthPx) {
+    ctx.reviewItems.push({
+      blockType: EmailBlockType.IMAGE,
+      variableName: "image-width-missing",
+      context: src,
+    });
+  }
+
+  // Map Klaviyo URL variables (e.g. {{ event.URL }} → <storeUrl>/cart)
+  // and surface unsupported / review-needed variables on ctx.
+  const mapped = clickUrl
+    ? classifyKlaviyoUrl(clickUrl, EmailBlockType.IMAGE, ctx)
+    : null;
+
+  return {
     type: EmailBlockType.IMAGE,
     blockId: nextId(),
     sectionPadding,
@@ -553,20 +587,45 @@ function buildImageBlock(
     imageUrl: src,
     showCaption: false,
     altText: alt || undefined,
-    clickthroughUrl: clickUrl || undefined,
+    clickthroughUrl: mapped?.buttonLink ?? clickUrl ?? undefined,
     aspectRatio,
     padding: { top: 0, right: 0, bottom: 0, left: 0 },
-    horizontalPadding: Size.MEDIUM,
+    horizontalPadding: widthPx ? Size.CUSTOM : Size.MEDIUM,
     verticalPadding: Size.MEDIUM,
     // imageSourceType is optional in Redo's email-template schema. Their
     // enum is { upload, product } only — sending "url" is a 400 Input
     // validation error. Omitting the field means "URL-sourced image"
     // (the default); upload/product are explicit lift cases.
   };
-  // silence unused alignment var — alignment is handled by sectionPadding
-  void alignment;
-  void maxWidth;
-  return block;
+}
+
+/**
+ * Mutate sectionPadding to shrink/align the image to `widthPx`. Available
+ * width is EMAIL_MAX_WIDTH_PX (600) minus existing horizontal section pad.
+ * - tdAlign="left": dumps slack to the right
+ * - tdAlign="right": dumps slack to the left
+ * - else: centers (split slack evenly, right gets the +1 on odd)
+ */
+function applyImageWidth(
+  sectionPadding: { top: number; right: number; bottom: number; left: number },
+  widthPx: number | null | undefined,
+  tdAlign: string,
+): void {
+  if (!widthPx) return;
+  const EMAIL_MAX_WIDTH_PX = 600;
+  const available =
+    EMAIL_MAX_WIDTH_PX - sectionPadding.left - sectionPadding.right;
+  if (widthPx >= available) return;
+  const slack = available - widthPx;
+  if (tdAlign === "left") {
+    sectionPadding.right += slack;
+  } else if (tdAlign === "right") {
+    sectionPadding.left += slack;
+  } else {
+    const half = Math.floor(slack / 2);
+    sectionPadding.left += half;
+    sectionPadding.right += slack - half;
+  }
 }
 
 // ─── Builders: button ────────────────────────────────────────────
@@ -611,10 +670,11 @@ function buildButtonFromTable(
 
   const buttonText = $a.text().trim();
   const href = $a.attr("href") || "";
-  // Rewrite Klaviyo checkout-URL variables ({{ event.extra.checkout_url }}
-  // etc.) to <storeUrl>/cart, same as the block-editor button parser. With
-  // no storeUrl the variable stays and a reviewItem is pushed for review.
-  const mapped = href ? classifyKlaviyoUrl(href, EmailBlockType.BUTTON, ctx) : null;
+  // Substitute Klaviyo URL variables (e.g. {{ event.extra.checkout_url }}
+  // → <storeUrl>/cart) and surface review-worthy variables on ctx.
+  const mapped = href
+    ? classifyKlaviyoUrl(href, EmailBlockType.BUTTON, ctx)
+    : null;
 
   return {
     type: EmailBlockType.BUTTON,
@@ -849,11 +909,17 @@ function parseTableAsBlocks(
  *   - a "line-shaped" <table> or <hr>→ LINE block
  *   - a chunk of text-like elements  → TEXT block (accumulated)
  * Once a block is emitted, we skip further descent into that subtree.
+ *
+ * `isBodyRoot` = true when this is the fallback path that walks <body>
+ * directly. In that case, filter out body-level noise (malformed <title>/
+ * <meta>, Liquid-only preheader <p>) that wouldn't appear inside a proper
+ * email container.
  */
 function deepWalkContent(
   $: $,
   $root: $El,
   ctx: ParseContext,
+  isBodyRoot: boolean = false,
 ): Section[] {
   const out: Section[] = [];
   let textFrags: El[] = [];
@@ -875,11 +941,13 @@ function deepWalkContent(
   const seen = new Set<El>();
   const isVisualSkip = ($el: $El) => {
     // Skip zero-height / display:none wrappers (preheader text etc.)
-    const style = parseInlineStyles($el.attr("style"));
-    const dispNone = /display\s*:\s*none/i.test($el.attr("style") || "");
+    const rawStyle = $el.attr("style") || "";
+    const style = parseInlineStyles(rawStyle);
+    const dispNone = /display\s*:\s*none/i.test(rawStyle);
+    const msoHide = /mso-hide\s*:\s*all/i.test(rawStyle);
     const maxH0 = (style["max-height"] || "").startsWith("0");
     const fontOne = (style["font-size"] || "").startsWith("1px");
-    return dispNone || maxH0 || fontOne;
+    return dispNone || msoHide || maxH0 || fontOne;
   };
 
   const visit = (el: El) => {
@@ -906,6 +974,7 @@ function deepWalkContent(
         { top: 0, right: 0, bottom: 0, left: 0 },
         "#ffffff",
         "",
+        ctx,
       );
       if (img) out.push(img);
       seen.add(el);
@@ -925,6 +994,7 @@ function deepWalkContent(
           { top: 0, right: 0, bottom: 0, left: 0 },
           "#ffffff",
           "",
+          ctx,
         );
         if (img) out.push(img);
         seen.add(el);
@@ -1016,10 +1086,33 @@ function deepWalkContent(
   };
 
   const rootChildren = $root.contents().toArray();
-  for (const c of rootChildren) visit(c);
+  for (const c of rootChildren) {
+    if (isBodyRoot && isBodyNoiseChild($, c)) continue;
+    visit(c);
+  }
   flushText();
 
   return out;
+}
+
+/** Body-level children that should never produce sections in the fallback
+ *  deep-walk path: head-leaks (<title>/<meta>/<link>), and Klaviyo preheader
+ *  <p>s whose content is purely Liquid/whitespace. */
+function isBodyNoiseChild($: $, el: El): boolean {
+  if (el.type !== "tag") return false;
+  const tag = el.tagName.toLowerCase();
+  if (tag === "title" || tag === "meta" || tag === "link") return true;
+  if (tag === "p") {
+    const txt = $(el).text().trim();
+    if (txt.length === 0) return false;
+    // Strip all Liquid tokens; if nothing visible remains, it's a preheader leak.
+    const stripped = txt
+      .replace(/\{%[\s\S]*?%\}/g, "")
+      .replace(/\{\{[\s\S]*?\}\}/g, "")
+      .trim();
+    if (stripped.length === 0) return true;
+  }
+  return false;
 }
 
 // ─── Spacer helper ───────────────────────────────────────────────
