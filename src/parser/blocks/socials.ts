@@ -34,7 +34,7 @@ const DEFAULT_ICON_PADDING = 10;
 const STOCK_ICON_PLATFORM_RE =
   /\/buttons\/[^/]+\/([a-z0-9_-]+?)_\d+\.(?:png|gif|svg|jpe?g)\b/i;
 
-function detectSocialPlatformFromIconSrc(src: string): SocialPlatform | null {
+export function detectSocialPlatformFromIconSrc(src: string): SocialPlatform | null {
   const m = STOCK_ICON_PLATFORM_RE.exec(src);
   if (!m) return null;
   const slug = m[1]!.toLowerCase();

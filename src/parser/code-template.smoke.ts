@@ -345,6 +345,63 @@ console.log("\n[button link substitution]");
   );
 }
 
+// ─── Socials collapse ───────────────────────────────────────────
+
+console.log("\n[socials collapse]");
+
+// 16. ≥2 consecutive Klaviyo-icon images collapse to one SOCIALS block
+{
+  const html = `
+    <body>
+      <div id="bodyTable">
+        <a href="https://facebook.com/me"><img src="https://d3k.cloudfront.net/assets/email/buttons/subtleinverse/facebook_96.png"></a>
+        <a href="https://instagram.com/me"><img src="https://d3k.cloudfront.net/assets/email/buttons/subtleinverse/instagram_96.png"></a>
+        <a href="https://twitter.com/me"><img src="https://d3k.cloudfront.net/assets/email/buttons/subtleinverse/twitter_96.png"></a>
+      </div>
+    </body>`;
+  const r = parseCodeTemplateHtml(html);
+  const socials = r.sections.filter((s) => s.type === "socials") as any[];
+  check("socials run collapses to one SOCIALS block", socials.length === 1, `count=${socials.length}`);
+  if (socials.length === 1) {
+    check(
+      "SOCIALS preserves all 3 platforms in order",
+      socials[0].socialLinks.length === 3 &&
+        socials[0].socialLinks[0].platform === "facebook" &&
+        socials[0].socialLinks[1].platform === "instagram" &&
+        socials[0].socialLinks[2].platform === "twitter",
+      `links=${JSON.stringify(socials[0].socialLinks.map((l: any) => l.platform))}`,
+    );
+    check(
+      "SOCIALS preserves clickthrough URLs as link URLs",
+      socials[0].socialLinks[0].url === "https://facebook.com/me",
+      socials[0].socialLinks[0].url,
+    );
+    check(
+      "SOCIALS infers WHITE iconColor for subtleinverse variant",
+      socials[0].iconColor === "white",
+      socials[0].iconColor,
+    );
+  }
+}
+
+// 17. Solo Klaviyo-icon image stays an image (no run = no collapse)
+{
+  const html = `
+    <body>
+      <div id="bodyTable">
+        <a href="https://facebook.com/me"><img src="https://d3k.cloudfront.net/assets/email/buttons/subtleinverse/facebook_96.png"></a>
+        <p>Real content</p>
+      </div>
+    </body>`;
+  const r = parseCodeTemplateHtml(html);
+  check(
+    "solo social icon stays as image (threshold=2)",
+    r.sections.filter((s) => s.type === "socials").length === 0 &&
+      r.sections.filter((s) => s.type === "image").length === 1,
+    `types=${r.sections.map((s) => s.type).join(",")}`,
+  );
+}
+
 // ─── Castle real-world regression ─────────────────────────────────
 
 console.log("\n[castle RYCBtZ end-to-end]");
@@ -356,8 +413,8 @@ console.log("\n[castle RYCBtZ end-to-end]");
     const html = readFileSync(path, "utf-8");
     const r = parseCodeTemplateHtml(html, { storeUrl: "https://castlesports.com" });
     check(
-      "Castle RYCBtZ: deduplicated to ~16 sections (was 33 pre-fix)",
-      r.sections.length >= 14 && r.sections.length <= 18,
+      "Castle RYCBtZ: deduplicated + socials-collapsed to ~13 sections (was 33 pre-fix)",
+      r.sections.length >= 11 && r.sections.length <= 15,
       `sections=${r.sections.length}`,
     );
     check("Castle RYCBtZ: no container warning", r.warnings.length === 0);
@@ -372,6 +429,12 @@ console.log("\n[castle RYCBtZ end-to-end]");
     const texts = r.sections.filter((s) => s.type === "text").map((s) => (s as any).text);
     const hasPreheader = texts.some((t: string) => t.includes("placeholder"));
     check("Castle RYCBtZ: no preheader Liquid leak", !hasPreheader);
+    const socials = r.sections.filter((s) => s.type === "socials") as any[];
+    check(
+      "Castle RYCBtZ: social row collapsed to one SOCIALS block",
+      socials.length === 1 && socials[0].socialLinks.length === 4,
+      `count=${socials.length} links=${socials[0]?.socialLinks.length}`,
+    );
   } else {
     console.log(`  (skipped — ${path} not on disk)`);
   }

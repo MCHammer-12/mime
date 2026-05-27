@@ -30,6 +30,8 @@ import type {
   LineBlock,
   NonRecursiveBlock,
   Section,
+  SocialItem,
+  SocialsBlock,
   SpacerBlock,
   TextBlock,
 } from "../renderer/types.js";
@@ -39,9 +41,11 @@ import {
   EmailBlockType,
   ImageType,
   Size,
+  SocialIconColor,
   VerticalAlignment,
 } from "../renderer/types.js";
 import {
+  detectSocialIconColor,
   parseColor,
   parseFontFamily,
   parseFontSize,
@@ -49,6 +53,7 @@ import {
   parsePadding,
   parsePx,
 } from "./style-utils.js";
+import { detectSocialPlatformFromIconSrc } from "./blocks/socials.js";
 import { nextId } from "./helpers.js";
 import { classifyKlaviyoUrl } from "./url-mapping.js";
 import type { ParseContext, ParseResult } from "./index.js";
@@ -131,7 +136,87 @@ export function parseCodeTemplateHtml(
     sections.push(...deepWalkContent($, container.$el, ctx));
   }
 
-  return { sections, ...ctx, bodyBackgroundColor };
+  return {
+    sections: collapseSocialImageRuns(sections),
+    ...ctx,
+    bodyBackgroundColor,
+  };
+}
+
+// ─── Post-pass: collapse social-icon image runs ──────────────────
+
+/**
+ * Find runs of ≥2 consecutive ImageBlocks whose src matches the Klaviyo
+ * stock social-icon URL pattern (e.g.
+ * `…/assets/email/buttons/subtleinverse/facebook_96.png`) and replace
+ * them with a single SocialsBlock. Hand-coded CODE templates frequently
+ * emit social rows as a sequence of bare `<a><img/></a>` elements; without
+ * this pass we'd surface them as N individual ImageBlocks in the Redo
+ * editor, which loses the SOCIALS-block semantics (single-click brand-kit
+ * swap, alignment, color theme).
+ */
+function collapseSocialImageRuns(sections: Section[]): Section[] {
+  const out: Section[] = [];
+  let i = 0;
+  while (i < sections.length) {
+    const start = i;
+    const items: { img: ImageBlock; platform: string }[] = [];
+    while (i < sections.length) {
+      const s = sections[i]!;
+      if (s.type !== EmailBlockType.IMAGE) break;
+      const platform = detectSocialPlatformFromIconSrc((s as ImageBlock).imageUrl);
+      if (!platform) break;
+      items.push({ img: s as ImageBlock, platform });
+      i++;
+    }
+    if (items.length >= 2) {
+      const first = items[0]!.img;
+      const iconColorWord = detectSocialIconColor(first.imageUrl);
+      const iconColor = mapToSocialIconColor(iconColorWord);
+      const socialLinks: SocialItem[] = items.map(({ img, platform }) => ({
+        id: nextId(),
+        platform: platform as SocialItem["platform"],
+        url: img.clickthroughUrl ?? "",
+      }));
+      const block: SocialsBlock = {
+        type: EmailBlockType.SOCIALS,
+        blockId: nextId(),
+        sectionPadding: first.sectionPadding,
+        sectionColor: first.sectionColor,
+        socialLinks,
+        iconColor,
+        iconPadding: 10,
+        alignment: Alignment.CENTER,
+      };
+      out.push(block);
+    } else {
+      // No run (or solo icon) — push back unchanged.
+      for (let j = start; j < i; j++) out.push(sections[j]!);
+      // i did NOT advance if items.length was 0 (the while-inner-loop's
+      // first iteration broke without incrementing). Make sure we move on.
+      if (i === start) {
+        out.push(sections[i]!);
+        i++;
+      }
+    }
+  }
+  return out;
+}
+
+/** Map detectSocialIconColor's word output to the SocialIconColor enum. */
+function mapToSocialIconColor(word: string): SocialIconColor {
+  switch (word) {
+    case "white":
+      return SocialIconColor.WHITE;
+    case "gray":
+      return SocialIconColor.GRAY;
+    case "black":
+      return SocialIconColor.BLACK;
+    default:
+      // "original" / unrecognized → BLACK (matches block-editor parser's
+      // mapping per blocks/socials.ts comment).
+      return SocialIconColor.BLACK;
+  }
 }
 
 // ─── Container discovery ─────────────────────────────────────────
