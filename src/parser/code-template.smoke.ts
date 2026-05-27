@@ -252,6 +252,57 @@ console.log("\n[image width]");
   );
 }
 
+// ─── Text whitespace + inline structure preservation ────────────
+
+console.log("\n[text inline structure]");
+
+// 14. <br> between spans inside a deep-walked div: <br> survives in HTML
+{
+  const html = `
+    <body>
+      <div id="bodyTable" class="root-container">
+        <div>
+          <div>
+            <span style="color:#fff;">1325 South 500 East</span><br/>
+            <span style="color:#fff;">American Fork, UT 84003</span>
+          </div>
+        </div>
+      </div>
+    </body>`;
+  const r = parseCodeTemplateHtml(html);
+  const txt = (r.sections.find((s) => s.type === "text") as any)?.text || "";
+  check(
+    "deep-walker preserves <br> between text fragments",
+    /1325 South 500 East/.test(txt) && /<br/.test(txt) && /American Fork/.test(txt),
+    `txt=${txt.slice(0, 200)}`,
+  );
+  check(
+    "deep-walker preserves per-span color styles",
+    /<span style="color:#fff;?">1325/.test(txt) && /<span style="color:#fff;?">American/.test(txt),
+    `txt=${txt.slice(0, 200)}`,
+  );
+}
+
+// 15. Whitespace-only div doesn't produce a phantom text block
+{
+  const html = `
+    <body>
+      <div id="bodyTable" class="root-container">
+        <div>&nbsp;</div>
+        <div> </div>
+        <p>Real content</p>
+      </div>
+    </body>`;
+  const r = parseCodeTemplateHtml(html);
+  const texts = r.sections.filter((s) => s.type === "text").map((s) => (s as any).text);
+  // Should NOT have a separate text block for the whitespace divs.
+  check(
+    "whitespace-only divs don't produce phantom text blocks",
+    texts.length === 1 && texts[0].includes("Real content"),
+    `texts=${JSON.stringify(texts)}`,
+  );
+}
+
 // ─── Button link substitution ─────────────────────────────────────
 
 console.log("\n[button link substitution]");

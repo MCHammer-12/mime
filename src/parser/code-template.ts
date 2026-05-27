@@ -1071,11 +1071,29 @@ function deepWalkContent(
       // Unclassified table: fall through and keep descending.
     }
 
-    // Text-ish tags: if the element has no child elements (just text),
-    // treat it as a text fragment rather than descending.
+    // Text-ish block tags: capture as a text fragment instead of descending.
+    // Outer HTML preserves nested inline structure (<span>, <br>, etc.).
     if (
-      ["p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"].includes(tag)
+      ["p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "ul", "ol", "li"].includes(tag)
     ) {
+      textFrags.push(el);
+      return;
+    }
+
+    // Inline-formatting tags (span/strong/em/etc.) AND <br>: capture as a
+    // text fragment so per-span styles + line breaks aren't stripped.
+    // Without this, deepWalkContent recurses past <span style="color:..."><br>
+    // and only the inner text nodes get collected — losing all formatting.
+    if (INLINE_TAGS.has(tag)) {
+      textFrags.push(el);
+      return;
+    }
+
+    // <div> with only text/inline content (no images, tables, hr, anchors
+    // wrapping images): treat as a text fragment. Source HTML for footers
+    // and address blocks often uses nested <div><span>...</span><br/></div>
+    // structures that should render as one block of styled text.
+    if (tag === "div" && isPureTextSubtree($el)) {
       textFrags.push(el);
       return;
     }
@@ -1093,6 +1111,38 @@ function deepWalkContent(
   flushText();
 
   return out;
+}
+
+/** Inline-formatting + line-break tags. Captured as text fragments in the
+ *  deep-walker so their outerHTML survives and per-span styles render. */
+const INLINE_TAGS = new Set([
+  "br",
+  "span",
+  "strong",
+  "b",
+  "em",
+  "i",
+  "u",
+  "small",
+  "sub",
+  "sup",
+  "font",
+  "code",
+  "mark",
+]);
+
+/** True if $el's subtree has no images, structural tables, hr, AND
+ *  contains non-whitespace text — i.e. it's a pure text wrapper that can
+ *  be captured as one text fragment. The text check rejects empty/whitespace
+ *  wrappers so they don't pollute output with content-less text blocks. */
+function isPureTextSubtree($el: $El): boolean {
+  if ($el.find("img").length > 0) return false;
+  if ($el.find("hr").length > 0) return false;
+  // Nested tables are structural (button/line/column); descend so they get
+  // classified, don't swallow them into text.
+  if ($el.find("table").length > 0) return false;
+  const text = $el.text().replace(/\s| /g, "").trim();
+  return text.length > 0;
 }
 
 /** Body-level children that should never produce sections in the fallback
