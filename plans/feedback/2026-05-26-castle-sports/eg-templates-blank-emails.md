@@ -1,10 +1,17 @@
 ---
-status: blocked
-branch: fix/eg-templates-blank-emails
+status: done
+branch: fix/code-parser-fidelity
 pr: null
 ---
 
-**Status note (2026-05-26):** Michael chose Option C — fix CODE parser fidelity first, then ungate. This task is blocked pending a separate "CODE parser fidelity" planning batch covering image widths, column gaps, and per-span text styling (the open items in memory `project_code_template_parser`). Castle Sports' 3 abandonment flows remain unusable until that batch ships.
+**Status note (2026-05-26):** Done. Cross-referenced into [`plans/2026-05-26-code-fidelity.md`](../../2026-05-26-code-fidelity.md). The "Option C" rewording is also slightly stale — the CODE parser was already wired up via `src/export-template.ts:69-71`, not gated off. The actual gaps were:
+
+1. `findContainer` had a regex bug that rejected every Zaymo `<div style="max-width:600px">` candidate, AND it lacked the Zaymo `<div id="bodyTable">` root preference — so Castle's templates were producing 33 sections of duplicated content via the body-deep-walk fallback path.
+2. Body deep-walker stripped `<br>` and per-span styles when descending past inline tags.
+3. Button links weren't running through `classifyKlaviyoUrl` — `{{ event.extra.checkout_url }}` landed raw.
+4. Social icon rows emitted as N IMAGE blocks instead of one SOCIALS block.
+
+After fix, all 8 CODE templates referenced by Castle's 3 `[EG]` abandonment flows parse with 0 failures, 0 warnings, 91 total sections (avg 11/template), every template's social row collapsed to a SOCIALS block, every cart-recovery button rewritten to `<storeUrl>/cart`. Castle is unblocked pending merchant re-import.
 
 
 # `[EG]` templates produce blank emails across 3 flows
