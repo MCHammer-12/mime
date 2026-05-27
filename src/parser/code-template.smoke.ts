@@ -402,6 +402,44 @@ console.log("\n[socials collapse]");
   );
 }
 
+// ─── Column asymmetric border-radius ────────────────────────────
+
+console.log("\n[column asymmetric border-radius]");
+
+// 18. Cells with differing border-radius emit asymmetric-cell-border-radius
+//     reviewItem so the operator knows the "rounded pill" won't render
+{
+  const html = `
+    <body>
+      <table width="600"><tr>
+        <td style="border-radius:6px 0 0 6px;background:#f00;width:200">A</td>
+        <td style="border-radius:0;background:#0f0;width:200">B</td>
+        <td style="border-radius:0 6px 6px 0;background:#00f;width:200">C</td>
+      </tr></table>
+    </body>`;
+  const r = parseCodeTemplateHtml(html);
+  const hasReview = r.reviewItems.some(
+    (ri) => ri.variableName === "asymmetric-cell-border-radius",
+  );
+  check("asymmetric border-radius across cells emits reviewItem", hasReview);
+}
+
+// 19. Uniform border-radius (all "0" or all empty) does NOT emit
+{
+  const html = `
+    <body>
+      <table width="600"><tr>
+        <td style="background:#f00;width:200">A</td>
+        <td style="background:#0f0;width:200">B</td>
+      </tr></table>
+    </body>`;
+  const r = parseCodeTemplateHtml(html);
+  const hasReview = r.reviewItems.some(
+    (ri) => ri.variableName === "asymmetric-cell-border-radius",
+  );
+  check("uniform-or-empty border-radius doesn't emit reviewItem", !hasReview);
+}
+
 // ─── Castle real-world regression ─────────────────────────────────
 
 console.log("\n[castle RYCBtZ end-to-end]");

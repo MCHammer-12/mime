@@ -878,6 +878,7 @@ function parseMultiColRow(
 ): Section[] {
   const cellBlockLists: Section[][] = [];
   const widths: number[] = [];
+  const borderRadii: string[] = [];
   let sectionPadding = { top: 0, right: 0, bottom: 0, left: 0 };
   let sectionColor = "#ffffff";
 
@@ -892,8 +893,26 @@ function parseMultiColRow(
     const widthNum = parseInt(widthAttr, 10);
     if (!isNaN(widthNum)) widths.push(widthNum);
 
+    borderRadii.push((tdStyle["border-radius"] || "").trim());
+
     cellBlockLists.push(parseSectionTd($, $td, ctx));
   });
+
+  // Klaviyo "rounded pill" pattern: adjacent cells use asymmetric border-radius
+  // (`6px 0 0 6px` / `0` / `0 6px 6px 0`) so the row looks like one rounded
+  // rectangle. Redo's ColumnBlock can't express per-cell border-radius or
+  // background, so the rendering will look like 2-3 separate cells. Flag the
+  // pattern for the operator so they're not surprised — they can either edit
+  // the imported template or accept the look. Heuristic: ≥2 distinct
+  // non-empty border-radius values among adjacent cells.
+  const distinctRadii = new Set(borderRadii.filter((r) => r.length > 0));
+  if (distinctRadii.size >= 2) {
+    ctx.reviewItems.push({
+      blockType: EmailBlockType.COLUMN,
+      variableName: "asymmetric-cell-border-radius",
+      context: borderRadii.join(" | "),
+    });
+  }
 
   if (cellBlockLists.length === 0) return [];
 
