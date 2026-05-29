@@ -1,5 +1,39 @@
 # Session Log
 
+## 2026-05-28 — Saved-template import fix (Saved Templates tab) + Redo internal-tools skills
+
+**Context**
+Started from a Jackson Hold Fly Company troubleshoot bundle: a campaign imported "successfully" but didn't show, and re-importing as a saved template errored. Diagnosis became a 3-PR fix to the saved-template import path. Session then pivoted to packaging the marketing-ops work as runnable skills in the `redotech-internal-tools` repo, plus live prod trigger/template ops via those skills.
+
+**Done — saved-template import path fixed end-to-end (mime: [#62](https://github.com/MCHammer-12/mime/pull/62), [#63](https://github.com/MCHammer-12/mime/pull/63), [#64](https://github.com/MCHammer-12/mime/pull/64))**
+- Root cause: PR #38 routed standalone-template + campaign imports through `createSavedEmailTemplate`, whose input is the FULL `emailTemplateSchema` (`_id` required as ObjectId). `createEmailTemplate` uses `emailTemplateSchema.omit({_id})`. `preparePayload` stripped `_id` defensively → `template._id Invalid input` 400.
+- **#62** — stop stripping `_id` in `preparePayload`; also capture `template_failed` events into `error.txt` in the troubleshoot bundle (mirrors the `flow_failed` capture from #36) so a failed import's RPC error lands in the zip instead of requiring a DB lookup.
+- **#63** — after #62, the call started 500-ing (no client detail). Temp-reverted both call sites to `createEmailTemplate` (Previous Emails) to unblock the merchant.
+- **#64** — real fix: the Mongoose `emailTemplateSchemaDefinition.team` is `required`, and the `createSavedEmailTemplate` handler injects `team` only on the outer wrapper, NOT the embedded template (unlike `createEmailTemplate`, which injects from JWT). Added `decodeJwtAud()` and inject `team` (from the JWT `aud` claim) onto the embedded template; re-enabled `asSavedTemplate: true`. Saved templates + campaigns now land in the Saved Templates tab again.
+- (#64 was completed after the live ops below; landed on main via parallel session.)
+
+**Done — Redo internal-tools skills (NOT mime — `redotech-internal-tools`, branch `marketing-skills`)**
+- `change-marketing-automation-trigger` (commit `8c7c2e047`) — swap a flow's trigger via `updateAutomation`, AND as one mandatory atomic step realign every `send_email`/`send_sms` template's `schemaType`+`category` to the new trigger (`updateEmailTemplate` partial `$set`; `updateSmsTemplate` full read-modify-write via `getSmsTemplateByIdPopulated`), rename abandonment skip-condition fields, audit other schema-field refs. Bundles `marketing-triggers.md` + `schema-types.md`.
+- `change-email-template-schema` (commit `691dc7372`) — email-only schemaType/category realignment; description steers trigger changes to the combined skill so the cascade stays atomic.
+- Both in `.agents/skills/`, catalog README updated, `oxfmt`-formatted, JWT as runtime input. Auto-live for that repo once `marketing-skills` merges to main.
+
+**Done — live prod ops via the trigger skill (operational, no code)**
+- Jackson Hole "Welcome Series 2.0 (Shopify)": `email_signup` → `email_signup_shopify` (same schemaType, clean).
+- Fairechild "Review Request Klaviyo (Email & SMS)": `order_delivered` → `order_created`; then realigned its 4 review-request templates `marketing_email`/Marketing → `order_tracking`/Order tracking to match. (The "test"/Track-your-package email and the 10/15-day wait timing were flagged to Michael, left as-is.)
+- A Jackson Hold abandoned-checkout swap (`cart_abandoned` → `checkout_abandoned`, with `isCartAbandoned`→`isCheckoutAbandoned` rename) was previewed but NOT executed — user pivoted before confirming.
+
+**Files changed (mime, across #62/#63/#64)**
+- `src/migrate/import-rpc.ts` — keep `_id`; `decodeJwtAud()` + inject `team` for saved path
+- `src/migrate/server.ts` — `template_failed` emits; `asSavedTemplate` toggled off (#63) then on (#64)
+- `src/migrate/bundle.ts` — `template_failed` → `error.txt`
+
+**Decisions (see DECISIONS.md)**
+- `createSavedEmailTemplate` needs `_id` AND `team` on the embedded template; mime supplies both. Template `schemaType` is builder/library metadata — runtime field resolution is governed by the flow's schema instance, so realigning a template's schemaType to its trigger is a consistency fix, not a rendering change.
+
+**Next steps**
+1. Saved-template path: shipped (#64). Re-import a merchant to confirm Saved Templates tab populates and flow-attached emails (still `createEmailTemplate`) keep sending.
+2. Skills: merging `marketing-skills` → main in `redotech-internal-tools` makes both skills team-wide (deferred — large shared branch).
+
 ## 2026-05-26 — Font preflight gate, parser duplicate-`<p>`-style fix, feedback resolve workflow
 
 **Context**

@@ -4,7 +4,11 @@
 Automation project for manual processes Michael does at Redo. Primary target: Klaviyo → Redo email migration workflow, and improving Redo's existing HTML → JSON email parser.
 
 ## Status
-End-to-end import pipeline running in production via the Replit-deployed migrate UI. As of **2026-05-26**:
+End-to-end import pipeline running in production via the Replit-deployed migrate UI. As of **2026-05-28**:
+
+- **Saved-template import path fixed (Saved Templates tab).** Standalone-template + campaign imports (`asSavedTemplate: true` → `createSavedEmailTemplate`) were 400ing (`template._id Invalid input`) then 500ing. The RPC embeds a full `EmailTemplate` whose Mongoose schema requires both `_id` and `team`, but the handler injects neither onto the embedded doc. `preparePayload` now keeps `_id` and injects `team` from the JWT `aud` claim (`decodeJwtAud`) for the saved path; `createEmailTemplate` path unchanged (`.omit({_id})` drops the extra `_id`). Failed template imports now also write `error.txt` into the troubleshoot bundle. PRs #62 / #63 (temp revert) / #64 (real fix).
+
+As of **2026-05-26**:
 
 - **Font preflight gate replaces silent warn.** Templates / flows referencing fonts not on Google Fonts (Futura, proprietary Adobe faces, etc.) now pause the import with a `needs_input` modal that lists the missing families and re-checks the brand kit before prompting. User clicks "Continue (added them)" once the fonts are uploaded, or "Import anyway" for fallback rendering. Wired into both template and flow phases — the flow phase also gained its own `uploadFontsForTemplates` call, which was previously missing entirely. `questionKey` scoped by font set so new fonts in later phases re-prompt.
 - **Parser duplicate-`<p>`-style fix.** `parseTextBlock` was prepending a fresh `style="text-align:…;line-height:…"` to every `<p>`, including ones with existing inline styles. Per HTML5 spec, browsers and Quill keep only the first `style` attribute and drop the rest — silently losing inline `font-family` declarations. Now merges into any existing attribute. Smoke test `src/parser/blocks/text.smoke.ts` locks in the behavior.
