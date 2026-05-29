@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: done
 branch: fix/phone-country-code-condition
-pr: null
+pr: https://github.com/MCHammer-12/mime/pull/93
 ---
 
 # Klaviyo phone-country-code profile-property condition not mapped
@@ -92,4 +92,40 @@ For Option B (lightest):
 
 ## Done
 
-(filled by executor on completion)
+- PR: https://github.com/MCHammer-12/mime/pull/93
+- **Resolved as Option C (direct map to native Redo dimension) — not B.**
+  The planner flagged this as "needs team-level segment" but that premise
+  was wrong: Redo has a native `country` customer-attribute dimension.
+  Confirmed by reading the checked-out redoapp source (not docs):
+  - `CustomerCharacteristicType.COUNTRY = "country"` in
+    `redo/model/src/marketing/segments/segment-types.ts`
+  - SQL path `location_country_code` → ISO-2 code values
+  - `TokenCompareOperators` = `ANY` / `NONE`
+  - whereCondition `type: "token"` (no prerequisite, unlike state/city)
+    per `segment-characteristic-condition.tsx`
+  - Exact JSON matches redoapp's own `evaluate-segment-membership.it.spec.ts`
+    country test
+  - Also cross-checked a live Redo "Texas" segment via the Redo MCP
+    (`get_segment`) which showed the sibling `state-province` /
+    `phone-number-area-code` token shapes.
+- Mapping (in [`condition-mapping.ts`](../../../src/flow/condition-mapping.ts)):
+  - `phone-country-code-in` → operator `ANY`; `-not-in` → `NONE`
+  - value normalized from array OR comma-string → uppercased ISO-2
+  - non-phone profile-property conditions still fall back to the existing
+    manual-config placeholder (unchanged)
+- Emits a `degraded-mapping` warning: Klaviyo keys on the phone number's
+  country code, Redo's `country` is the customer's profile country. They
+  align for SMS audiences and it's exactly what the operator built by
+  hand in Redo (per screenshot). Redo has no phone-country-code
+  dimension, so profile country is the right native target.
+- Verification: 5 new `condition-mapping.smoke.ts` cases pass; existing
+  flow smoke tests pass; batch-test 416 templates 0 failures.
+- **Pending (per shipping decision):** live re-parse of the real XpzmZx
+  flow + re-import to confirm the split renders in the Redo flow builder.
+  Synthetic shape matches redoapp's own test, so confidence is high.
+- **Scope note for future work:** this covers phone-country-code only.
+  Other Klaviyo profile-property operators (`equals`, `contains`,
+  `is-set` on arbitrary properties) still hit the manual-config
+  placeholder — a separate scoping conversation if merchants flag them.
+
+## Done

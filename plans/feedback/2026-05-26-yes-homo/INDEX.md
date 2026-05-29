@@ -8,7 +8,7 @@ Items: 7 flows flagged (14 emails total imported)
 
 | # | Status | Task | Branch | PR |
 |---|--------|------|--------|----|
-| 1 | unclaimed | [Klaviyo phone-country-code profile-property condition not mapped](phone-country-code-condition.md) | `fix/phone-country-code-condition` | — |
+| 1 | done | [Klaviyo phone-country-code profile-property condition not mapped](phone-country-code-condition.md) | `fix/phone-country-code-condition` | [#93](https://github.com/MCHammer-12/mime/pull/93) |
 
 ## Collapsed into other batches
 
