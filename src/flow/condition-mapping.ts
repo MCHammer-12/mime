@@ -291,6 +291,73 @@ export function translateTriggerSplitExpression(
   return null;
 }
 
+// ---------- Klaviyo profile-property: phone-country-code → Redo country ----------
+//
+// Klaviyo's `phone-country-code-in` / `-not-in` operator on the
+// `phone_number` profile property filters by the phone number's country.
+// Redo has a native `country` customer-attribute dimension (confirmed in
+// redoapp `segment-types.ts` CustomerCharacteristicType.COUNTRY = "country",
+// SQL path `location_country_code`, token comparison with ISO-code values).
+// Shape (from redoapp's own segment test):
+//   { type: "customer_attribute",
+//     whereCondition: { type: "token", dimension: "country",
+//       comparison: { type: "token", operator: "ANY"|"NONE", values: ["US","CA"] } } }
+//
+// SEMANTIC NOTE: Klaviyo keys on the PHONE NUMBER's country code; Redo's
+// `country` dimension is the customer's PROFILE/location country. They
+// align for nearly all SMS audiences, and it's exactly what merchants
+// build by hand in Redo (Yes Homo's operator did this manually). It's a
+// profile-country approximation of a phone-country filter — flagged via
+// warning so the operator can verify. Redo has no phone-country-code
+// dimension (only `phone-number-area-code`, which is US area codes).
+const PHONE_COUNTRY_CODE_OPERATORS: Record<string, "ANY" | "NONE"> = {
+  "phone-country-code-in": "ANY",
+  "phone-country-code-not-in": "NONE",
+};
+
+function normalizeCountryCodes(raw: unknown): string[] {
+  // Klaviyo emits the value as an array (["US","CA"]) or a comma-joined
+  // string ("US,CA"). Normalize to uppercased ISO-2 codes.
+  const parts = Array.isArray(raw)
+    ? raw
+    : String(raw ?? "").split(",");
+  return parts
+    .map((p) => String(p).trim().toUpperCase())
+    .filter((p) => /^[A-Z]{2}$/.test(p));
+}
+
+function translatePhoneCountryCodeCondition(
+  c: any,
+  warnings: ParseWarning[],
+  actionId: string,
+): unknown | null {
+  const op = c.filter?.operator;
+  const redoOperator = op ? PHONE_COUNTRY_CODE_OPERATORS[op] : undefined;
+  if (!redoOperator) return null;
+
+  const values = normalizeCountryCodes(c.filter?.value);
+  if (values.length === 0) return null;
+
+  warnings.push({
+    kind: "degraded-mapping",
+    actionId,
+    message: `phone-country-code condition (${op} ${values.join(",")}) mapped to Redo's profile "country" dimension. Klaviyo keys on the phone number's country code; Redo's country is the customer's profile/location country — verify the split in the Redo flow builder.`,
+  });
+
+  return {
+    type: "customer_attribute",
+    whereCondition: {
+      type: "token",
+      dimension: "country",
+      comparison: {
+        type: "token",
+        operator: redoOperator,
+        values,
+      },
+    },
+  };
+}
+
 // ---------- Klaviyo profile-property → Redo CustomerAttributeCondition ----------
 // V1 limitation: emits a warning + empty condition. Redo's CustomerAttribute
 // conditions use a WhereCondition structure keyed on a "dimension" (e.g.
@@ -422,9 +489,17 @@ export function translateConditionalSplitExpression(
         if (rc) redoConditions.push(rc);
         break;
       }
-      case "profile-property":
-        profilePropertyPlaceholder(kc, warnings, action.id);
+      case "profile-property": {
+        // phone-country-code maps cleanly to Redo's country dimension;
+        // anything else falls back to the manual-config placeholder.
+        const phoneCountry = translatePhoneCountryCodeCondition(kc, warnings, action.id);
+        if (phoneCountry) {
+          redoConditions.push(phoneCountry);
+        } else {
+          profilePropertyPlaceholder(kc, warnings, action.id);
+        }
         break;
+      }
       case "profile-group-membership":
         profileGroupMembershipPlaceholder(kc, warnings, action.id);
         break;

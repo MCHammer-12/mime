@@ -146,3 +146,113 @@ console.log("✓ profile-marketing-consent smoke tests pass");
   if (c.count?.type !== "greater_than_n" || c.count?.n !== 74) fail(`quantity: count=${JSON.stringify(c.count)}`);
   console.log("✓ profile-metric in-the-last reads tf.quantity (30 days, not 1)");
 }
+
+// ─── phone-country-code-in (array value) → country dimension ANY ──────────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-property",
+        property: "phone_number",
+        filter: { operator: "phone-country-code-in", value: ["US", "CA"] },
+      },
+    ]),
+    {},
+    warnings,
+  ) as any;
+  const c = out.inlineSegment.conditions[0];
+  if (c?.type !== "customer_attribute") fail(`phone-cc array: type=${c?.type}`);
+  if (c.whereCondition?.type !== "token") fail(`phone-cc array: whereCondition.type=${c.whereCondition?.type}`);
+  if (c.whereCondition?.dimension !== "country") fail(`phone-cc array: dimension=${c.whereCondition?.dimension}`);
+  if (c.whereCondition?.comparison?.operator !== "ANY") fail(`phone-cc array: operator=${c.whereCondition?.comparison?.operator}`);
+  if (JSON.stringify(c.whereCondition?.comparison?.values) !== JSON.stringify(["US", "CA"]))
+    fail(`phone-cc array: values=${JSON.stringify(c.whereCondition?.comparison?.values)}`);
+  if (!warnings.some((w) => w.kind === "degraded-mapping" && w.message.includes("country")))
+    fail("phone-cc array: expected degraded-mapping warning naming country");
+  console.log("✓ phone-country-code-in [US,CA] → country dimension ANY");
+}
+
+// ─── phone-country-code-in (comma-string value) → same shape ──────────────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-property",
+        property: "phone_number",
+        filter: { operator: "phone-country-code-in", value: "US,CA" },
+      },
+    ]),
+    {},
+    warnings,
+  ) as any;
+  const c = out.inlineSegment.conditions[0];
+  if (JSON.stringify(c?.whereCondition?.comparison?.values) !== JSON.stringify(["US", "CA"]))
+    fail(`phone-cc string: values=${JSON.stringify(c?.whereCondition?.comparison?.values)}`);
+  console.log("✓ phone-country-code-in 'US,CA' (string) → same as array");
+}
+
+// ─── phone-country-code-not-in → operator NONE ────────────────────────────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-property",
+        property: "phone_number",
+        filter: { operator: "phone-country-code-not-in", value: ["GB"] },
+      },
+    ]),
+    {},
+    warnings,
+  ) as any;
+  const c = out.inlineSegment.conditions[0];
+  if (c?.whereCondition?.comparison?.operator !== "NONE") fail(`phone-cc not-in: operator=${c?.whereCondition?.comparison?.operator}`);
+  if (JSON.stringify(c.whereCondition.comparison.values) !== JSON.stringify(["GB"]))
+    fail(`phone-cc not-in: values=${JSON.stringify(c.whereCondition.comparison.values)}`);
+  console.log("✓ phone-country-code-not-in [GB] → country dimension NONE");
+}
+
+// ─── lowercase codes normalized to uppercase ISO-2 ────────────────────────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-property",
+        property: "phone_number",
+        filter: { operator: "phone-country-code-in", value: ["us", " ca ", "xyz", ""] },
+      },
+    ]),
+    {},
+    warnings,
+  ) as any;
+  const c = out.inlineSegment.conditions[0];
+  // "us"→US, " ca "→CA (trimmed), "xyz"/"" dropped (not 2-letter)
+  if (JSON.stringify(c?.whereCondition?.comparison?.values) !== JSON.stringify(["US", "CA"]))
+    fail(`phone-cc normalize: values=${JSON.stringify(c?.whereCondition?.comparison?.values)}`);
+  console.log("✓ phone-country-code codes normalized to uppercase ISO-2");
+}
+
+// ─── other profile-property → falls back to manual-config placeholder ─────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-property",
+        property: "favorite_color",
+        filter: { operator: "equals", value: "blue" },
+      },
+    ]),
+    {},
+    warnings,
+  ) as any;
+  if (out.inlineSegment.conditions.length !== 0) fail("other profile-property: expected no condition emitted");
+  if (!warnings.some((w) => w.message.includes("manual config required")))
+    fail("other profile-property: expected manual-config placeholder warning");
+  console.log("✓ non-phone profile-property → manual-config placeholder (unchanged)");
+}
+
+console.log("✓ phone-country-code smoke tests pass");
