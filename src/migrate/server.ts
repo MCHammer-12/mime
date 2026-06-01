@@ -59,9 +59,12 @@ import { streamBundle, type BundleItemRequest } from "./bundle.js";
 import {
   createStore,
   deleteStore,
+  deleteStoreForReviewer,
   getStoreById,
   getStoreBySlug,
+  getStoreForReviewer,
   listStores,
+  listStoresForReviewer,
   toSummary,
   updateStore,
 } from "./stores.js";
@@ -2603,51 +2606,388 @@ async function handleReviewerMe(
   });
 }
 
-// Phase 1 stub — the real reviewer dashboard UI lands in Phase 2+. For now
-// this is enough to verify the auth handshake end-to-end: visit
-// /r/<token>/, get the cookie, get redirected here, see your name.
-const REVIEWER_DASHBOARD_STUB = /* html */ `<!doctype html>
+// GET /api/r/stores — reviewer's own stores only.
+async function handleReviewerStoresList(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const recs = await listStoresForReviewer(reviewer.id);
+  // Use the summary shape so masked keys + JWT expiry are exposed to the
+  // dashboard without leaking raw secrets.
+  return json(res, 200, { stores: recs.map(toSummary) });
+}
+
+// GET /api/r/stores/:id — reviewer's own store, full record (unmasked) so
+// the edit form can populate. Ownership-checked.
+async function handleReviewerStoreGet(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const rec = await getStoreForReviewer(storeId, reviewer.id);
+  if (!rec) return json(res, 404, { error: `store ${storeId} not found` });
+  return json(res, 200, { store: rec });
+}
+
+// POST /api/r/stores — create a store owned by the current reviewer.
+async function handleReviewerStoreCreate(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
+  const body = await readJsonBody(req);
+  const name = String(body.name ?? "").trim();
+  const merchantSlug = String(body.merchantSlug ?? "").trim();
+  const klaviyoKey = String(body.klaviyoKey ?? "").trim();
+  const storeId = String(body.storeId ?? "").trim();
+  const redoJwt = body.redoJwt ? String(body.redoJwt).trim() : null;
+  const redoServerBase = body.redoServerBase ? String(body.redoServerBase).trim() : null;
+  if (!name || !merchantSlug || !klaviyoKey || !storeId) {
+    return json(res, 400, {
+      error: "name, merchantSlug, klaviyoKey, and storeId required",
+    });
+  }
+  try {
+    const rec = await createStore({
+      name,
+      merchantSlug,
+      klaviyoKey,
+      redoJwt,
+      storeId,
+      redoServerBase,
+      // Tag with reviewer id so listStoresForReviewer() filters to this
+      // reviewer only. createdBy stays null since there's no admin user
+      // associated with a reviewer-created store.
+      createdByReviewer: reviewer.id,
+    });
+    return json(res, 201, { store: rec });
+  } catch (e: any) {
+    const msg = e?.message ?? String(e);
+    if (msg.includes("idx_stores_slug") || msg.includes("duplicate key")) {
+      return json(res, 409, { error: `merchantSlug "${merchantSlug}" already exists` });
+    }
+    return json(res, 500, { error: msg });
+  }
+}
+
+// PATCH /api/r/stores/:id — edit a reviewer-owned store. Ownership-checked
+// before the update runs.
+async function handleReviewerStoreUpdate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
+  // Ownership gate: refuse to even read the body if this isn't the
+  // reviewer's store.
+  const existing = await getStoreForReviewer(storeId, reviewer.id);
+  if (!existing) return json(res, 404, { error: `store ${storeId} not found` });
+  const body = await readJsonBody(req);
+  const patch: Record<string, unknown> = {};
+  if (typeof body.name === "string") patch.name = body.name.trim();
+  if (typeof body.merchantSlug === "string") patch.merchantSlug = body.merchantSlug.trim();
+  if (typeof body.klaviyoKey === "string") patch.klaviyoKey = body.klaviyoKey.trim();
+  if (typeof body.storeId === "string") patch.storeId = body.storeId.trim();
+  if (typeof body.redoJwt === "string") patch.redoJwt = body.redoJwt.trim() || null;
+  if (typeof body.redoServerBase === "string") {
+    patch.redoServerBase = body.redoServerBase.trim() || null;
+  }
+  try {
+    const rec = await updateStore(storeId, patch as any);
+    if (!rec) return json(res, 404, { error: `store ${storeId} not found` });
+    return json(res, 200, { store: rec });
+  } catch (e: any) {
+    return json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// DELETE /api/r/stores/:id — scoped delete. Returns 404 (not 403) on
+// ownership mismatch so we don't leak existence of other reviewers' stores.
+async function handleReviewerStoreDelete(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
+  const ok = await deleteStoreForReviewer(storeId, reviewer.id);
+  if (!ok) return json(res, 404, { error: `store ${storeId} not found` });
+  return json(res, 200, { ok: true });
+}
+
+// Reviewer dashboard — Phase 2. Vanilla JS (no Babel/React build step),
+// kept in-server so a single npm start serves the whole surface. The
+// admin shell at HTML below stays untouched.
+//
+// Features in this revision:
+//   - Header with reviewer name + sign-out (clears cookie)
+//   - Stores list (GET /api/r/stores) — empty state with "Add store"
+//   - Add Store modal (POST /api/r/stores)
+//
+// Phase 3 will add the per-store flow picker + import job stream.
+// Phase 4 (partial) will add the notes panel.
+const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <title>mime · review</title>
   <style>
-    body { font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-           background: #0d1117; color: #e6edf3; padding: 4rem;
-           max-width: 640px; margin: 0 auto; }
-    h1 { font-weight: 400; font-size: 28px; margin: 0 0 1rem; }
-    .who { color: #8b949e; font-size: 13px; }
-    .stub { margin-top: 3rem; padding: 1.5rem; border: 1px solid #21262d;
-            border-radius: 6px; color: #8b949e; font-size: 13px; line-height: 1.6; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d1117; color: #e6edf3; min-height: 100vh;
+    }
+    .topbar {
+      display: flex; align-items: center; gap: 1rem;
+      padding: 14px 24px; border-bottom: 1px solid #21262d; background: #010409;
+    }
+    .topbar .brand { font-family: ui-serif, Georgia, serif; font-size: 18px; }
+    .topbar .brand em { color: #FF4405; font-style: italic; }
+    .topbar .who { color: #8b949e; font-size: 12px; margin-left: 0.5rem; }
+    .topbar .signout {
+      margin-left: auto; color: #8b949e; font-size: 12px;
+      background: transparent; border: 1px solid #30363d; padding: 4px 10px;
+      border-radius: 4px; cursor: pointer;
+    }
+    .topbar .signout:hover { color: #e6edf3; border-color: #58a6ff; }
+
+    main { max-width: 900px; margin: 0 auto; padding: 32px 24px; }
+    h1 { font-family: ui-serif, Georgia, serif; font-size: 32px; font-weight: 400; margin-bottom: 4px; }
+    .subtitle { color: #8b949e; font-size: 12px; margin-bottom: 24px; }
+
+    .stores { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+    .store {
+      border: 1px solid #21262d; border-radius: 6px; padding: 16px;
+      background: #0d1117; cursor: pointer; transition: border-color 0.15s;
+    }
+    .store:hover { border-color: #30363d; }
+    .store .name { font-family: ui-serif, Georgia, serif; font-size: 20px; margin-bottom: 6px; }
+    .store .slug { color: #6e7681; font-size: 11px; }
+    .store .meta { color: #8b949e; font-size: 11px; margin-top: 8px; }
+    .store .meta.warn { color: #d29922; }
+
+    .add-store {
+      border: 1px dashed #30363d; border-radius: 6px; padding: 16px;
+      background: transparent; color: #8b949e; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      gap: 6px; min-height: 110px; font-size: 13px;
+    }
+    .add-store:hover { border-color: #58a6ff; color: #e6edf3; }
+
+    .empty {
+      text-align: center; padding: 64px 24px; color: #8b949e;
+    }
+    .empty p { margin-bottom: 16px; }
+    .empty button {
+      background: #238636; color: white; border: 0; padding: 8px 16px;
+      border-radius: 4px; font-size: 13px; cursor: pointer;
+    }
+
+    /* Modal */
+    .scrim {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: none; align-items: flex-start; justify-content: center; padding-top: 80px; z-index: 10;
+    }
+    .scrim.open { display: flex; }
+    .modal {
+      background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+      width: 480px; max-width: calc(100vw - 32px); padding: 20px;
+    }
+    .modal h2 { font-size: 16px; font-weight: 600; margin-bottom: 14px; }
+    .modal label { display: block; font-size: 12px; color: #8b949e; margin: 10px 0 4px; }
+    .modal input, .modal textarea {
+      width: 100%; background: #010409; border: 1px solid #30363d;
+      color: #e6edf3; padding: 8px 10px; border-radius: 4px;
+      font: inherit;
+    }
+    .modal input:focus, .modal textarea:focus { outline: none; border-color: #58a6ff; }
+    .modal .row { display: flex; gap: 10px; margin-top: 16px; justify-content: flex-end; }
+    .modal .row button {
+      padding: 7px 14px; border-radius: 4px; font-size: 13px; cursor: pointer;
+      border: 1px solid #30363d; background: transparent; color: #e6edf3;
+    }
+    .modal .row button.primary { background: #238636; border-color: #238636; }
+    .modal .row button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .modal .err { color: #f85149; font-size: 12px; margin-top: 8px; }
+    .hint { color: #6e7681; font-size: 11px; margin-top: 3px; }
   </style>
 </head>
 <body>
-  <h1>mime · review</h1>
-  <div class="who" id="who">…</div>
-  <div class="stub">
-    <strong>Phase 1 stub.</strong> Auth handshake is live.
-    Store CRUD, flow/template picker, import pipeline, and feedback land
-    in subsequent phases — see <code>plans/2026-05-26-reviewer-dashboard.md</code>.
+  <div class="topbar">
+    <span class="brand">mime <em>review</em></span>
+    <span class="who" id="who">…</span>
+    <button class="signout" id="signout">Sign out</button>
   </div>
+
+  <main>
+    <h1>Your stores</h1>
+    <div class="subtitle" id="subtitle">Loading…</div>
+
+    <div id="stores-wrap"></div>
+  </main>
+
+  <div class="scrim" id="scrim">
+    <div class="modal">
+      <h2>Add store</h2>
+      <label>Store name</label>
+      <input id="f-name" placeholder="Acme Apparel" autocomplete="off" />
+      <label>Merchant slug</label>
+      <input id="f-slug" placeholder="acme-apparel" autocomplete="off" />
+      <div class="hint">Lowercase, hyphens only. Used as a path key in imports.</div>
+      <label>Redo store ID</label>
+      <input id="f-storeId" placeholder="674fa2d5d10eb77cba98a901" autocomplete="off" />
+      <div class="hint">The MongoDB ObjectId from the Redo team URL.</div>
+      <label>Klaviyo API key</label>
+      <input id="f-klav" type="password" placeholder="pk_..." autocomplete="off" />
+      <label>Redo session JWT (optional)</label>
+      <input id="f-jwt" type="password" placeholder="eyJ..." autocomplete="off" />
+      <div class="hint">Needed for import. Can be added later.</div>
+      <label>Redo server base (optional)</label>
+      <input id="f-base" placeholder="https://app.getredo.com" autocomplete="off" />
+      <div class="err" id="err"></div>
+      <div class="row">
+        <button id="cancel">Cancel</button>
+        <button class="primary" id="save">Add</button>
+      </div>
+    </div>
+  </div>
+
   <script>
-    fetch("/api/r/me", { credentials: "same-origin" })
-      .then((r) => r.ok ? r.json() : Promise.reject(r.status))
-      .then((me) => {
-        document.getElementById("who").textContent =
-          "Signed in as " + me.reviewerName + " (" + me.reviewerId + ")";
-      })
-      .catch(() => {
-        document.getElementById("who").textContent =
-          "Not signed in — open your /r/<token>/ link.";
-      });
+    const $ = (id) => document.getElementById(id);
+
+    async function loadMe() {
+      const r = await fetch("/api/r/me", { credentials: "same-origin" });
+      if (!r.ok) {
+        $("who").textContent = "Not signed in — open your /r/<token>/ link.";
+        return null;
+      }
+      const me = await r.json();
+      $("who").textContent = me.reviewerName;
+      return me;
+    }
+
+    async function loadStores() {
+      const r = await fetch("/api/r/stores", { credentials: "same-origin" });
+      if (!r.ok) {
+        $("stores-wrap").innerHTML = "<p style='color:#f85149'>Failed to load stores (" + r.status + ").</p>";
+        return;
+      }
+      const { stores } = await r.json();
+      renderStores(stores);
+    }
+
+    function renderStores(stores) {
+      $("subtitle").textContent = stores.length === 0
+        ? "No stores yet — add your first one."
+        : stores.length + " store" + (stores.length === 1 ? "" : "s");
+
+      if (stores.length === 0) {
+        $("stores-wrap").innerHTML =
+          '<div class="empty"><p>You haven\\'t added any stores yet.</p>' +
+          '<button onclick="openModal()">Add your first store</button></div>';
+        return;
+      }
+
+      const cards = stores.map((s) => {
+        const jwtBadge = s.hasRedoJwt
+          ? ('<div class="meta">JWT: ' + (s.jwtExpiresAt ? jwtRelative(s.jwtExpiresAt) : "set") + '</div>')
+          : '<div class="meta warn">No Redo JWT — add to import</div>';
+        return (
+          '<div class="store" data-id="' + s.id + '">' +
+            '<div class="name">' + escapeHtml(s.name) + '</div>' +
+            '<div class="slug">' + escapeHtml(s.merchantSlug) + '</div>' +
+            jwtBadge +
+          '</div>'
+        );
+      }).join("");
+      const addCard = '<button class="add-store" onclick="openModal()">+ Add store</button>';
+      $("stores-wrap").innerHTML = '<div class="stores">' + cards + addCard + '</div>';
+    }
+
+    function jwtRelative(iso) {
+      const ms = new Date(iso).getTime() - Date.now();
+      if (ms <= 0) return "expired";
+      const mins = Math.floor(ms / 60000);
+      if (mins < 60) return "expires in " + mins + "m";
+      const hrs = Math.floor(mins / 60);
+      return "expires in " + hrs + "h";
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      })[c]);
+    }
+
+    function openModal() {
+      $("scrim").classList.add("open");
+      $("err").textContent = "";
+      $("f-name").focus();
+    }
+    function closeModal() {
+      $("scrim").classList.remove("open");
+      ["f-name","f-slug","f-storeId","f-klav","f-jwt","f-base"].forEach((id) => { $(id).value = ""; });
+    }
+
+    async function saveStore() {
+      const body = {
+        name: $("f-name").value,
+        merchantSlug: $("f-slug").value,
+        storeId: $("f-storeId").value,
+        klaviyoKey: $("f-klav").value,
+        redoJwt: $("f-jwt").value || null,
+        redoServerBase: $("f-base").value || null,
+      };
+      $("save").disabled = true;
+      $("err").textContent = "";
+      try {
+        const r = await fetch("/api/r/stores", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          $("err").textContent = data.error || ("Failed (" + r.status + ")");
+          return;
+        }
+        closeModal();
+        await loadStores();
+      } catch (e) {
+        $("err").textContent = String(e.message || e);
+      } finally {
+        $("save").disabled = false;
+      }
+    }
+
+    $("signout").onclick = () => {
+      document.cookie = "reviewer_token=; Path=/; Max-Age=0";
+      window.location.href = "/";
+    };
+    $("cancel").onclick = closeModal;
+    $("save").onclick = saveStore;
+    $("scrim").onclick = (e) => { if (e.target === $("scrim")) closeModal(); };
+    window.openModal = openModal;
+
+    loadMe().then((me) => { if (me) loadStores(); });
   </script>
 </body>
 </html>`;
 
-// GET /dashboard — Phase 1 stub HTML. Phase 2 replaces with the real SPA.
+// GET /dashboard — Phase 2 reviewer dashboard. Stores list + Add Store modal.
 function handleReviewerDashboard(res: ServerResponse): void {
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  res.end(REVIEWER_DASHBOARD_STUB);
+  res.end(REVIEWER_DASHBOARD_HTML);
 }
 
 // Surface dispatch. Returns true if the request was handled (response
@@ -2677,6 +3017,31 @@ async function dispatchReviewerSurface(
   if (req.method === "GET" && path === "/api/r/me") {
     await handleReviewerMe(req, res);
     return true;
+  }
+  // ─── Reviewer-scoped store CRUD ──────────────────────────────────────
+  if (req.method === "GET" && (path === "/api/r/stores" || rawUrl.startsWith("/api/r/stores?"))) {
+    await handleReviewerStoresList(req, res);
+    return true;
+  }
+  if (req.method === "POST" && path === "/api/r/stores") {
+    await handleReviewerStoreCreate(req, res);
+    return true;
+  }
+  const storePath = path.match(/^\/api\/r\/stores\/([^/?]+)$/);
+  if (storePath) {
+    const sid = decodeURIComponent(storePath[1]);
+    if (req.method === "GET") {
+      await handleReviewerStoreGet(req, res, sid);
+      return true;
+    }
+    if (req.method === "PATCH") {
+      await handleReviewerStoreUpdate(req, res, sid);
+      return true;
+    }
+    if (req.method === "DELETE") {
+      await handleReviewerStoreDelete(req, res, sid);
+      return true;
+    }
   }
   if (req.method === "GET" && path === "/") {
     // Landing page: no useful UI without a token. The reviewer should
@@ -3353,11 +3718,13 @@ function tryServeStatic(
 
 const server = createServer(async (req, res) => {
   try {
-    if (!checkBasicAuth(req, res)) return;
     // Public-review surface short-circuits here — admin/assist/import
-    // routes physically don't get evaluated on that deploy. See
+    // routes physically don't get evaluated on that deploy. Runs BEFORE
+    // checkBasicAuth so the reviewer URL token can't be accidentally
+    // gated by admin-side basic-auth env vars. See
     // plans/2026-05-26-reviewer-dashboard.md.
     if (await dispatchReviewerSurface(req, res)) return;
+    if (!checkBasicAuth(req, res)) return;
     // Strip query string for path-only matches below; handlers that care
     // about the query (like `/api/jobs?storeId=`) re-parse from req.url.
     const rawUrl = req.url ?? "";
