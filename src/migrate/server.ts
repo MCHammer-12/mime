@@ -31,6 +31,7 @@ import { klaviyo, paginate, slug } from "../klaviyo.js";
 import { fetchAllMetrics } from "../extract-metrics.js";
 import type { ImportProgressEvent } from "./import-rpc.js";
 import {
+  decodeJwtAud,
   filterFontsNotInBrandKit,
   importFlowRpc,
   importTemplateRpc,
@@ -2634,6 +2635,13 @@ async function handleReviewerStoreGet(
 }
 
 // POST /api/r/stores — create a store owned by the current reviewer.
+// Reviewer only supplies: name, klaviyoKey, redoJwt. The server derives:
+//   - merchantSlug from name (kebab-case; appends random suffix on
+//     collision with an existing slug)
+//   - storeId from the redoJwt's aud/teamId/team_id/sub claim (same path
+//     the admin uses via decodeJwtAud)
+// Mirrors the admin's setup-modal "couldn't read store ID" hint by
+// returning a 400 when the JWT can't be decoded.
 async function handleReviewerStoreCreate(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2643,15 +2651,28 @@ async function handleReviewerStoreCreate(
   if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
   const body = await readJsonBody(req);
   const name = String(body.name ?? "").trim();
-  const merchantSlug = String(body.merchantSlug ?? "").trim();
   const klaviyoKey = String(body.klaviyoKey ?? "").trim();
-  const storeId = String(body.storeId ?? "").trim();
-  const redoJwt = body.redoJwt ? String(body.redoJwt).trim() : null;
-  const redoServerBase = body.redoServerBase ? String(body.redoServerBase).trim() : null;
-  if (!name || !merchantSlug || !klaviyoKey || !storeId) {
+  const redoJwt = body.redoJwt ? String(body.redoJwt).trim() : "";
+  if (!name || !klaviyoKey || !redoJwt) {
     return json(res, 400, {
-      error: "name, merchantSlug, klaviyoKey, and storeId required",
+      error: "name, klaviyoKey, and redoJwt required",
     });
+  }
+  // Auto-extract storeId from the JWT (mongo ObjectId from aud/teamId/etc).
+  const storeId = decodeJwtAud(redoJwt);
+  if (!storeId) {
+    return json(res, 400, {
+      error: "Couldn't read your Redo store ID from the JWT — paste a fresh session token.",
+    });
+  }
+  // Auto-derive merchantSlug from name. Falls back to a generic random
+  // suffix on collision so two stores named "Acme" can coexist.
+  const baseSlug = nameToSlug(name);
+  let merchantSlug = baseSlug;
+  for (let i = 0; i < 5; i++) {
+    const existing = await getStoreBySlug(merchantSlug);
+    if (!existing) break;
+    merchantSlug = baseSlug + "-" + Math.random().toString(36).slice(2, 6);
   }
   try {
     const rec = await createStore({
@@ -2660,7 +2681,7 @@ async function handleReviewerStoreCreate(
       klaviyoKey,
       redoJwt,
       storeId,
-      redoServerBase,
+      redoServerBase: null,
       // Tag with reviewer id so listStoresForReviewer() filters to this
       // reviewer only. createdBy stays null since there's no admin user
       // associated with a reviewer-created store.
@@ -2670,10 +2691,21 @@ async function handleReviewerStoreCreate(
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     if (msg.includes("idx_stores_slug") || msg.includes("duplicate key")) {
-      return json(res, 409, { error: `merchantSlug "${merchantSlug}" already exists` });
+      return json(res, 409, { error: `merchantSlug "${merchantSlug}" already exists — try again` });
     }
     return json(res, 500, { error: msg });
   }
+}
+
+// Lowercase, hyphenate, drop non-alphanum/dash. Mirrors typical merchant-
+// slug shapes used by the admin (acme-apparel, otishi-wellness, etc.).
+function nameToSlug(name: string): string {
+  const cleaned = name.toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || "store";
 }
 
 // PATCH /api/r/stores/:id — edit a reviewer-owned store. Ownership-checked
@@ -3219,28 +3251,17 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
   <div class="scrim" id="scrim">
     <div class="modal">
       <h2>Add store</h2>
-      <div class="modal-subtitle">Connect a Klaviyo account and a Redo store. You can edit later.</div>
+      <div class="modal-subtitle">Three things — the rest is auto-detected.</div>
 
       <label>Store name</label>
       <input id="f-name" placeholder="Acme Apparel" autocomplete="off" />
 
-      <label>Merchant slug</label>
-      <input id="f-slug" placeholder="acme-apparel" autocomplete="off" />
-      <div class="hint">Lowercase, hyphens only. Used as a path key in imports.</div>
-
-      <label>Redo store ID</label>
-      <input id="f-storeId" placeholder="674fa2d5d10eb77cba98a901" autocomplete="off" />
-      <div class="hint">The MongoDB ObjectId from the Redo team URL.</div>
-
       <label>Klaviyo API key</label>
       <input id="f-klav" type="password" placeholder="pk_..." autocomplete="off" />
 
-      <label>Redo session JWT <span style="text-transform:none;letter-spacing:0;color:#6e7681">(optional)</span></label>
+      <label>Redo session JWT</label>
       <input id="f-jwt" type="password" placeholder="eyJ..." autocomplete="off" />
-      <div class="hint">Needed to actually run imports. Can be added later.</div>
-
-      <label>Redo server base <span style="text-transform:none;letter-spacing:0;color:#6e7681">(optional)</span></label>
-      <input id="f-base" placeholder="https://app.getredo.com" autocomplete="off" />
+      <div class="hint">Your store ID is read from the JWT — no need to enter it separately.</div>
 
       <div class="err" id="err"></div>
       <div class="modal-row">
@@ -3676,17 +3697,14 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     }
     function closeModal() {
       $("scrim").classList.remove("open");
-      ["f-name","f-slug","f-storeId","f-klav","f-jwt","f-base"].forEach((id) => { $(id).value = ""; });
+      ["f-name","f-klav","f-jwt"].forEach((id) => { $(id).value = ""; });
     }
 
     async function saveStore() {
       const body = {
         name: $("f-name").value,
-        merchantSlug: $("f-slug").value,
-        storeId: $("f-storeId").value,
         klaviyoKey: $("f-klav").value,
-        redoJwt: $("f-jwt").value || null,
-        redoServerBase: $("f-base").value || null,
+        redoJwt: $("f-jwt").value,
       };
       $("save").disabled = true;
       $("err").textContent = "";

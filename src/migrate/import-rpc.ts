@@ -115,7 +115,7 @@ function resolveServerBase(serverBase: string | undefined | null): string {
  *  for non-JWTs (e.g. `redo_pat_…` personal access tokens) or malformed
  *  tokens. Matches the priority order used by the credentials editor:
  *  `aud` ?? `teamId` ?? `team_id` ?? `sub` (see ui/mock-stores.js). */
-function decodeJwtAud(jwt: string | null | undefined): string | null {
+export function decodeJwtAud(jwt: string | null | undefined): string | null {
   if (!jwt) return null;
   const t = jwt.trim();
   if (t.startsWith("redo_pat_")) return null;
