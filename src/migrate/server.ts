@@ -2724,139 +2724,237 @@ async function handleReviewerStoreDelete(
   return json(res, 200, { ok: true });
 }
 
-// Reviewer dashboard — Phase 2. Vanilla JS (no Babel/React build step),
-// kept in-server so a single npm start serves the whole surface. The
-// admin shell at HTML below stays untouched.
+// Reviewer dashboard — Phase 2.
 //
-// Features in this revision:
-//   - Header with reviewer name + sign-out (clears cookie)
-//   - Stores list (GET /api/r/stores) — empty state with "Add store"
-//   - Add Store modal (POST /api/r/stores)
+// Design matches the admin "Toby 2.0" shell (src/migrate/ui/index.html):
+// same Instrument Serif headers, Inter body, color palette
+// (#0d1117 / #010409 / #21262d / #30363d / #FF4405). Branding swap
+// only: "Toby 2.0" → "mime / review" with the orange italic accent on
+// "review". Fonts loaded from Google Fonts CDN so this surface has no
+// dependency on local /fonts/ static assets.
 //
-// Phase 3 will add the per-store flow picker + import job stream.
-// Phase 4 (partial) will add the notes panel.
+// Vanilla JS (no Babel/React build) — the reviewer surface is small
+// enough that a single inline script is simpler than wiring component
+// files like the admin does.
 const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>mime · review</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; background: #0d1117; }
     body {
-      font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0d1117; color: #e6edf3; min-height: 100vh;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      font-feature-settings: "ss01", "cv11";
+      color: #e6edf3;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
     }
+    .font-serif { font-family: 'Instrument Serif', 'Times New Roman', serif; letter-spacing: -0.005em; }
+    *::-webkit-scrollbar { width: 10px; height: 10px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-thumb { background: #21262d; border-radius: 5px; border: 2px solid #0d1117; }
+    *::-webkit-scrollbar-thumb:hover { background: #30363d; }
+    input:-webkit-autofill {
+      -webkit-text-fill-color: #e6edf3 !important;
+      -webkit-box-shadow: 0 0 0 1000px #010409 inset !important;
+    }
+
+    /* Layout shell — mirrors admin's h-screen / flex-col */
+    .shell { height: 100vh; display: flex; flex-direction: column; }
+
+    /* Top bar — mirrors admin's bg-[#010409] border-b border-[#21262d] */
     .topbar {
-      display: flex; align-items: center; gap: 1rem;
-      padding: 14px 24px; border-bottom: 1px solid #21262d; background: #010409;
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 16px;
+      border-bottom: 1px solid #21262d;
+      background: #010409;
     }
-    .topbar .brand { font-family: ui-serif, Georgia, serif; font-size: 18px; }
-    .topbar .brand em { color: #FF4405; font-style: italic; }
-    .topbar .who { color: #8b949e; font-size: 12px; margin-left: 0.5rem; }
-    .topbar .signout {
-      margin-left: auto; color: #8b949e; font-size: 12px;
-      background: transparent; border: 1px solid #30363d; padding: 4px 10px;
-      border-radius: 4px; cursor: pointer;
+    .brand { display: flex; align-items: baseline; gap: 8px; }
+    .brand .mime { font-family: 'Instrument Serif', serif; font-size: 22px; line-height: 1; color: #e6edf3; }
+    .brand .review { font-family: 'Instrument Serif', serif; font-style: italic; font-size: 16px; line-height: 1; color: #FF4405; }
+    .brand .subbrand { font-size: 11px; color: #6e7681; margin-left: 4px; }
+    .badge {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+      color: #6e7681; padding: 2px 8px; border: 1px solid #30363d;
+      border-radius: 3px; margin-left: 8px;
     }
-    .topbar .signout:hover { color: #e6edf3; border-color: #58a6ff; }
+    .topbar .who { font-size: 12px; color: #6e7681; margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .topbar .who-name { color: #e6edf3; }
+    .signout {
+      font-size: 11px; color: #6e7681; background: transparent;
+      border: 1px solid #30363d; padding: 3px 10px; border-radius: 4px;
+      cursor: pointer; transition: color 0.15s, border-color 0.15s;
+    }
+    .signout:hover { color: #e6edf3; border-color: #388bfd; }
 
-    main { max-width: 900px; margin: 0 auto; padding: 32px 24px; }
-    h1 { font-family: ui-serif, Georgia, serif; font-size: 32px; font-weight: 400; margin-bottom: 4px; }
-    .subtitle { color: #8b949e; font-size: 12px; margin-bottom: 24px; }
+    /* Main content */
+    main { flex: 1; overflow-y: auto; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 32px; }
+    .heading-row { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 24px; }
+    h1 { font-family: 'Instrument Serif', serif; font-size: 40px; line-height: 1; letter-spacing: -0.025em; font-weight: 400; }
+    .subtitle { font-size: 12px; color: #8b949e; margin-top: 8px; }
 
-    .stores { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+    /* Store cards */
+    .stores-grid {
+      display: grid; grid-template-columns: repeat(1, minmax(0, 1fr)); gap: 12px;
+    }
+    @media (min-width: 768px)  { .stores-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (min-width: 1024px) { .stores-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     .store {
-      border: 1px solid #21262d; border-radius: 6px; padding: 16px;
-      background: #0d1117; cursor: pointer; transition: border-color 0.15s;
+      text-align: left; border: 1px solid #21262d; border-radius: 6px;
+      padding: 16px; background: #0d1117; cursor: pointer;
+      transition: border-color 0.15s; min-height: 110px;
+      display: flex; flex-direction: column;
     }
     .store:hover { border-color: #30363d; }
-    .store .name { font-family: ui-serif, Georgia, serif; font-size: 20px; margin-bottom: 6px; }
-    .store .slug { color: #6e7681; font-size: 11px; }
-    .store .meta { color: #8b949e; font-size: 11px; margin-top: 8px; }
+    .store .row { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+    .store .col { min-width: 0; }
+    .store .name { font-family: 'Instrument Serif', serif; font-size: 22px; line-height: 1.1; color: #e6edf3;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .store .slug { font-size: 11px; color: #6e7681; margin-top: 4px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .store .chevron { color: #6e7681; flex-shrink: 0; }
+    .store .meta { font-size: 11px; color: #8b949e; }
     .store .meta.warn { color: #d29922; }
 
     .add-store {
       border: 1px dashed #30363d; border-radius: 6px; padding: 16px;
       background: transparent; color: #8b949e; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-      gap: 6px; min-height: 110px; font-size: 13px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 4px; min-height: 110px;
+      transition: color 0.15s, border-color 0.15s;
     }
-    .add-store:hover { border-color: #58a6ff; color: #e6edf3; }
+    .add-store:hover { border-color: #388bfd; color: #e6edf3; }
+    .add-store .plus { font-size: 18px; line-height: 1; }
+    .add-store .label { font-size: 12px; }
 
+    /* Empty state — when reviewer has no stores yet */
     .empty {
-      text-align: center; padding: 64px 24px; color: #8b949e;
+      text-align: center; padding: 80px 24px; max-width: 480px; margin: 0 auto;
     }
-    .empty p { margin-bottom: 16px; }
-    .empty button {
-      background: #238636; color: white; border: 0; padding: 8px 16px;
-      border-radius: 4px; font-size: 13px; cursor: pointer;
+    .empty .icon { font-family: 'Instrument Serif', serif; font-size: 48px; color: #6e7681; margin-bottom: 16px; }
+    .empty h2 { font-family: 'Instrument Serif', serif; font-size: 28px; line-height: 1; margin-bottom: 12px; font-weight: 400; }
+    .empty p { font-size: 13px; color: #8b949e; line-height: 1.6; margin-bottom: 24px; }
+    .empty .cta {
+      background: #238636; color: white; border: 1px solid #238636;
+      padding: 8px 18px; border-radius: 4px; font-size: 13px;
+      font-family: inherit; cursor: pointer; transition: background 0.15s;
     }
+    .empty .cta:hover { background: #2ea043; }
 
     /* Modal */
     .scrim {
-      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
-      display: none; align-items: flex-start; justify-content: center; padding-top: 80px; z-index: 10;
+      position: fixed; inset: 0;
+      background: #010409cc; backdrop-filter: blur(4px);
+      display: none; align-items: flex-start; justify-content: center;
+      padding-top: 80px; z-index: 50;
     }
     .scrim.open { display: flex; }
     .modal {
       background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
-      width: 480px; max-width: calc(100vw - 32px); padding: 20px;
+      width: 480px; max-width: calc(100vw - 32px); padding: 24px;
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
     }
-    .modal h2 { font-size: 16px; font-weight: 600; margin-bottom: 14px; }
-    .modal label { display: block; font-size: 12px; color: #8b949e; margin: 10px 0 4px; }
-    .modal input, .modal textarea {
+    .modal h2 {
+      font-family: 'Instrument Serif', serif; font-size: 24px; line-height: 1;
+      margin-bottom: 6px; font-weight: 400;
+    }
+    .modal .modal-subtitle { font-size: 12px; color: #8b949e; margin-bottom: 20px; }
+    .modal label { display: block; font-size: 11px; color: #8b949e; margin: 12px 0 4px;
+      text-transform: uppercase; letter-spacing: 0.05em; font-weight: 500; }
+    .modal input {
       width: 100%; background: #010409; border: 1px solid #30363d;
       color: #e6edf3; padding: 8px 10px; border-radius: 4px;
-      font: inherit;
+      font: inherit; font-size: 13px;
+      transition: border-color 0.15s;
     }
-    .modal input:focus, .modal textarea:focus { outline: none; border-color: #58a6ff; }
-    .modal .row { display: flex; gap: 10px; margin-top: 16px; justify-content: flex-end; }
-    .modal .row button {
-      padding: 7px 14px; border-radius: 4px; font-size: 13px; cursor: pointer;
+    .modal input:focus { outline: none; border-color: #388bfd; }
+    .modal input::placeholder { color: #484f58; }
+    .hint { color: #6e7681; font-size: 11px; margin-top: 4px; }
+    .modal-row {
+      display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end;
+      padding-top: 16px; border-top: 1px solid #21262d;
+    }
+    .btn {
+      padding: 7px 14px; border-radius: 4px; font-size: 13px;
+      font-family: inherit; cursor: pointer;
       border: 1px solid #30363d; background: transparent; color: #e6edf3;
+      transition: background 0.15s, border-color 0.15s;
     }
-    .modal .row button.primary { background: #238636; border-color: #238636; }
-    .modal .row button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
-    .modal .err { color: #f85149; font-size: 12px; margin-top: 8px; }
-    .hint { color: #6e7681; font-size: 11px; margin-top: 3px; }
+    .btn:hover { background: #161b22; }
+    .btn.primary {
+      background: #238636; border-color: #238636; color: white;
+    }
+    .btn.primary:hover { background: #2ea043; border-color: #2ea043; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .err { color: #f78166; font-size: 12px; margin-top: 12px; }
   </style>
 </head>
 <body>
-  <div class="topbar">
-    <span class="brand">mime <em>review</em></span>
-    <span class="who" id="who">…</span>
-    <button class="signout" id="signout">Sign out</button>
+  <div class="shell">
+    <div class="topbar">
+      <div class="brand">
+        <span class="mime">mime</span>
+        <span class="review">review</span>
+        <span class="subbrand">· Klaviyo → Redo</span>
+      </div>
+      <span class="badge">external · self-serve</span>
+      <div class="who">
+        <span id="who-name" class="who-name">…</span>
+        <button class="signout" id="signout">Sign out</button>
+      </div>
+    </div>
+
+    <main>
+      <div class="container">
+        <div class="heading-row">
+          <div>
+            <h1>Your stores</h1>
+            <div class="subtitle" id="subtitle">Loading…</div>
+          </div>
+        </div>
+
+        <div id="stores-wrap"></div>
+      </div>
+    </main>
   </div>
-
-  <main>
-    <h1>Your stores</h1>
-    <div class="subtitle" id="subtitle">Loading…</div>
-
-    <div id="stores-wrap"></div>
-  </main>
 
   <div class="scrim" id="scrim">
     <div class="modal">
       <h2>Add store</h2>
+      <div class="modal-subtitle">Connect a Klaviyo account and a Redo store. You can edit later.</div>
+
       <label>Store name</label>
       <input id="f-name" placeholder="Acme Apparel" autocomplete="off" />
+
       <label>Merchant slug</label>
       <input id="f-slug" placeholder="acme-apparel" autocomplete="off" />
       <div class="hint">Lowercase, hyphens only. Used as a path key in imports.</div>
+
       <label>Redo store ID</label>
       <input id="f-storeId" placeholder="674fa2d5d10eb77cba98a901" autocomplete="off" />
       <div class="hint">The MongoDB ObjectId from the Redo team URL.</div>
+
       <label>Klaviyo API key</label>
       <input id="f-klav" type="password" placeholder="pk_..." autocomplete="off" />
-      <label>Redo session JWT (optional)</label>
+
+      <label>Redo session JWT <span style="text-transform:none;letter-spacing:0;color:#6e7681">(optional)</span></label>
       <input id="f-jwt" type="password" placeholder="eyJ..." autocomplete="off" />
-      <div class="hint">Needed for import. Can be added later.</div>
-      <label>Redo server base (optional)</label>
+      <div class="hint">Needed to actually run imports. Can be added later.</div>
+
+      <label>Redo server base <span style="text-transform:none;letter-spacing:0;color:#6e7681">(optional)</span></label>
       <input id="f-base" placeholder="https://app.getredo.com" autocomplete="off" />
+
       <div class="err" id="err"></div>
-      <div class="row">
-        <button id="cancel">Cancel</button>
-        <button class="primary" id="save">Add</button>
+      <div class="modal-row">
+        <button class="btn" id="cancel">Cancel</button>
+        <button class="btn primary" id="save">Add store</button>
       </div>
     </div>
   </div>
@@ -2864,53 +2962,10 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
   <script>
     const $ = (id) => document.getElementById(id);
 
-    async function loadMe() {
-      const r = await fetch("/api/r/me", { credentials: "same-origin" });
-      if (!r.ok) {
-        $("who").textContent = "Not signed in — open your /r/<token>/ link.";
-        return null;
-      }
-      const me = await r.json();
-      $("who").textContent = me.reviewerName;
-      return me;
-    }
-
-    async function loadStores() {
-      const r = await fetch("/api/r/stores", { credentials: "same-origin" });
-      if (!r.ok) {
-        $("stores-wrap").innerHTML = "<p style='color:#f85149'>Failed to load stores (" + r.status + ").</p>";
-        return;
-      }
-      const { stores } = await r.json();
-      renderStores(stores);
-    }
-
-    function renderStores(stores) {
-      $("subtitle").textContent = stores.length === 0
-        ? "No stores yet — add your first one."
-        : stores.length + " store" + (stores.length === 1 ? "" : "s");
-
-      if (stores.length === 0) {
-        $("stores-wrap").innerHTML =
-          '<div class="empty"><p>You haven\\'t added any stores yet.</p>' +
-          '<button onclick="openModal()">Add your first store</button></div>';
-        return;
-      }
-
-      const cards = stores.map((s) => {
-        const jwtBadge = s.hasRedoJwt
-          ? ('<div class="meta">JWT: ' + (s.jwtExpiresAt ? jwtRelative(s.jwtExpiresAt) : "set") + '</div>')
-          : '<div class="meta warn">No Redo JWT — add to import</div>';
-        return (
-          '<div class="store" data-id="' + s.id + '">' +
-            '<div class="name">' + escapeHtml(s.name) + '</div>' +
-            '<div class="slug">' + escapeHtml(s.merchantSlug) + '</div>' +
-            jwtBadge +
-          '</div>'
-        );
-      }).join("");
-      const addCard = '<button class="add-store" onclick="openModal()">+ Add store</button>';
-      $("stores-wrap").innerHTML = '<div class="stores">' + cards + addCard + '</div>';
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      })[c]);
     }
 
     function jwtRelative(iso) {
@@ -2919,13 +2974,74 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
       const mins = Math.floor(ms / 60000);
       if (mins < 60) return "expires in " + mins + "m";
       const hrs = Math.floor(mins / 60);
-      return "expires in " + hrs + "h";
+      if (hrs < 48) return "expires in " + hrs + "h";
+      const days = Math.floor(hrs / 24);
+      return "expires in " + days + "d";
     }
 
-    function escapeHtml(s) {
-      return String(s).replace(/[&<>"']/g, (c) => ({
-        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-      })[c]);
+    async function loadMe() {
+      const r = await fetch("/api/r/me", { credentials: "same-origin" });
+      if (!r.ok) {
+        $("who-name").textContent = "Not signed in";
+        return null;
+      }
+      const me = await r.json();
+      $("who-name").textContent = me.reviewerName;
+      return me;
+    }
+
+    async function loadStores() {
+      const r = await fetch("/api/r/stores", { credentials: "same-origin" });
+      if (!r.ok) {
+        $("stores-wrap").innerHTML = '<p style="color:#f78166;font-size:13px">Failed to load stores (' + r.status + ').</p>';
+        return;
+      }
+      const { stores } = await r.json();
+      renderStores(stores);
+    }
+
+    function renderStores(stores) {
+      $("subtitle").textContent =
+        stores.length === 0
+          ? "no stores yet"
+          : stores.length + " store" + (stores.length === 1 ? "" : "s") + " · jobs keep running when you switch stores";
+
+      if (stores.length === 0) {
+        $("stores-wrap").innerHTML =
+          '<div class="empty">' +
+            '<div class="icon">+</div>' +
+            '<h2>Add your first store</h2>' +
+            '<p>Connect a Klaviyo account and a Redo store, then pick which flows you want to migrate.</p>' +
+            '<button class="cta" onclick="openModal()">Add store</button>' +
+          '</div>';
+        return;
+      }
+
+      const cards = stores.map((s) => {
+        const jwtBadge = s.hasRedoJwt
+          ? ('<div class="meta">JWT ' + (s.jwtExpiresAt ? escapeHtml(jwtRelative(s.jwtExpiresAt)) : "set") + '</div>')
+          : '<div class="meta warn">No Redo JWT — add to import</div>';
+        return (
+          '<button class="store" data-id="' + escapeHtml(s.id) + '">' +
+            '<div class="row">' +
+              '<div class="col">' +
+                '<div class="name">' + escapeHtml(s.name) + '</div>' +
+                '<div class="slug">' + escapeHtml(s.merchantSlug) + '</div>' +
+              '</div>' +
+              '<svg class="chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14">' +
+                '<path d="M6 4L10 8L6 12" stroke-linecap="round" stroke-linejoin="round"></path>' +
+              '</svg>' +
+            '</div>' +
+            jwtBadge +
+          '</button>'
+        );
+      }).join("");
+      const addCard =
+        '<button class="add-store" onclick="openModal()">' +
+          '<span class="plus">+</span>' +
+          '<span class="label">Add store</span>' +
+        '</button>';
+      $("stores-wrap").innerHTML = '<div class="stores-grid">' + cards + addCard + '</div>';
     }
 
     function openModal() {
@@ -2977,6 +3093,9 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     $("cancel").onclick = closeModal;
     $("save").onclick = saveStore;
     $("scrim").onclick = (e) => { if (e.target === $("scrim")) closeModal(); };
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && $("scrim").classList.contains("open")) closeModal();
+    });
     window.openModal = openModal;
 
     loadMe().then((me) => { if (me) loadStores(); });
