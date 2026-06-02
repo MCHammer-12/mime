@@ -2724,6 +2724,224 @@ async function handleReviewerStoreDelete(
   return json(res, 200, { ok: true });
 }
 
+// ─── Phase 3: flow listing + import + job streaming ──────────────────────
+
+// POST /api/r/stores/:id/flows — list Klaviyo flows for a reviewer-owned
+// store. Reviewer never sees/sends the raw klaviyoKey; the server reads it
+// from the store record. Mirrors handleFlowsList for the admin surface.
+async function handleReviewerStoreFlowsList(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const store = await getStoreForReviewer(storeId, reviewer.id);
+  if (!store) return json(res, 404, { error: `store ${storeId} not found` });
+  try {
+    const flows = await paginate<FlowMeta>(
+      "/flows/?fields[flow]=name,status,trigger_type&sort=-updated",
+      store.klaviyoKey,
+    );
+    return json(res, 200, {
+      flows: flows.map((f) => ({
+        id: f.id,
+        name: f.attributes.name,
+        status: f.attributes.status,
+        triggerType: f.attributes.trigger_type,
+      })),
+    });
+  } catch (e: any) {
+    return json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// POST /api/r/stores/:id/import — kick off an import job for one of the
+// reviewer's stores. Body: { flowIds: string[] }. The server reuses the
+// store's stored credentials so the reviewer can't import against keys
+// they don't own. Mirrors handleJobCreate.
+async function handleReviewerImport(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const store = await getStoreForReviewer(storeId, reviewer.id);
+  if (!store) return json(res, 404, { error: `store ${storeId} not found` });
+  if (!store.redoJwt) {
+    return json(res, 400, {
+      error: "store has no Redo JWT — edit the store and add one before importing",
+    });
+  }
+  const body = await readJsonBody(req);
+  const flowIds = Array.isArray(body.flowIds) ? (body.flowIds as string[]) : [];
+  if (flowIds.length === 0) {
+    return json(res, 400, { error: "flowIds[] required (pick at least one flow)" });
+  }
+  // Construct the run body from the store record. The reviewer can't
+  // supply klaviyoKey/redoJwt/storeId — those come from the ownership-
+  // checked store.
+  const runBody = {
+    klaviyoKey: store.klaviyoKey,
+    storeId: store.storeId,
+    merchantSlug: store.merchantSlug,
+    flowIds,
+    templateIds: [],
+    campaignIds: [],
+    redoJwt: store.redoJwt,
+    redoServerBase: store.redoServerBase ?? undefined,
+    runImport: true,
+  };
+  const params = parseRunBody(runBody);
+  if ("error" in params) return json(res, 400, { error: params.error });
+
+  const job = createJob({
+    storeId: store.id,
+    storeName: store.name,
+    merchantSlug: store.merchantSlug,
+    templateIds: [],
+    flowIds,
+  });
+  const ctrl = jobController(job.id);
+
+  json(res, 202, { jobId: job.id, status: job.status });
+
+  setStatus(job.id, "running");
+  void runImport(params, ctrl)
+    .then((summary) => {
+      setStatus(job.id, "completed", { summary });
+    })
+    .catch((e: any) => {
+      ctrl.emit({
+        kind: "error",
+        severity: "error",
+        text: e?.message ?? String(e),
+      });
+      setStatus(job.id, "failed", { error: e?.message ?? String(e) });
+    });
+}
+
+// Ownership check for jobs. A job is owned by a reviewer iff the job's
+// storeId (the Redo Mongo ObjectId in this codebase's terminology) matches
+// a store the reviewer created. Cross-references job → store row.
+async function getJobForReviewer(
+  jobId: string,
+  reviewerId: string,
+): Promise<ReturnType<typeof getJob> | null> {
+  const job = getJob(jobId);
+  if (!job) return null;
+  // job.storeId is the Redo store_id (mongo ObjectId), not the stores.id
+  // primary key. The stores table has BOTH — id (primary) and store_id
+  // (Redo's Mongo id). Reviewer ownership is by stores.id from the
+  // reviewer's row. We need a way to find the local stores row whose
+  // store_id matches job.storeId AND created_by_reviewer = reviewerId.
+  // Simplest: list all the reviewer's stores and check membership.
+  const myStores = await listStoresForReviewer(reviewerId);
+  const ownsStore = myStores.some(
+    (s) => s.storeId === job.storeId || s.id === job.storeId,
+  );
+  return ownsStore ? job : null;
+}
+
+// GET /api/r/jobs — list jobs across all the reviewer's stores. Each
+// summary mirrors handleJobList's shape but trimmed to fields the
+// reviewer dashboard needs.
+async function handleReviewerJobsList(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const myStores = await listStoresForReviewer(reviewer.id);
+  const myStoreIds = new Set(myStores.flatMap((s) => [s.id, s.storeId]));
+  const all = listJobs();
+  const jobs = all
+    .filter((j) => myStoreIds.has(j.storeId))
+    .map((j) => ({
+      id: j.id,
+      storeId: j.storeId,
+      storeName: j.storeName,
+      status: j.status,
+      createdAt: j.createdAt,
+      completedAt: j.completedAt,
+      flowIds: j.flowIds,
+      eventCount: j.events.length,
+      summary: j.summary,
+      error: j.error,
+      lastEvent: j.events[j.events.length - 1] ?? null,
+      pendingInput: j.pendingInput ?? null,
+    }));
+  return json(res, 200, { jobs });
+}
+
+// GET /api/r/jobs/:id — full job detail (ownership-checked).
+async function handleReviewerJobGet(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const job = await getJobForReviewer(jobId, reviewer.id);
+  if (!job) return json(res, 404, { error: `job ${jobId} not found` });
+  return json(res, 200, job);
+}
+
+// GET /api/r/jobs/:id/stream — NDJSON live stream (ownership-checked).
+// Same logic as handleJobStream — replays history past ?since, subscribes
+// for new events, heartbeats every 10s, ends on terminal status.
+async function handleReviewerJobStream(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const job = await getJobForReviewer(jobId, reviewer.id);
+  if (!job) return json(res, 404, { error: `job ${jobId} not found` });
+
+  const url = new URL(req.url ?? "", `http://${req.headers.host ?? "localhost"}`);
+  const since = Number(url.searchParams.get("since") ?? "0");
+
+  ndjsonStart(res);
+
+  for (const e of job.events) {
+    if (e.seq > since) res.write(JSON.stringify(e) + "\n");
+  }
+
+  const terminal = (status: string) =>
+    status === "completed" || status === "failed" || status === "cancelled";
+  if (terminal(job.status)) {
+    res.end();
+    return;
+  }
+
+  const unsubscribe = subscribe(jobId, (event) => {
+    res.write(JSON.stringify(event) + "\n");
+  });
+
+  const interval = setInterval(() => {
+    const current = getJob(jobId);
+    if (!current || terminal(current.status)) {
+      clearInterval(interval);
+      clearInterval(heartbeat);
+      unsubscribe();
+      res.end();
+    }
+  }, 500);
+
+  const heartbeat = setInterval(() => {
+    res.write(JSON.stringify({ kind: "heartbeat", t: Date.now() }) + "\n");
+  }, 10_000);
+
+  req.on("close", () => {
+    clearInterval(interval);
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
+}
+
 // Reviewer dashboard — Phase 2.
 //
 // Design matches the admin "Toby 2.0" shell (src/migrate/ui/index.html):
@@ -2894,7 +3112,87 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     .btn.primary:hover { background: #2ea043; border-color: #2ea043; }
     .btn:disabled { opacity: 0.4; cursor: not-allowed; }
     .err { color: #f78166; font-size: 12px; margin-top: 12px; }
-  </style>
+
+    /* Store-detail view */
+    .breadcrumb {
+      display: flex; align-items: center; gap: 6px; font-size: 12px; color: #6e7681;
+      margin-bottom: 16px;
+    }
+    .breadcrumb a { color: #58a6ff; cursor: pointer; }
+    .breadcrumb a:hover { color: #79c0ff; }
+    .breadcrumb .sep { color: #30363d; }
+
+    .flows-toolbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 16px; background: #010409; border: 1px solid #21262d;
+      border-radius: 6px; margin-bottom: 12px; position: sticky; top: 0; z-index: 1;
+    }
+    .flows-toolbar .count { font-size: 12px; color: #8b949e; }
+    .flows-toolbar .count strong { color: #e6edf3; }
+    .flows-toolbar .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+    .flows-toolbar input[type=search] {
+      background: #0d1117; border: 1px solid #30363d; color: #e6edf3;
+      padding: 5px 10px; border-radius: 4px; font: inherit; font-size: 12px;
+      width: 200px;
+    }
+    .flows-toolbar input[type=search]:focus { outline: none; border-color: #388bfd; }
+    .link-btn {
+      background: transparent; border: 0; color: #58a6ff; cursor: pointer;
+      font: inherit; font-size: 12px; padding: 0;
+    }
+    .link-btn:hover { color: #79c0ff; }
+
+    .flow-list {
+      border: 1px solid #21262d; border-radius: 6px; overflow: hidden;
+      background: #0d1117;
+    }
+    .flow-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px; border-bottom: 1px solid #161b22;
+      cursor: pointer; transition: background 0.1s;
+    }
+    .flow-row:last-child { border-bottom: 0; }
+    .flow-row:hover { background: #161b22; }
+    .flow-row input[type=checkbox] {
+      accent-color: #238636; width: 14px; height: 14px; cursor: pointer;
+    }
+    .flow-row .name { flex: 1; font-size: 13px; color: #e6edf3; }
+    .flow-row .meta { font-size: 11px; color: #6e7681; display: flex; gap: 8px; align-items: center; }
+    .flow-row .status { padding: 1px 6px; border-radius: 3px; font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.05em; }
+    .flow-row .status.live { background: #1b4721; color: #3fb950; }
+    .flow-row .status.draft { background: #2d2418; color: #d29922; }
+    .flow-row .status.archived { background: #21262d; color: #8b949e; }
+
+    /* Job progress view */
+    .progress-card {
+      border: 1px solid #21262d; border-radius: 6px; background: #0d1117;
+      padding: 20px; margin-bottom: 16px;
+    }
+    .progress-status {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+    }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .status-dot.running { background: #58a6ff; animation: pulse 1.5s ease-in-out infinite; }
+    .status-dot.completed { background: #3fb950; }
+    .status-dot.failed { background: #f85149; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .progress-status .label {
+      font-family: 'Instrument Serif', serif; font-size: 20px; line-height: 1;
+    }
+    .progress-meta { font-size: 12px; color: #8b949e; }
+    .log {
+      background: #010409; border: 1px solid #21262d; border-radius: 6px;
+      padding: 12px 14px; font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 11px; line-height: 1.5; color: #8b949e;
+      max-height: 400px; overflow-y: auto;
+    }
+    .log .line { white-space: pre-wrap; word-break: break-word; }
+    .log .line.step { color: #79c0ff; }
+    .log .line.info { color: #8b949e; }
+    .log .line.warn { color: #d29922; }
+    .log .line.err  { color: #f78166; }
+    .log .line.success { color: #3fb950; }
 </head>
 <body>
   <div class="shell">
@@ -2912,15 +3210,8 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     </div>
 
     <main>
-      <div class="container">
-        <div class="heading-row">
-          <div>
-            <h1>Your stores</h1>
-            <div class="subtitle" id="subtitle">Loading…</div>
-          </div>
-        </div>
-
-        <div id="stores-wrap"></div>
+      <div class="container" id="container">
+        <!-- Rendered by JS based on state.view: "stores" | "store" | "job" -->
       </div>
     </main>
   </div>
@@ -2962,6 +3253,25 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
   <script>
     const $ = (id) => document.getElementById(id);
 
+    // ─── Top-level app state ────────────────────────────────────────────
+    // view: "stores" | "store" | "job"
+    // store: cached current store record on the store/job views
+    // flows: cached flow list per store id
+    // selected: Set<flowId> for the picker
+    // jobId/jobStatus/jobEvents: when view==="job"
+    const state = {
+      view: "stores",
+      stores: null,
+      store: null,
+      flows: null,
+      selected: new Set(),
+      flowFilter: "",
+      jobId: null,
+      jobStatus: null,
+      jobEvents: [],
+      activeStream: null, // AbortController for the NDJSON fetch
+    };
+
     function escapeHtml(s) {
       return String(s).replace(/[&<>"']/g, (c) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -2979,6 +3289,7 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
       return "expires in " + days + "d";
     }
 
+    // ─── Auth ───────────────────────────────────────────────────────────
     async function loadMe() {
       const r = await fetch("/api/r/me", { credentials: "same-origin" });
       if (!r.ok) {
@@ -2990,21 +3301,62 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
       return me;
     }
 
-    async function loadStores() {
+    // ─── Router / view dispatcher ──────────────────────────────────────
+    // URL hash drives the view so refresh / bookmark works.
+    //   #stores               → stores list (default)
+    //   #store=<id>           → store detail (flow picker)
+    //   #job=<jobId>          → job progress
+    function parseHash() {
+      const h = (location.hash || "").replace(/^#/, "");
+      if (!h) return { view: "stores" };
+      const [key, val] = h.split("=");
+      if (key === "store" && val) return { view: "store", storeId: val };
+      if (key === "job" && val)   return { view: "job", jobId: val };
+      return { view: "stores" };
+    }
+    function setHash(view, id) {
+      if (view === "stores") history.replaceState(null, "", "#stores");
+      else if (view === "store") history.replaceState(null, "", "#store=" + id);
+      else if (view === "job") history.replaceState(null, "", "#job=" + id);
+    }
+    async function routeFromHash() {
+      const r = parseHash();
+      if (r.view === "stores") return renderStoresView();
+      if (r.view === "store") return openStore(r.storeId);
+      if (r.view === "job") return openJob(r.jobId);
+    }
+
+    // ─── Stores view ────────────────────────────────────────────────────
+    async function renderStoresView() {
+      state.view = "stores";
+      setHash("stores");
+      // Abort any active stream from a previous view.
+      if (state.activeStream) { state.activeStream.abort(); state.activeStream = null; }
+
+      $("container").innerHTML =
+        '<div class="heading-row">' +
+          '<div>' +
+            '<h1>Your stores</h1>' +
+            '<div class="subtitle" id="subtitle">Loading…</div>' +
+          '</div>' +
+        '</div>' +
+        '<div id="stores-wrap"></div>';
+
       const r = await fetch("/api/r/stores", { credentials: "same-origin" });
       if (!r.ok) {
         $("stores-wrap").innerHTML = '<p style="color:#f78166;font-size:13px">Failed to load stores (' + r.status + ').</p>';
         return;
       }
       const { stores } = await r.json();
-      renderStores(stores);
+      state.stores = stores;
+      renderStoresGrid(stores);
     }
 
-    function renderStores(stores) {
+    function renderStoresGrid(stores) {
       $("subtitle").textContent =
         stores.length === 0
           ? "no stores yet"
-          : stores.length + " store" + (stores.length === 1 ? "" : "s") + " · jobs keep running when you switch stores";
+          : stores.length + " store" + (stores.length === 1 ? "" : "s") + " · click one to pick flows to import";
 
       if (stores.length === 0) {
         $("stores-wrap").innerHTML =
@@ -3022,7 +3374,7 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
           ? ('<div class="meta">JWT ' + (s.jwtExpiresAt ? escapeHtml(jwtRelative(s.jwtExpiresAt)) : "set") + '</div>')
           : '<div class="meta warn">No Redo JWT — add to import</div>';
         return (
-          '<button class="store" data-id="' + escapeHtml(s.id) + '">' +
+          '<button class="store" data-id="' + escapeHtml(s.id) + '" onclick="openStore(\\'' + escapeHtml(s.id) + '\\')">' +
             '<div class="row">' +
               '<div class="col">' +
                 '<div class="name">' + escapeHtml(s.name) + '</div>' +
@@ -3044,6 +3396,279 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
       $("stores-wrap").innerHTML = '<div class="stores-grid">' + cards + addCard + '</div>';
     }
 
+    // ─── Store-detail view (flow picker) ────────────────────────────────
+    async function openStore(storeId) {
+      state.view = "store";
+      state.selected = new Set();
+      state.flowFilter = "";
+      setHash("store", storeId);
+      if (state.activeStream) { state.activeStream.abort(); state.activeStream = null; }
+
+      $("container").innerHTML =
+        '<div class="breadcrumb">' +
+          '<a onclick="renderStoresView()">← Your stores</a>' +
+          '<span class="sep">/</span>' +
+          '<span id="bc-name">…</span>' +
+        '</div>' +
+        '<div class="heading-row">' +
+          '<div>' +
+            '<h1 id="store-name">…</h1>' +
+            '<div class="subtitle" id="store-subtitle">Loading flows…</div>' +
+          '</div>' +
+        '</div>' +
+        '<div id="flow-toolbar"></div>' +
+        '<div id="flow-wrap"></div>';
+
+      // Load store record + flows in parallel.
+      const [storeRes, flowsRes] = await Promise.all([
+        fetch("/api/r/stores/" + encodeURIComponent(storeId), { credentials: "same-origin" }),
+        fetch("/api/r/stores/" + encodeURIComponent(storeId) + "/flows", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      ]);
+
+      if (!storeRes.ok) {
+        $("flow-wrap").innerHTML = '<p style="color:#f78166;font-size:13px">Store not found.</p>';
+        return;
+      }
+      const { store } = await storeRes.json();
+      state.store = store;
+      $("bc-name").textContent = store.name;
+      $("store-name").textContent = store.name;
+
+      if (!flowsRes.ok) {
+        const errData = await flowsRes.json().catch(() => ({}));
+        $("store-subtitle").textContent = "Failed to load flows";
+        $("flow-wrap").innerHTML = '<p style="color:#f78166;font-size:13px">' +
+          escapeHtml(errData.error || ("Failed to load flows (" + flowsRes.status + ")")) +
+          '</p>';
+        return;
+      }
+      const { flows } = await flowsRes.json();
+      state.flows = flows;
+      $("store-subtitle").textContent =
+        flows.length + " flow" + (flows.length === 1 ? "" : "s") + " in Klaviyo · pick what to import";
+      renderFlowPicker();
+    }
+
+    function renderFlowPicker() {
+      const flows = state.flows;
+      const filter = state.flowFilter.toLowerCase().trim();
+      const visible = filter
+        ? flows.filter((f) => f.name.toLowerCase().includes(filter))
+        : flows;
+
+      const allSelected = visible.length > 0 && visible.every((f) => state.selected.has(f.id));
+      const someSelected = state.selected.size > 0;
+      const canImport = state.selected.size > 0 && state.store && state.store.redoJwt;
+
+      $("flow-toolbar").innerHTML =
+        '<div class="flows-toolbar">' +
+          '<div class="count"><strong>' + state.selected.size + '</strong> selected · <strong>' + flows.length + '</strong> total</div>' +
+          '<button class="link-btn" onclick="selectAll(' + (!allSelected) + ')">' + (allSelected ? 'Deselect all' : 'Select all visible') + '</button>' +
+          '<div class="right">' +
+            '<input type="search" placeholder="Filter by name…" id="flow-filter" value="' + escapeHtml(state.flowFilter) + '" />' +
+            '<button class="btn primary" id="import-btn" ' + (canImport ? '' : 'disabled') + ' onclick="runImport()">' +
+              'Import ' + state.selected.size + ' flow' + (state.selected.size === 1 ? '' : 's') +
+            '</button>' +
+          '</div>' +
+        '</div>';
+
+      if (!state.store.redoJwt) {
+        $("flow-wrap").innerHTML =
+          '<div style="padding:14px;background:#2d2418;border:1px solid #6e5a23;border-radius:6px;color:#d29922;font-size:12px;margin-bottom:12px">' +
+            'This store has no Redo JWT yet. You can still browse flows here, but you\\'ll need to add a JWT before importing.' +
+          '</div>' +
+          renderFlowRows(visible);
+      } else {
+        $("flow-wrap").innerHTML = renderFlowRows(visible);
+      }
+
+      // Wire the filter input — debounce-less is fine for a small list.
+      const fi = $("flow-filter");
+      if (fi) {
+        fi.oninput = (e) => {
+          state.flowFilter = e.target.value;
+          renderFlowPicker();
+          $("flow-filter").focus();
+          // Restore caret to end after re-render
+          const len = $("flow-filter").value.length;
+          $("flow-filter").setSelectionRange(len, len);
+        };
+      }
+    }
+
+    function renderFlowRows(flows) {
+      if (flows.length === 0) {
+        return '<div style="padding:24px;text-align:center;color:#6e7681;font-size:12px;border:1px solid #21262d;border-radius:6px">No flows match the filter.</div>';
+      }
+      return '<div class="flow-list">' + flows.map((f) => {
+        const checked = state.selected.has(f.id) ? "checked" : "";
+        const statusClass = f.status === "live" ? "live"
+          : f.status === "draft" ? "draft"
+          : "archived";
+        return (
+          '<label class="flow-row">' +
+            '<input type="checkbox" data-id="' + escapeHtml(f.id) + '" ' + checked + ' onchange="toggleFlow(\\'' + escapeHtml(f.id) + '\\', this.checked)" />' +
+            '<div class="name">' + escapeHtml(f.name) + '</div>' +
+            '<div class="meta">' +
+              '<span>' + escapeHtml(f.triggerType || "?") + '</span>' +
+              '<span class="status ' + statusClass + '">' + escapeHtml(f.status) + '</span>' +
+            '</div>' +
+          '</label>'
+        );
+      }).join("") + '</div>';
+    }
+
+    function toggleFlow(id, checked) {
+      if (checked) state.selected.add(id);
+      else state.selected.delete(id);
+      // Re-render the toolbar count + button enabled state, but not the
+      // list (we just toggled a checkbox; DOM is already correct).
+      const tb = $("flow-toolbar");
+      const oldFilterVal = $("flow-filter") ? $("flow-filter").value : "";
+      // Re-render just the toolbar — preserve filter input focus.
+      const wasFocused = document.activeElement === $("flow-filter");
+      renderFlowPicker();
+      if (wasFocused && $("flow-filter")) $("flow-filter").focus();
+    }
+
+    function selectAll(yes) {
+      const filter = state.flowFilter.toLowerCase().trim();
+      const visible = filter
+        ? state.flows.filter((f) => f.name.toLowerCase().includes(filter))
+        : state.flows;
+      if (yes) visible.forEach((f) => state.selected.add(f.id));
+      else visible.forEach((f) => state.selected.delete(f.id));
+      renderFlowPicker();
+    }
+
+    // ─── Import + job streaming ────────────────────────────────────────
+    async function runImport() {
+      const flowIds = Array.from(state.selected);
+      if (flowIds.length === 0) return;
+      const r = await fetch("/api/r/stores/" + encodeURIComponent(state.store.id) + "/import", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ flowIds }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        alert(data.error || ("Import failed: " + r.status));
+        return;
+      }
+      openJob(data.jobId);
+    }
+
+    async function openJob(jobId) {
+      state.view = "job";
+      state.jobId = jobId;
+      state.jobEvents = [];
+      state.jobStatus = "running";
+      setHash("job", jobId);
+
+      $("container").innerHTML =
+        '<div class="breadcrumb">' +
+          '<a onclick="renderStoresView()">← Your stores</a>' +
+          (state.store ? '<span class="sep">/</span><a onclick="openStore(\\'' + escapeHtml(state.store.id) + '\\')">' + escapeHtml(state.store.name) + '</a>' : '') +
+          '<span class="sep">/</span>' +
+          '<span>Import</span>' +
+        '</div>' +
+        '<div class="progress-card">' +
+          '<div class="progress-status">' +
+            '<span class="status-dot running" id="status-dot"></span>' +
+            '<span class="label" id="status-label">Importing…</span>' +
+          '</div>' +
+          '<div class="progress-meta" id="status-meta">Job ' + escapeHtml(jobId) + '</div>' +
+        '</div>' +
+        '<div class="log" id="log"></div>';
+
+      // Stream the NDJSON.
+      const ctrl = new AbortController();
+      state.activeStream = ctrl;
+      try {
+        const resp = await fetch("/api/r/jobs/" + encodeURIComponent(jobId) + "/stream", {
+          credentials: "same-origin",
+          signal: ctrl.signal,
+        });
+        if (!resp.ok || !resp.body) {
+          appendLog({ kind: "error", text: "Stream failed: " + resp.status }, "err");
+          return;
+        }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split("\\n");
+          buf = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try { handleStreamEvent(JSON.parse(line)); }
+            catch (_) { /* ignore parse errors */ }
+          }
+        }
+        // Server ended the stream — job is terminal.
+        finishJob();
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+        appendLog({ kind: "error", text: String(e?.message || e) }, "err");
+      }
+    }
+
+    function handleStreamEvent(ev) {
+      if (ev.kind === "heartbeat") return;
+      state.jobEvents.push(ev);
+      // Best-effort classification for log coloring.
+      const text = ev.text || ev.label || ev.message || (ev.kind === "exported" ? "exported: " + (ev.name || ev.id)
+                  : ev.kind === "flow_imported" ? "flow imported: " + (ev.name || ev.id)
+                  : ev.kind === "fail" ? "failed: " + (ev.name || ev.id) + " — " + (ev.error || "")
+                  : ev.kind === "done" ? "done"
+                  : ev.kind === "summary" ? JSON.stringify(ev)
+                  : ev.kind);
+      const cls = ev.severity === "error" || ev.kind === "fail" || ev.kind === "error" ? "err"
+                : ev.severity === "warning" || ev.kind === "warn" ? "warn"
+                : ev.kind === "step" ? "step"
+                : ev.severity === "success" ? "success"
+                : "info";
+      appendLog({ text }, cls);
+
+      if (ev.kind === "done") {
+        state.jobStatus = "completed";
+        $("status-dot").className = "status-dot completed";
+        $("status-label").textContent = "Done";
+      }
+    }
+
+    function appendLog(ev, cls) {
+      const log = $("log");
+      if (!log) return;
+      const div = document.createElement("div");
+      div.className = "line " + (cls || "info");
+      div.textContent = ev.text || "";
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function finishJob() {
+      if (state.jobStatus !== "failed" && state.jobStatus !== "completed") {
+        state.jobStatus = "completed";
+      }
+      const dot = $("status-dot");
+      const label = $("status-label");
+      if (dot && label) {
+        dot.className = "status-dot " + (state.jobStatus === "failed" ? "failed" : "completed");
+        label.textContent = state.jobStatus === "failed" ? "Failed" : "Done";
+      }
+    }
+
+    // ─── Modal (Add Store) ──────────────────────────────────────────────
     function openModal() {
       $("scrim").classList.add("open");
       $("err").textContent = "";
@@ -3078,7 +3703,7 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
           return;
         }
         closeModal();
-        await loadStores();
+        await renderStoresView();
       } catch (e) {
         $("err").textContent = String(e.message || e);
       } finally {
@@ -3086,6 +3711,7 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
       }
     }
 
+    // ─── Wire up + boot ────────────────────────────────────────────────
     $("signout").onclick = () => {
       document.cookie = "reviewer_token=; Path=/; Max-Age=0";
       window.location.href = "/";
@@ -3096,9 +3722,17 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && $("scrim").classList.contains("open")) closeModal();
     });
-    window.openModal = openModal;
+    window.addEventListener("hashchange", () => { routeFromHash(); });
 
-    loadMe().then((me) => { if (me) loadStores(); });
+    window.openModal = openModal;
+    window.openStore = openStore;
+    window.openJob = openJob;
+    window.renderStoresView = renderStoresView;
+    window.runImport = runImport;
+    window.toggleFlow = toggleFlow;
+    window.selectAll = selectAll;
+
+    loadMe().then((me) => { if (me) routeFromHash(); });
   </script>
 </body>
 </html>`;
@@ -3159,6 +3793,35 @@ async function dispatchReviewerSurface(
     }
     if (req.method === "DELETE") {
       await handleReviewerStoreDelete(req, res, sid);
+      return true;
+    }
+  }
+  // ─── Phase 3: per-store flows list + import ─────────────────────────
+  const storeFlowsPath = path.match(/^\/api\/r\/stores\/([^/?]+)\/flows$/);
+  if (storeFlowsPath && req.method === "POST") {
+    await handleReviewerStoreFlowsList(req, res, decodeURIComponent(storeFlowsPath[1]));
+    return true;
+  }
+  const storeImportPath = path.match(/^\/api\/r\/stores\/([^/?]+)\/import$/);
+  if (storeImportPath && req.method === "POST") {
+    await handleReviewerImport(req, res, decodeURIComponent(storeImportPath[1]));
+    return true;
+  }
+  // ─── Phase 3: jobs list + detail + NDJSON stream ────────────────────
+  if (req.method === "GET" && (path === "/api/r/jobs" || rawUrl.startsWith("/api/r/jobs?"))) {
+    await handleReviewerJobsList(req, res);
+    return true;
+  }
+  const jobPath = path.match(/^\/api\/r\/jobs\/([^/?]+)(\/stream)?$/);
+  if (jobPath) {
+    const jid = decodeURIComponent(jobPath[1]);
+    const sub = jobPath[2];
+    if (req.method === "GET" && !sub) {
+      await handleReviewerJobGet(req, res, jid);
+      return true;
+    }
+    if (req.method === "GET" && sub === "/stream") {
+      await handleReviewerJobStream(req, res, jid);
       return true;
     }
   }
