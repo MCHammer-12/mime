@@ -3225,6 +3225,7 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     .log .line.warn { color: #d29922; }
     .log .line.err  { color: #f78166; }
     .log .line.success { color: #3fb950; }
+  </style>
 </head>
 <body>
   <div class="shell">
