@@ -294,6 +294,20 @@ const MIGRATIONS: Array<{ name: string; sql: string }> = [
         WHERE created_by_reviewer IS NOT NULL;
     `,
   },
+  {
+    // Seed the shared "public" reviewer used by anyone hitting the
+    // public_review surface without a personalized /r/<token>/ cookie.
+    // Stores added by anonymous visitors get created_by_reviewer="public"
+    // so they show up in the shared list. The token is a sentinel string
+    // (not a real auth token); requireReviewer never tries to use it for
+    // cookie lookup.
+    name: "012_public_reviewer",
+    sql: `
+      INSERT INTO reviewers (id, name, token, email)
+      VALUES ('public', 'Reviewer', 'public-no-auth-needed', NULL)
+      ON CONFLICT (id) DO NOTHING;
+    `,
+  },
 ];
 
 /**

@@ -2562,34 +2562,43 @@ async function requireReviewer(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<ReviewerRecord | null> {
+  // Open access by design: anyone hitting the public surface gets a
+  // synthetic "public" reviewer identity. If a real reviewer_token
+  // cookie is present and resolves to a row, prefer that (so per-
+  // reviewer scoping still works for any future use), otherwise
+  // everyone shares the same public id and store list.
   const token = parseCookie(req, REVIEWER_COOKIE);
-  if (!token) {
-    json(res, 401, { error: "no reviewer cookie — visit your /r/<token>/ link" });
-    return null;
+  if (token) {
+    const reviewer = await getReviewerByToken(token);
+    if (reviewer) return reviewer;
   }
-  const reviewer = await getReviewerByToken(token);
-  if (!reviewer) {
-    json(res, 401, { error: "reviewer token invalid or disabled" });
-    return null;
-  }
-  return reviewer;
+  return PUBLIC_REVIEWER;
 }
 
-// GET /r/<token>/ — handshake. Looks up the reviewer, sets the cookie,
-// redirects to /dashboard. Bad tokens render a plain "invalid link" page
-// so the operator can spot the issue without curl.
+// Synthetic identity for non-cookie visitors. All public access shares
+// this single id so stores created without a cookie are all owned by
+// "public" and visible to anyone else who lands here.
+const PUBLIC_REVIEWER: ReviewerRecord = {
+  id: "public",
+  name: "Reviewer",
+  token: "",
+  email: null,
+  createdAt: new Date(0).toISOString(),
+  disabledAt: null,
+};
+
+// GET /r/<token>/ — handshake. If the token matches a real reviewer row,
+// set the cookie so future requests authenticate as that reviewer. If it
+// doesn't, just redirect to /dashboard anyway — the public surface is
+// open access, so an unrecognized token isn't an error, just an anonymous
+// visitor.
 async function handleReviewerHandshake(
   req: IncomingMessage,
   res: ServerResponse,
   token: string,
 ): Promise<void> {
   const reviewer = await getReviewerByToken(token);
-  if (!reviewer) {
-    res.writeHead(404, { "content-type": "text/plain" });
-    res.end("link invalid or revoked");
-    return;
-  }
-  setReviewerCookie(res, token);
+  if (reviewer) setReviewerCookie(res, token);
   res.writeHead(302, { location: "/dashboard" });
   res.end();
 }
@@ -3235,10 +3244,9 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
         <span class="review">review</span>
         <span class="subbrand">· Klaviyo → Redo</span>
       </div>
-      <span class="badge">external · self-serve</span>
+      <span class="badge">open access</span>
       <div class="who">
         <span id="who-name" class="who-name">…</span>
-        <button class="signout" id="signout">Sign out</button>
       </div>
     </div>
 
@@ -3731,10 +3739,6 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     }
 
     // ─── Wire up + boot ────────────────────────────────────────────────
-    $("signout").onclick = () => {
-      document.cookie = "reviewer_token=; Path=/; Max-Age=0";
-      window.location.href = "/";
-    };
     $("cancel").onclick = closeModal;
     $("save").onclick = saveStore;
     $("scrim").onclick = (e) => { if (e.target === $("scrim")) closeModal(); };
@@ -3845,14 +3849,10 @@ async function dispatchReviewerSurface(
     }
   }
   if (req.method === "GET" && path === "/") {
-    // Landing page: no useful UI without a token. The reviewer should
-    // hit /r/<token>/ from their emailed link.
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(`<!doctype html><meta charset="utf-8"><title>mime · review</title>
-<body style="font:14px system-ui;background:#0d1117;color:#e6edf3;padding:4rem;max-width:640px;margin:0 auto">
-<h1 style="font-weight:400">mime · review</h1>
-<p style="color:#8b949e">This is the reviewer surface. Open the personalized link you were emailed.</p>
-</body>`);
+    // Public surface is open access — landing redirects straight to the
+    // dashboard. No personalized link needed.
+    res.writeHead(302, { location: "/dashboard" });
+    res.end();
     return true;
   }
 
