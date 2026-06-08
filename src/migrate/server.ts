@@ -3376,17 +3376,31 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     </main>
   </div>
 
-  <!-- Needs-input modal: rendered when the import pauses on a needs_input
-       event (e.g. unresolvable trigger, transactional routing prompt). -->
+  <!-- Needs-input modal — copies the admin's needs-input.jsx UX:
+       header with "job paused" tag, item context, prominent question,
+       italic clarifying context, type-specific input (boolean buttons /
+       choice list / text input), "Apply to other items" checkbox, and
+       a Skip option. JS builds the body dynamically per event. -->
   <div class="scrim" id="ni-scrim">
-    <div class="modal">
-      <h2 id="ni-question">…</h2>
-      <div class="modal-subtitle" id="ni-context"></div>
-      <div id="ni-meta" style="font-size:11px;color:#6e7681;margin-bottom:8px"></div>
-      <div id="ni-input-wrap"></div>
-      <div class="err" id="ni-err"></div>
-      <div class="modal-row">
-        <button class="btn primary" id="ni-submit">Continue</button>
+    <div class="modal" id="ni-modal" style="border-color:#58a6ff80;padding:0;width:520px">
+      <div style="display:flex;align-items:center;gap:8px;border-bottom:1px solid #21262d;padding:14px 20px">
+        <span style="width:6px;height:6px;border-radius:50%;background:#58a6ff;flex-shrink:0"></span>
+        <h2 style="font-family:'Instrument Serif',serif;font-size:20px;line-height:1;color:#e6edf3;font-weight:400;margin:0">Needs your input</h2>
+        <span style="font-size:11px;color:#6e7681;margin-left:auto">job paused</span>
+      </div>
+      <div style="padding:16px 20px 8px">
+        <div style="font-size:11px;color:#6e7681;margin-bottom:6px" id="ni-meta"></div>
+        <div style="font-size:14px;color:#e6edf3;margin-bottom:10px;line-height:1.5" id="ni-question"></div>
+        <div style="font-size:11px;color:#8b949e;line-height:1.5;font-style:italic;border-left:2px solid #30363d;padding-left:8px;margin-bottom:16px;display:none" id="ni-context"></div>
+        <div id="ni-input-wrap"></div>
+        <label style="display:none;align-items:center;gap:6px;margin-top:14px;font-size:11px;color:#8b949e;cursor:pointer" id="ni-apply-all-wrap">
+          <input type="checkbox" id="ni-apply-all" checked style="width:12px;height:12px;accent-color:#58a6ff;cursor:pointer" />
+          Apply to other items with the same question
+        </label>
+        <div class="err" id="ni-err"></div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:10px 20px;border-top:1px solid #21262d;background:#010409">
+        <button id="ni-skip" style="font-size:11px;color:#8b949e;background:transparent;border:0;padding:6px 12px;cursor:pointer">Skip this item</button>
       </div>
     </div>
   </div>
@@ -3914,60 +3928,85 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     }
 
     // ─── Needs-input modal ─────────────────────────────────────────────
-    // The import pipeline pauses when it can't auto-resolve a choice
-    // (unrecognized Klaviyo trigger, transactional routing, etc.) and
-    // emits a needs_input event. We render a modal matching the event's
-    // shape (text / boolean / choice) and POST the answer back.
+    // Mirrors admin/components/needs-input.jsx UX: header, item context,
+    // prominent question, italic clarifying context, type-specific
+    // input. Reads the prompt from ev.input (the event nests the
+    // PendingInput object — common bug if you read fields off ev directly).
     let currentInputId = null;
     function openNeedsInput(ev) {
-      currentInputId = ev.id;
-      $("ni-question").textContent = ev.question || "Input needed";
-      $("ni-context").textContent = ev.context || "";
-      const meta = [];
-      if (ev.itemLabel) meta.push(ev.itemLabel);
-      if (ev.questionKey) meta.push("key: " + ev.questionKey);
-      $("ni-meta").textContent = meta.join(" · ");
+      const q = ev.input || ev; // backwards-compat with flat shape too
+      currentInputId = q.id;
+      // Item context line: "While importing <itemLabel>"
+      const meta = q.itemLabel || q.itemName
+        ? 'While importing <span style="font-family:Instrument Serif,serif;font-size:14px;color:#e6edf3">' + escapeHtml(q.itemLabel || q.itemName) + '</span>'
+        : "";
+      $("ni-meta").innerHTML = meta;
+      $("ni-question").textContent = q.question || "Input needed";
+      if (q.context) {
+        $("ni-context").textContent = q.context;
+        $("ni-context").style.display = "block";
+      } else {
+        $("ni-context").style.display = "none";
+      }
       $("ni-err").textContent = "";
 
+      // Determine input type. If no explicit type but options[] present,
+      // assume choice (mirrors admin behavior).
+      const type = q.type || ((q.options && q.options.length) ? "choice" : "text");
       const wrap = $("ni-input-wrap");
       wrap.innerHTML = "";
-      if (ev.type === "boolean") {
-        const def = ev.default === "true" || ev.default === true;
+
+      if (type === "boolean") {
+        // Side-by-side Yes/No buttons that immediately submit the answer.
+        const trueLabel = escapeHtml(q.trueLabel || "Yes");
+        const falseLabel = escapeHtml(q.falseLabel || "No");
         wrap.innerHTML =
-          '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">' +
-            '<input type="checkbox" id="ni-bool" ' + (def ? "checked" : "") + ' style="accent-color:#238636;width:16px;height:16px" />' +
-            '<span>Yes</span>' +
-          '</label>';
-      } else if (ev.type === "choice" && Array.isArray(ev.options) && ev.options.length) {
-        const defVal = ev.default || ev.options[0]?.value;
-        wrap.innerHTML = '<select id="ni-choice" style="width:100%;background:#010409;border:1px solid #30363d;color:#e6edf3;padding:8px 10px;border-radius:4px;font-size:13px">' +
-          ev.options.map((o) =>
-            '<option value="' + escapeHtml(String(o.value)) + '"' + (o.value === defVal ? " selected" : "") + '>' + escapeHtml(String(o.label)) + '</option>'
-          ).join("") +
-          '</select>';
+          '<div style="display:flex;gap:8px">' +
+            '<button onclick="submitBoolNeedsInput(true)" style="flex:1;padding:10px;background:#1f6feb;color:white;border:0;border-radius:4px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer">' + trueLabel + '</button>' +
+            '<button onclick="submitBoolNeedsInput(false)" style="flex:1;padding:10px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer">' + falseLabel + '</button>' +
+          '</div>';
+        $("ni-apply-all-wrap").style.display = q.hideApplyAll ? "none" : "flex";
+      } else if (type === "choice" && Array.isArray(q.options) && q.options.length) {
+        // Vertical list of clickable buttons. Click submits immediately.
+        const overflow = q.options.length > 8 ? "max-height:360px;overflow-y:auto;padding-right:4px;" : "";
+        wrap.innerHTML =
+          '<div style="display:flex;flex-direction:column;gap:6px;' + overflow + '">' +
+            q.options.map((o, i) => {
+              const v = escapeHtml(String(o.value));
+              const label = escapeHtml(String(o.label));
+              return '<button onclick="submitChoiceNeedsInput(' + i + ')" style="text-align:left;padding:9px 12px;background:#010409;border:1px solid #30363d;border-radius:4px;font-size:12px;color:#e6edf3;cursor:pointer;display:flex;align-items:baseline;gap:12px;font-family:inherit" onmouseover="this.style.borderColor=\\'#58a6ff\\'" onmouseout="this.style.borderColor=\\'#30363d\\'">' +
+                '<span style="color:#58a6ff;font-family:SF Mono,Monaco,Consolas,monospace;font-size:11px">' + v + '</span>' +
+                '<span style="color:#8b949e">' + label + '</span>' +
+              '</button>';
+            }).join("") +
+          '</div>';
+        // Cache options for submitChoiceNeedsInput
+        currentInputOptions = q.options;
+        $("ni-apply-all-wrap").style.display = q.hideApplyAll ? "none" : "flex";
       } else {
-        wrap.innerHTML = '<input type="text" id="ni-text" value="' + escapeHtml(ev.default || "") + '" autocomplete="off" />';
+        // Text input — multiline textarea if the default contains \\n.
+        const def = q.default || "";
+        const multiline = def.indexOf("\\n") >= 0;
+        const inputHtml = multiline
+          ? '<textarea id="ni-text" rows="4" style="flex:1;background:#010409;border:1px solid #30363d;color:#e6edf3;padding:8px 10px;border-radius:4px;font-size:13px;font-family:SF Mono,Monaco,Consolas,monospace;resize:vertical">' + escapeHtml(def) + '</textarea>'
+          : '<input type="text" id="ni-text" value="' + escapeHtml(def) + '" placeholder="' + escapeHtml(q.placeholder || "Type your answer…") + '" autocomplete="off" style="flex:1;background:#010409;border:1px solid #30363d;color:#e6edf3;padding:8px 10px;border-radius:4px;font-size:13px;font-family:inherit" />';
+        wrap.innerHTML =
+          '<div style="display:flex;gap:8px;align-items:flex-start">' +
+            inputHtml +
+            '<button onclick="submitTextNeedsInput()" style="padding:8px 14px;background:#1f6feb;color:white;border:0;border-radius:4px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer">Submit</button>' +
+          '</div>';
+        $("ni-apply-all-wrap").style.display = q.hideApplyAll ? "none" : "flex";
       }
+
       $("ni-scrim").classList.add("open");
-      // Focus first input after modal opens.
-      const first = wrap.querySelector("input,select");
+      const first = wrap.querySelector("input,textarea,button");
       if (first) first.focus();
     }
 
-    function readNeedsInputAnswer(ev) {
-      // ev is the original event passed to openNeedsInput; we cache it
-      // on state to avoid wiring through the submit click.
-      const wrap = $("ni-input-wrap");
-      if ($("ni-bool")) return String($("ni-bool").checked);
-      if ($("ni-choice")) return String($("ni-choice").value);
-      if ($("ni-text")) return String($("ni-text").value);
-      return "";
-    }
+    let currentInputOptions = [];
 
-    async function submitNeedsInput() {
+    async function submitNeedsInputAnswer(answer) {
       if (!currentInputId || !state.jobId) return;
-      const answer = readNeedsInputAnswer();
-      $("ni-submit").disabled = true;
       $("ni-err").textContent = "";
       try {
         const r = await fetch("/api/r/jobs/" + encodeURIComponent(state.jobId) + "/inputs", {
@@ -3984,14 +4023,34 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
         closeNeedsInput();
       } catch (e) {
         $("ni-err").textContent = String(e.message || e);
-      } finally {
-        $("ni-submit").disabled = false;
       }
+    }
+
+    function submitBoolNeedsInput(val) {
+      submitNeedsInputAnswer(val ? "true" : "false");
+    }
+    function submitChoiceNeedsInput(idx) {
+      const opt = currentInputOptions[idx];
+      if (!opt) return;
+      submitNeedsInputAnswer(String(opt.value));
+    }
+    function submitTextNeedsInput() {
+      const el = $("ni-text");
+      if (!el) return;
+      const v = String(el.value || "").trim();
+      if (!v) return;
+      submitNeedsInputAnswer(v);
+    }
+    function skipNeedsInput() {
+      // Sentinel string the pipeline interprets as "drop this item and
+      // continue with the next." Same as admin's skipNeedsInput.
+      submitNeedsInputAnswer("__skip__");
     }
 
     function closeNeedsInput() {
       $("ni-scrim").classList.remove("open");
       currentInputId = null;
+      currentInputOptions = [];
     }
 
     // ─── Modal (Add Store) ──────────────────────────────────────────────
@@ -4038,12 +4097,16 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     $("cancel").onclick = closeModal;
     $("save").onclick = saveStore;
     $("scrim").onclick = (e) => { if (e.target === $("scrim")) closeModal(); };
-    $("ni-submit").onclick = submitNeedsInput;
-    // Enter inside the needs-input modal submits.
+    $("ni-skip").onclick = skipNeedsInput;
+    // Enter inside the needs-input modal submits the text input (the only
+    // type that doesn't already submit-on-click). Boolean + choice both
+    // submit immediately on button click.
     $("ni-scrim").addEventListener("keydown", (e) => {
       if (e.key === "Enter" && $("ni-scrim").classList.contains("open")) {
-        e.preventDefault();
-        submitNeedsInput();
+        if ($("ni-text")) {
+          e.preventDefault();
+          submitTextNeedsInput();
+        }
       }
     });
     document.addEventListener("keydown", (e) => {
@@ -4061,6 +4124,10 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     window.switchTab = switchTab;
     window.toggleItem = toggleItem;
     window.selectAllVisible = selectAllVisible;
+    window.submitBoolNeedsInput = submitBoolNeedsInput;
+    window.submitChoiceNeedsInput = submitChoiceNeedsInput;
+    window.submitTextNeedsInput = submitTextNeedsInput;
+    window.skipNeedsInput = skipNeedsInput;
 
     loadMe().then((me) => { if (me) routeFromHash(); });
   </script>
