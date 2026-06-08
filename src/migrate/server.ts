@@ -2929,6 +2929,29 @@ async function handleReviewerJobGet(
   return json(res, 200, job);
 }
 
+// POST /api/r/jobs/:id/inputs — deliver an answer to a needs_input prompt.
+// Same shape as admin handleJobInput, but ownership-checked. Body must
+// include { inputId, answer }.
+async function handleReviewerJobInput(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const job = await getJobForReviewer(jobId, reviewer.id);
+  if (!job) return json(res, 404, { error: `job ${jobId} not found` });
+  const body = await readJsonBody(req);
+  const inputId = body.inputId as string | undefined;
+  const answer = body.answer;
+  if (!inputId || answer === undefined) {
+    return json(res, 400, { error: "inputId and answer required" });
+  }
+  const result = resolveInput(jobId, inputId, String(answer));
+  if (!result.ok) return json(res, 400, result);
+  return json(res, 200, { ok: true });
+}
+
 // GET /api/r/jobs/:id/stream — NDJSON live stream (ownership-checked).
 // Same logic as handleJobStream — replays history past ?since, subscribes
 // for new events, heartbeats every 10s, ends on terminal status.
@@ -3255,6 +3278,21 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
         <!-- Rendered by JS based on state.view: "stores" | "store" | "job" -->
       </div>
     </main>
+  </div>
+
+  <!-- Needs-input modal: rendered when the import pauses on a needs_input
+       event (e.g. unresolvable trigger, transactional routing prompt). -->
+  <div class="scrim" id="ni-scrim">
+    <div class="modal">
+      <h2 id="ni-question">…</h2>
+      <div class="modal-subtitle" id="ni-context"></div>
+      <div id="ni-meta" style="font-size:11px;color:#6e7681;margin-bottom:8px"></div>
+      <div id="ni-input-wrap"></div>
+      <div class="err" id="ni-err"></div>
+      <div class="modal-row">
+        <button class="btn primary" id="ni-submit">Continue</button>
+      </div>
+    </div>
   </div>
 
   <div class="scrim" id="scrim">
@@ -3654,6 +3692,12 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
 
     function handleStreamEvent(ev) {
       if (ev.kind === "heartbeat") return;
+      // Pause: import is waiting on a user choice (trigger picker etc).
+      // Render the needs-input modal so the reviewer can answer.
+      if (ev.kind === "needs_input") {
+        openNeedsInput(ev);
+        return;
+      }
       state.jobEvents.push(ev);
       // Best-effort classification for log coloring.
       const text = ev.text || ev.label || ev.message || (ev.kind === "exported" ? "exported: " + (ev.name || ev.id)
@@ -3696,6 +3740,87 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
         dot.className = "status-dot " + (state.jobStatus === "failed" ? "failed" : "completed");
         label.textContent = state.jobStatus === "failed" ? "Failed" : "Done";
       }
+    }
+
+    // ─── Needs-input modal ─────────────────────────────────────────────
+    // The import pipeline pauses when it can't auto-resolve a choice
+    // (unrecognized Klaviyo trigger, transactional routing, etc.) and
+    // emits a needs_input event. We render a modal matching the event's
+    // shape (text / boolean / choice) and POST the answer back.
+    let currentInputId = null;
+    function openNeedsInput(ev) {
+      currentInputId = ev.id;
+      $("ni-question").textContent = ev.question || "Input needed";
+      $("ni-context").textContent = ev.context || "";
+      const meta = [];
+      if (ev.itemLabel) meta.push(ev.itemLabel);
+      if (ev.questionKey) meta.push("key: " + ev.questionKey);
+      $("ni-meta").textContent = meta.join(" · ");
+      $("ni-err").textContent = "";
+
+      const wrap = $("ni-input-wrap");
+      wrap.innerHTML = "";
+      if (ev.type === "boolean") {
+        const def = ev.default === "true" || ev.default === true;
+        wrap.innerHTML =
+          '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">' +
+            '<input type="checkbox" id="ni-bool" ' + (def ? "checked" : "") + ' style="accent-color:#238636;width:16px;height:16px" />' +
+            '<span>Yes</span>' +
+          '</label>';
+      } else if (ev.type === "choice" && Array.isArray(ev.options) && ev.options.length) {
+        const defVal = ev.default || ev.options[0]?.value;
+        wrap.innerHTML = '<select id="ni-choice" style="width:100%;background:#010409;border:1px solid #30363d;color:#e6edf3;padding:8px 10px;border-radius:4px;font-size:13px">' +
+          ev.options.map((o) =>
+            '<option value="' + escapeHtml(String(o.value)) + '"' + (o.value === defVal ? " selected" : "") + '>' + escapeHtml(String(o.label)) + '</option>'
+          ).join("") +
+          '</select>';
+      } else {
+        wrap.innerHTML = '<input type="text" id="ni-text" value="' + escapeHtml(ev.default || "") + '" autocomplete="off" />';
+      }
+      $("ni-scrim").classList.add("open");
+      // Focus first input after modal opens.
+      const first = wrap.querySelector("input,select");
+      if (first) first.focus();
+    }
+
+    function readNeedsInputAnswer(ev) {
+      // ev is the original event passed to openNeedsInput; we cache it
+      // on state to avoid wiring through the submit click.
+      const wrap = $("ni-input-wrap");
+      if ($("ni-bool")) return String($("ni-bool").checked);
+      if ($("ni-choice")) return String($("ni-choice").value);
+      if ($("ni-text")) return String($("ni-text").value);
+      return "";
+    }
+
+    async function submitNeedsInput() {
+      if (!currentInputId || !state.jobId) return;
+      const answer = readNeedsInputAnswer();
+      $("ni-submit").disabled = true;
+      $("ni-err").textContent = "";
+      try {
+        const r = await fetch("/api/r/jobs/" + encodeURIComponent(state.jobId) + "/inputs", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ inputId: currentInputId, answer }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          $("ni-err").textContent = data.error || ("Failed (" + r.status + ")");
+          return;
+        }
+        closeNeedsInput();
+      } catch (e) {
+        $("ni-err").textContent = String(e.message || e);
+      } finally {
+        $("ni-submit").disabled = false;
+      }
+    }
+
+    function closeNeedsInput() {
+      $("ni-scrim").classList.remove("open");
+      currentInputId = null;
     }
 
     // ─── Modal (Add Store) ──────────────────────────────────────────────
@@ -3742,8 +3867,18 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     $("cancel").onclick = closeModal;
     $("save").onclick = saveStore;
     $("scrim").onclick = (e) => { if (e.target === $("scrim")) closeModal(); };
+    $("ni-submit").onclick = submitNeedsInput;
+    // Enter inside the needs-input modal submits.
+    $("ni-scrim").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && $("ni-scrim").classList.contains("open")) {
+        e.preventDefault();
+        submitNeedsInput();
+      }
+    });
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && $("scrim").classList.contains("open")) closeModal();
+      // Intentionally NOT closing the needs-input modal on Escape —
+      // the import is paused waiting for an answer.
     });
     window.addEventListener("hashchange", () => { routeFromHash(); });
 
@@ -3835,7 +3970,7 @@ async function dispatchReviewerSurface(
     await handleReviewerJobsList(req, res);
     return true;
   }
-  const jobPath = path.match(/^\/api\/r\/jobs\/([^/?]+)(\/stream)?$/);
+  const jobPath = path.match(/^\/api\/r\/jobs\/([^/?]+)(\/stream|\/inputs)?$/);
   if (jobPath) {
     const jid = decodeURIComponent(jobPath[1]);
     const sub = jobPath[2];
@@ -3845,6 +3980,10 @@ async function dispatchReviewerSurface(
     }
     if (req.method === "GET" && sub === "/stream") {
       await handleReviewerJobStream(req, res, jid);
+      return true;
+    }
+    if (req.method === "POST" && sub === "/inputs") {
+      await handleReviewerJobInput(req, res, jid);
       return true;
     }
   }
