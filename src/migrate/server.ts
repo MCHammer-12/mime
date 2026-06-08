@@ -46,6 +46,7 @@ import {
   hydrateFromDb,
   jobController,
   listJobs,
+  refreshJobNotesFromDb,
   resolveInput,
   setNote,
   setNoteResolved,
@@ -1923,6 +1924,11 @@ async function handleJobList(req: IncomingMessage, res: ServerResponse) {
 // ─── API: GET /api/jobs/:id — full detail ─────────────────────────────────
 
 async function handleJobGet(res: ServerResponse, jobId: string) {
+  // Refresh notes from DB so the admin sees notes the reviewer wrote on
+  // the separate public_review deploy. Mime runs as two processes sharing
+  // one Postgres; in-memory job.notes is stale on whichever process
+  // didn't write the note.
+  await refreshJobNotesFromDb(jobId);
   const job = getJob(jobId);
   if (!job) return json(res, 404, { error: `job ${jobId} not found` });
   json(res, 200, job);
@@ -2318,6 +2324,9 @@ async function handleJobBundle(
   res: ServerResponse,
   jobId: string,
 ) {
+  // Same cross-process freshness as handleJobGet — reviewer-written
+  // notes need to land in the bundle's notes.md files.
+  await refreshJobNotesFromDb(jobId);
   const job = getJob(jobId);
   if (!job) return json(res, 404, { error: `job ${jobId} not found` });
   const body = await readJsonBody(req);
@@ -2971,8 +2980,12 @@ async function handleReviewerJobsList(
   const myStores = await listStoresForReviewer(reviewer.id);
   const myStoreIds = new Set(myStores.flatMap((s) => [s.id, s.storeId]));
   const all = listJobs();
-  const jobs = all
-    .filter((j) => myStoreIds.has(j.storeId))
+  const myJobs = all.filter((j) => myStoreIds.has(j.storeId));
+  // Cross-process freshness: pull each owned job's notes column from DB so
+  // any notes admin (or this reviewer on another tab) wrote land in the
+  // sidebar's per-item textareas without a process restart.
+  await Promise.all(myJobs.map((j) => refreshJobNotesFromDb(j.id)));
+  const jobs = myJobs
     .map((j) => {
       // Derive per-item display info from the job events so the sidebar
       // can list "Flow X — imported" / "Template Y — failed" with the

@@ -524,7 +524,10 @@ function buildImageBlock(
     padding: { top: 0, right: 0, bottom: 0, left: 0 },
     horizontalPadding: Size.MEDIUM,
     verticalPadding: Size.MEDIUM,
-    imageSourceType: ImageType.URL,
+    // imageSourceType is optional in Redo's email-template schema. Their
+    // enum is { upload, product } only — sending "url" is a 400 Input
+    // validation error. Omitting the field means "URL-sourced image"
+    // (the default); upload/product are explicit lift cases.
   };
   // silence unused alignment var — alignment is handled by sectionPadding
   void alignment;
