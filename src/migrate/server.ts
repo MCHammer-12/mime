@@ -3877,28 +3877,38 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
 
     function handleStreamEvent(ev) {
       if (ev.kind === "heartbeat") return;
+      // Backend appendEvent destructures { kind, severity, ...payload } —
+      // so over the wire we get { seq, at, kind, severity, payload: { ... } }.
+      // Unwrap so the rest of this function can read flat fields the way
+      // admin/mock-stream.js does it.
+      const p = ev.payload || {};
+      const flat = { ...ev, ...p };
+
       // Pause: import is waiting on a user choice (trigger picker etc).
-      // Render the needs-input modal so the reviewer can answer.
-      if (ev.kind === "needs_input") {
-        openNeedsInput(ev);
+      if (flat.kind === "needs_input") {
+        // payload.input is the PendingInput; spread it so openNeedsInput
+        // can read q.question / q.type / q.options directly.
+        const input = p.input || {};
+        openNeedsInput({ ...flat, ...input });
         return;
       }
-      state.jobEvents.push(ev);
+
+      state.jobEvents.push(flat);
       // Best-effort classification for log coloring.
-      const text = ev.text || ev.label || ev.message || (ev.kind === "exported" ? "exported: " + (ev.name || ev.id)
-                  : ev.kind === "flow_imported" ? "flow imported: " + (ev.name || ev.id)
-                  : ev.kind === "fail" ? "failed: " + (ev.name || ev.id) + " — " + (ev.error || "")
-                  : ev.kind === "done" ? "done"
-                  : ev.kind === "summary" ? JSON.stringify(ev)
-                  : ev.kind);
-      const cls = ev.severity === "error" || ev.kind === "fail" || ev.kind === "error" ? "err"
-                : ev.severity === "warning" || ev.kind === "warn" ? "warn"
-                : ev.kind === "step" ? "step"
-                : ev.severity === "success" ? "success"
+      const text = flat.text || flat.label || flat.message || (flat.kind === "exported" ? "exported: " + (flat.name || flat.id)
+                  : flat.kind === "flow_imported" ? "flow imported: " + (flat.name || flat.id)
+                  : flat.kind === "fail" ? "failed: " + (flat.name || flat.id) + " — " + (flat.error || "")
+                  : flat.kind === "done" ? "done"
+                  : flat.kind === "summary" ? JSON.stringify(flat)
+                  : flat.kind);
+      const cls = flat.severity === "error" || flat.kind === "fail" || flat.kind === "error" ? "err"
+                : flat.severity === "warning" || flat.kind === "warn" ? "warn"
+                : flat.kind === "step" ? "step"
+                : flat.severity === "success" ? "success"
                 : "info";
       appendLog({ text }, cls);
 
-      if (ev.kind === "done") {
+      if (flat.kind === "done") {
         state.jobStatus = "completed";
         $("status-dot").className = "status-dot completed";
         $("status-label").textContent = "Done";
