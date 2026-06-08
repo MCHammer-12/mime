@@ -2797,10 +2797,80 @@ async function handleReviewerStoreFlowsList(
   }
 }
 
+// POST /api/r/stores/:id/templates — list Klaviyo templates for a
+// reviewer-owned store. Mirrors handleTemplates' shape: paginates,
+// filters out editor_type=KLAVIYO (legacy/visual builder we don't
+// support), returns a slim metadata array.
+async function handleReviewerStoreTemplatesList(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const store = await getStoreForReviewer(storeId, reviewer.id);
+  if (!store) return json(res, 404, { error: `store ${storeId} not found` });
+  try {
+    type T = {
+      id: string;
+      attributes: { name: string; editor_type: string; updated: string };
+    };
+    const all = await paginate<T>(
+      "/templates/?fields[template]=name,editor_type,updated&sort=-updated",
+      store.klaviyoKey,
+    );
+    const templates = all
+      .filter((t) => t.attributes.editor_type !== "KLAVIYO")
+      .map((t) => ({
+        id: t.id,
+        name: t.attributes.name,
+        editorType: t.attributes.editor_type,
+        updated: t.attributes.updated,
+      }));
+    return json(res, 200, { templates });
+  } catch (e: any) {
+    return json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// POST /api/r/stores/:id/campaigns — list recent campaigns. Slim version
+// of handleCampaigns: just returns campaign metadata for the picker; the
+// import pipeline walks per-campaign messages internally when it imports.
+// Cap at 20 most-recent (same rationale as admin: walking older campaigns
+// blows past the proxy timeout).
+async function handleReviewerStoreCampaignsList(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const store = await getStoreForReviewer(storeId, reviewer.id);
+  if (!store) return json(res, 404, { error: `store ${storeId} not found` });
+  try {
+    const filter = encodeURIComponent(`equals(messages.channel,"email")`);
+    const body: any = await klaviyo(
+      `/campaigns/?filter=${filter}&fields[campaign]=name,status,send_time,created_at&sort=-created_at&page[size]=20`,
+      store.klaviyoKey,
+    );
+    const campaigns = ((body?.data ?? []) as any[]).map((c) => ({
+      id: c.id,
+      name: c.attributes?.name ?? c.id,
+      status: c.attributes?.status ?? "unknown",
+      sendTime: c.attributes?.send_time ?? null,
+      createdAt: c.attributes?.created_at ?? null,
+    }));
+    return json(res, 200, { campaigns });
+  } catch (e: any) {
+    return json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
 // POST /api/r/stores/:id/import — kick off an import job for one of the
-// reviewer's stores. Body: { flowIds: string[] }. The server reuses the
-// store's stored credentials so the reviewer can't import against keys
-// they don't own. Mirrors handleJobCreate.
+// reviewer's stores. Body: { flowIds?, templateIds?, campaignIds? } — at
+// least one non-empty. The server reuses the store's stored credentials
+// so the reviewer can't import against keys they don't own. Mirrors
+// handleJobCreate on the admin side.
 async function handleReviewerImport(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2817,8 +2887,12 @@ async function handleReviewerImport(
   }
   const body = await readJsonBody(req);
   const flowIds = Array.isArray(body.flowIds) ? (body.flowIds as string[]) : [];
-  if (flowIds.length === 0) {
-    return json(res, 400, { error: "flowIds[] required (pick at least one flow)" });
+  const templateIds = Array.isArray(body.templateIds) ? (body.templateIds as string[]) : [];
+  const campaignIds = Array.isArray(body.campaignIds) ? (body.campaignIds as string[]) : [];
+  if (flowIds.length + templateIds.length + campaignIds.length === 0) {
+    return json(res, 400, {
+      error: "pick at least one flow, template, or campaign to import",
+    });
   }
   // Construct the run body from the store record. The reviewer can't
   // supply klaviyoKey/redoJwt/storeId — those come from the ownership-
@@ -2828,8 +2902,8 @@ async function handleReviewerImport(
     storeId: store.storeId,
     merchantSlug: store.merchantSlug,
     flowIds,
-    templateIds: [],
-    campaignIds: [],
+    templateIds,
+    campaignIds,
     redoJwt: store.redoJwt,
     redoServerBase: store.redoServerBase ?? undefined,
     runImport: true,
@@ -2841,7 +2915,7 @@ async function handleReviewerImport(
     storeId: store.id,
     storeName: store.name,
     merchantSlug: store.merchantSlug,
-    templateIds: [],
+    templateIds,
     flowIds,
   });
   const ctrl = jobController(job.id);
@@ -3227,6 +3301,28 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     .flow-row .status.live { background: #1b4721; color: #3fb950; }
     .flow-row .status.draft { background: #2d2418; color: #d29922; }
     .flow-row .status.archived { background: #21262d; color: #8b949e; }
+    .flow-row .status.sent { background: #1b4721; color: #3fb950; }
+    .flow-row .status.scheduled { background: #1c2b4a; color: #79c0ff; }
+    .flow-row .status.cancelled { background: #21262d; color: #8b949e; }
+
+    /* Tab bar — Flows | Templates | Campaigns */
+    .tabs {
+      display: flex; gap: 0; border-bottom: 1px solid #21262d;
+      margin-bottom: 16px;
+    }
+    .tab {
+      background: transparent; border: 0; padding: 10px 16px;
+      font: inherit; font-size: 13px; color: #8b949e; cursor: pointer;
+      border-bottom: 2px solid transparent; margin-bottom: -1px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .tab:hover { color: #e6edf3; }
+    .tab.active { color: #e6edf3; border-bottom-color: #FF4405; }
+    .tab .count {
+      background: #21262d; color: #8b949e; font-size: 10px;
+      padding: 1px 6px; border-radius: 8px;
+    }
+    .tab.active .count { background: #2d1810; color: #FF8557; }
 
     /* Job progress view */
     .progress-card {
@@ -3331,13 +3427,18 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
       view: "stores",
       stores: null,
       store: null,
-      flows: null,
-      selected: new Set(),
-      flowFilter: "",
+      // tab is which picker is currently shown
+      tab: "flows", // "flows" | "templates" | "campaigns"
+      // Loaded item lists per kind. null = not loaded yet, [] = empty list.
+      items: { flows: null, templates: null, campaigns: null },
+      // Per-kind selection sets. Persist across tab switches so the user
+      // can pick a mix and import them all at once.
+      selected: { flows: new Set(), templates: new Set(), campaigns: new Set() },
+      filter: "",
       jobId: null,
       jobStatus: null,
       jobEvents: [],
-      activeStream: null, // AbortController for the NDJSON fetch
+      activeStream: null,
     };
 
     function escapeHtml(s) {
@@ -3464,11 +3565,16 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
       $("stores-wrap").innerHTML = '<div class="stores-grid">' + cards + addCard + '</div>';
     }
 
-    // ─── Store-detail view (flow picker) ────────────────────────────────
+    // ─── Store-detail view (multi-tab picker) ──────────────────────────
+    // Renders 3 tabs (Flows | Templates | Campaigns). Each tab loads its
+    // list on first click; selections persist across tab switches. The
+    // single Import button submits the union across all three.
     async function openStore(storeId) {
       state.view = "store";
-      state.selected = new Set();
-      state.flowFilter = "";
+      state.tab = "flows";
+      state.filter = "";
+      state.items = { flows: null, templates: null, campaigns: null };
+      state.selected = { flows: new Set(), templates: new Set(), campaigns: new Set() };
       setHash("store", storeId);
       if (state.activeStream) { state.activeStream.abort(); state.activeStream = null; }
 
@@ -3481,148 +3587,213 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
         '<div class="heading-row">' +
           '<div>' +
             '<h1 id="store-name">…</h1>' +
-            '<div class="subtitle" id="store-subtitle">Loading flows…</div>' +
+            '<div class="subtitle" id="store-subtitle">Loading…</div>' +
           '</div>' +
         '</div>' +
-        '<div id="flow-toolbar"></div>' +
-        '<div id="flow-wrap"></div>';
+        '<div id="tabs"></div>' +
+        '<div id="picker-toolbar"></div>' +
+        '<div id="picker-wrap"></div>';
 
-      // Load store record + flows in parallel.
-      const [storeRes, flowsRes] = await Promise.all([
-        fetch("/api/r/stores/" + encodeURIComponent(storeId), { credentials: "same-origin" }),
-        fetch("/api/r/stores/" + encodeURIComponent(storeId) + "/flows", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({}),
-        }),
-      ]);
-
+      const storeRes = await fetch(
+        "/api/r/stores/" + encodeURIComponent(storeId),
+        { credentials: "same-origin" },
+      );
       if (!storeRes.ok) {
-        $("flow-wrap").innerHTML = '<p style="color:#f78166;font-size:13px">Store not found.</p>';
+        $("picker-wrap").innerHTML = '<p style="color:#f78166;font-size:13px">Store not found.</p>';
         return;
       }
       const { store } = await storeRes.json();
       state.store = store;
       $("bc-name").textContent = store.name;
       $("store-name").textContent = store.name;
+      $("store-subtitle").textContent = "Pick flows, templates, or campaigns to import";
 
-      if (!flowsRes.ok) {
-        const errData = await flowsRes.json().catch(() => ({}));
-        $("store-subtitle").textContent = "Failed to load flows";
-        $("flow-wrap").innerHTML = '<p style="color:#f78166;font-size:13px">' +
-          escapeHtml(errData.error || ("Failed to load flows (" + flowsRes.status + ")")) +
-          '</p>';
-        return;
-      }
-      const { flows } = await flowsRes.json();
-      state.flows = flows;
-      $("store-subtitle").textContent =
-        flows.length + " flow" + (flows.length === 1 ? "" : "s") + " in Klaviyo · pick what to import";
-      renderFlowPicker();
+      renderTabs();
+      switchTab("flows");
     }
 
-    function renderFlowPicker() {
-      const flows = state.flows;
-      const filter = state.flowFilter.toLowerCase().trim();
+    function renderTabs() {
+      const counts = {
+        flows: state.items.flows ? state.items.flows.length : "…",
+        templates: state.items.templates ? state.items.templates.length : "…",
+        campaigns: state.items.campaigns ? state.items.campaigns.length : "…",
+      };
+      const tab = (key, label) => {
+        const active = state.tab === key ? "active" : "";
+        const sel = state.selected[key].size;
+        const countLabel = sel > 0 ? sel + "/" + counts[key] : String(counts[key]);
+        return '<button class="tab ' + active + '" onclick="switchTab(\\'' + key + '\\')">' +
+          escapeHtml(label) +
+          '<span class="count">' + countLabel + '</span>' +
+          '</button>';
+      };
+      $("tabs").innerHTML =
+        '<div class="tabs">' +
+          tab("flows", "Flows") +
+          tab("templates", "Templates") +
+          tab("campaigns", "Campaigns") +
+        '</div>';
+    }
+
+    async function switchTab(kind) {
+      state.tab = kind;
+      state.filter = "";
+      renderTabs();
+      if (state.items[kind] === null) {
+        $("picker-toolbar").innerHTML = "";
+        $("picker-wrap").innerHTML = '<div style="padding:24px;text-align:center;color:#6e7681;font-size:12px">Loading ' + kind + '…</div>';
+        const r = await fetch(
+          "/api/r/stores/" + encodeURIComponent(state.store.id) + "/" + kind,
+          { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: "{}" },
+        );
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          $("picker-wrap").innerHTML = '<p style="color:#f78166;font-size:13px">' +
+            escapeHtml(err.error || ("Failed to load " + kind + " (" + r.status + ")")) +
+            '</p>';
+          state.items[kind] = [];
+          renderTabs();
+          return;
+        }
+        const data = await r.json();
+        state.items[kind] = data[kind] || [];
+        renderTabs();
+      }
+      renderPicker();
+    }
+
+    function renderPicker() {
+      const kind = state.tab;
+      const items = state.items[kind] || [];
+      const filter = state.filter.toLowerCase().trim();
       const visible = filter
-        ? flows.filter((f) => f.name.toLowerCase().includes(filter))
-        : flows;
+        ? items.filter((i) => (i.name || "").toLowerCase().includes(filter))
+        : items;
+      const sel = state.selected[kind];
+      const totalSelected = state.selected.flows.size + state.selected.templates.size + state.selected.campaigns.size;
+      const allVisibleSelected = visible.length > 0 && visible.every((i) => sel.has(i.id));
+      const canImport = totalSelected > 0 && state.store && state.store.redoJwt;
 
-      const allSelected = visible.length > 0 && visible.every((f) => state.selected.has(f.id));
-      const someSelected = state.selected.size > 0;
-      const canImport = state.selected.size > 0 && state.store && state.store.redoJwt;
-
-      $("flow-toolbar").innerHTML =
+      $("picker-toolbar").innerHTML =
         '<div class="flows-toolbar">' +
-          '<div class="count"><strong>' + state.selected.size + '</strong> selected · <strong>' + flows.length + '</strong> total</div>' +
-          '<button class="link-btn" onclick="selectAll(' + (!allSelected) + ')">' + (allSelected ? 'Deselect all' : 'Select all visible') + '</button>' +
+          '<div class="count"><strong>' + sel.size + '</strong> in this tab · <strong>' + totalSelected + '</strong> total · <strong>' + items.length + '</strong> available</div>' +
+          '<button class="link-btn" onclick="selectAllVisible(' + (!allVisibleSelected) + ')">' +
+            (allVisibleSelected ? 'Deselect all' : 'Select all visible') +
+          '</button>' +
           '<div class="right">' +
-            '<input type="search" placeholder="Filter by name…" id="flow-filter" value="' + escapeHtml(state.flowFilter) + '" />' +
+            '<input type="search" placeholder="Filter by name…" id="picker-filter" value="' + escapeHtml(state.filter) + '" />' +
             '<button class="btn primary" id="import-btn" ' + (canImport ? '' : 'disabled') + ' onclick="runImport()">' +
-              'Import ' + state.selected.size + ' flow' + (state.selected.size === 1 ? '' : 's') +
+              'Import ' + totalSelected + ' item' + (totalSelected === 1 ? '' : 's') +
             '</button>' +
           '</div>' +
         '</div>';
 
-      if (!state.store.redoJwt) {
-        $("flow-wrap").innerHTML =
-          '<div style="padding:14px;background:#2d2418;border:1px solid #6e5a23;border-radius:6px;color:#d29922;font-size:12px;margin-bottom:12px">' +
-            'This store has no Redo JWT yet. You can still browse flows here, but you\\'ll need to add a JWT before importing.' +
-          '</div>' +
-          renderFlowRows(visible);
-      } else {
-        $("flow-wrap").innerHTML = renderFlowRows(visible);
-      }
+      const banner = !state.store.redoJwt
+        ? '<div style="padding:14px;background:#2d2418;border:1px solid #6e5a23;border-radius:6px;color:#d29922;font-size:12px;margin-bottom:12px">This store has no Redo JWT yet. Browse here, but add a JWT before importing.</div>'
+        : '';
+      $("picker-wrap").innerHTML = banner + renderPickerRows(kind, visible);
 
-      // Wire the filter input — debounce-less is fine for a small list.
-      const fi = $("flow-filter");
+      const fi = $("picker-filter");
       if (fi) {
         fi.oninput = (e) => {
-          state.flowFilter = e.target.value;
-          renderFlowPicker();
-          $("flow-filter").focus();
-          // Restore caret to end after re-render
-          const len = $("flow-filter").value.length;
-          $("flow-filter").setSelectionRange(len, len);
+          state.filter = e.target.value;
+          renderPicker();
+          $("picker-filter").focus();
+          const len = $("picker-filter").value.length;
+          $("picker-filter").setSelectionRange(len, len);
         };
       }
     }
 
-    function renderFlowRows(flows) {
-      if (flows.length === 0) {
-        return '<div style="padding:24px;text-align:center;color:#6e7681;font-size:12px;border:1px solid #21262d;border-radius:6px">No flows match the filter.</div>';
+    function renderPickerRows(kind, items) {
+      if (items.length === 0) {
+        return '<div style="padding:24px;text-align:center;color:#6e7681;font-size:12px;border:1px solid #21262d;border-radius:6px">' +
+          (state.filter ? 'No items match the filter.' : 'No ' + kind + ' found.') +
+          '</div>';
       }
-      return '<div class="flow-list">' + flows.map((f) => {
-        const checked = state.selected.has(f.id) ? "checked" : "";
-        const statusClass = f.status === "live" ? "live"
-          : f.status === "draft" ? "draft"
-          : "archived";
+      const sel = state.selected[kind];
+      return '<div class="flow-list">' + items.map((i) => {
+        const checked = sel.has(i.id) ? "checked" : "";
+        const metaHtml = renderItemMeta(kind, i);
         return (
           '<label class="flow-row">' +
-            '<input type="checkbox" data-id="' + escapeHtml(f.id) + '" ' + checked + ' onchange="toggleFlow(\\'' + escapeHtml(f.id) + '\\', this.checked)" />' +
-            '<div class="name">' + escapeHtml(f.name) + '</div>' +
-            '<div class="meta">' +
-              '<span>' + escapeHtml(f.triggerType || "?") + '</span>' +
-              '<span class="status ' + statusClass + '">' + escapeHtml(f.status) + '</span>' +
-            '</div>' +
+            '<input type="checkbox" ' + checked + ' onchange="toggleItem(\\'' + escapeHtml(i.id) + '\\', this.checked)" />' +
+            '<div class="name">' + escapeHtml(i.name || i.id) + '</div>' +
+            '<div class="meta">' + metaHtml + '</div>' +
           '</label>'
         );
       }).join("") + '</div>';
     }
 
-    function toggleFlow(id, checked) {
-      if (checked) state.selected.add(id);
-      else state.selected.delete(id);
-      // Re-render the toolbar count + button enabled state, but not the
-      // list (we just toggled a checkbox; DOM is already correct).
-      const tb = $("flow-toolbar");
-      const oldFilterVal = $("flow-filter") ? $("flow-filter").value : "";
-      // Re-render just the toolbar — preserve filter input focus.
-      const wasFocused = document.activeElement === $("flow-filter");
-      renderFlowPicker();
-      if (wasFocused && $("flow-filter")) $("flow-filter").focus();
+    function renderItemMeta(kind, item) {
+      if (kind === "flows") {
+        const statusClass = item.status === "live" ? "live"
+          : item.status === "draft" ? "draft"
+          : "archived";
+        return (
+          '<span>' + escapeHtml(item.triggerType || "?") + '</span>' +
+          '<span class="status ' + statusClass + '">' + escapeHtml(item.status || "") + '</span>'
+        );
+      }
+      if (kind === "templates") {
+        const ago = item.updated ? niceDate(item.updated) : "";
+        return (
+          '<span>' + escapeHtml(item.editorType || "") + '</span>' +
+          (ago ? '<span>' + escapeHtml(ago) + '</span>' : '')
+        );
+      }
+      if (kind === "campaigns") {
+        const date = item.sendTime || item.createdAt;
+        const status = String(item.status || "");
+        const statusClass = /sent/i.test(status) ? "sent"
+          : /scheduled/i.test(status) ? "scheduled"
+          : /cancel/i.test(status) ? "cancelled"
+          : "draft";
+        return (
+          (date ? '<span>' + escapeHtml(niceDate(date)) + '</span>' : '') +
+          '<span class="status ' + statusClass + '">' + escapeHtml(status) + '</span>'
+        );
+      }
+      return "";
     }
 
-    function selectAll(yes) {
-      const filter = state.flowFilter.toLowerCase().trim();
-      const visible = filter
-        ? state.flows.filter((f) => f.name.toLowerCase().includes(filter))
-        : state.flows;
-      if (yes) visible.forEach((f) => state.selected.add(f.id));
-      else visible.forEach((f) => state.selected.delete(f.id));
-      renderFlowPicker();
+    function niceDate(iso) {
+      try {
+        return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+      } catch (_) { return iso; }
+    }
+
+    function toggleItem(id, checked) {
+      const sel = state.selected[state.tab];
+      if (checked) sel.add(id); else sel.delete(id);
+      const wasFocused = document.activeElement === $("picker-filter");
+      renderTabs();
+      renderPicker();
+      if (wasFocused && $("picker-filter")) $("picker-filter").focus();
+    }
+
+    function selectAllVisible(yes) {
+      const items = state.items[state.tab] || [];
+      const filter = state.filter.toLowerCase().trim();
+      const visible = filter ? items.filter((i) => (i.name || "").toLowerCase().includes(filter)) : items;
+      const sel = state.selected[state.tab];
+      if (yes) visible.forEach((i) => sel.add(i.id));
+      else visible.forEach((i) => sel.delete(i.id));
+      renderTabs();
+      renderPicker();
     }
 
     // ─── Import + job streaming ────────────────────────────────────────
     async function runImport() {
-      const flowIds = Array.from(state.selected);
-      if (flowIds.length === 0) return;
+      const flowIds = Array.from(state.selected.flows);
+      const templateIds = Array.from(state.selected.templates);
+      const campaignIds = Array.from(state.selected.campaigns);
+      if (flowIds.length + templateIds.length + campaignIds.length === 0) return;
       const r = await fetch("/api/r/stores/" + encodeURIComponent(state.store.id) + "/import", {
         method: "POST",
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ flowIds }),
+        body: JSON.stringify({ flowIds, templateIds, campaignIds }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -3887,8 +4058,9 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     window.openJob = openJob;
     window.renderStoresView = renderStoresView;
     window.runImport = runImport;
-    window.toggleFlow = toggleFlow;
-    window.selectAll = selectAll;
+    window.switchTab = switchTab;
+    window.toggleItem = toggleItem;
+    window.selectAllVisible = selectAllVisible;
 
     loadMe().then((me) => { if (me) routeFromHash(); });
   </script>
@@ -3954,10 +4126,20 @@ async function dispatchReviewerSurface(
       return true;
     }
   }
-  // ─── Phase 3: per-store flows list + import ─────────────────────────
+  // ─── Phase 3: per-store flows/templates/campaigns list + import ─────
   const storeFlowsPath = path.match(/^\/api\/r\/stores\/([^/?]+)\/flows$/);
   if (storeFlowsPath && req.method === "POST") {
     await handleReviewerStoreFlowsList(req, res, decodeURIComponent(storeFlowsPath[1]));
+    return true;
+  }
+  const storeTemplatesPath = path.match(/^\/api\/r\/stores\/([^/?]+)\/templates$/);
+  if (storeTemplatesPath && req.method === "POST") {
+    await handleReviewerStoreTemplatesList(req, res, decodeURIComponent(storeTemplatesPath[1]));
+    return true;
+  }
+  const storeCampaignsPath = path.match(/^\/api\/r\/stores\/([^/?]+)\/campaigns$/);
+  if (storeCampaignsPath && req.method === "POST") {
+    await handleReviewerStoreCampaignsList(req, res, decodeURIComponent(storeCampaignsPath[1]));
     return true;
   }
   const storeImportPath = path.match(/^\/api\/r\/stores\/([^/?]+)\/import$/);
