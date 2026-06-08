@@ -3252,9 +3252,9 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     .job-card .dot.failed { background: #f85149; }
     .job-card .dot.awaiting_input { background: #d29922; animation: pulse 1.5s ease-in-out infinite; }
     .job-card .dot.partial { background: #d29922; }
-    /* Use a job-card-specific name; `.store` is used by the main grid
-       store cards (display:flex, min-height:110) and would otherwise
-       apply those rules to the inline span here. */
+    /* Use a job-card-specific name; the .store class is already used by
+       the main grid store cards (display:flex, min-height:110) and
+       would otherwise apply those rules to the inline span here. */
     .job-card .store-name { font-family: 'Instrument Serif', serif; font-size: 15px; color: #e6edf3; line-height: 1.1; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .job-card .when { margin-left: auto; font-size: 10px; color: #6e7681; flex-shrink: 0; }
     .job-card .stats { font-size: 11px; color: #8b949e; margin-top: 4px; }
