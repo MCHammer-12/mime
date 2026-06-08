@@ -2973,21 +2973,85 @@ async function handleReviewerJobsList(
   const all = listJobs();
   const jobs = all
     .filter((j) => myStoreIds.has(j.storeId))
-    .map((j) => ({
-      id: j.id,
-      storeId: j.storeId,
-      storeName: j.storeName,
-      status: j.status,
-      createdAt: j.createdAt,
-      completedAt: j.completedAt,
-      flowIds: j.flowIds,
-      eventCount: j.events.length,
-      summary: j.summary,
-      error: j.error,
-      lastEvent: j.events[j.events.length - 1] ?? null,
-      pendingInput: j.pendingInput ?? null,
-    }));
+    .map((j) => {
+      // Derive per-item display info from the job events so the sidebar
+      // can list "Flow X — imported" / "Template Y — failed" with the
+      // reviewer's note. The admin's bundle.ts does the same walk.
+      const items = collectItemsFromEvents(j);
+      return {
+        id: j.id,
+        storeId: j.storeId,
+        storeName: j.storeName,
+        status: j.status,
+        createdAt: j.createdAt,
+        completedAt: j.completedAt,
+        flowIds: j.flowIds,
+        templateIds: j.templateIds,
+        items, // [{ id, type, name, state, note }]
+        eventCount: j.events.length,
+        summary: j.summary,
+        error: j.error,
+        lastEvent: j.events[j.events.length - 1] ?? null,
+        pendingInput: j.pendingInput ?? null,
+      };
+    });
   return json(res, 200, { jobs });
+}
+
+// Walk the event log to assemble per-item state. Each item is identified
+// by its Klaviyo id; events name it via `id` + `name`. We pick the most
+// recent state-transition event per id (exported/flow_imported/fail/etc.)
+// to produce a final state for display.
+function collectItemsFromEvents(j: ReturnType<typeof getJob>): Array<{
+  id: string;
+  type: "template" | "flow" | "campaign";
+  name: string;
+  state: "queued" | "imported" | "failed";
+  note: string | null;
+  noteAuthor: string | null;
+}> {
+  if (!j) return [];
+  const byId = new Map<string, { id: string; type: "template" | "flow" | "campaign"; name: string; state: "queued" | "imported" | "failed" }>();
+  for (const ev of j.events) {
+    const p = ev.payload as any;
+    if (!p || typeof p.id !== "string") continue;
+    if (ev.kind === "exported") {
+      byId.set(p.id, { id: p.id, type: "template", name: p.name ?? p.id, state: "imported" });
+    } else if (ev.kind === "flow_imported") {
+      byId.set(p.id, { id: p.id, type: "flow", name: p.name ?? p.id, state: "imported" });
+    } else if (ev.kind === "imported") {
+      // campaign-imported event uses kind="imported" per existing code
+      const existing = byId.get(p.id);
+      byId.set(p.id, {
+        id: p.id,
+        type: existing?.type ?? "campaign",
+        name: p.name ?? existing?.name ?? p.id,
+        state: "imported",
+      });
+    } else if (ev.kind === "fail") {
+      // Preserve whatever type we'd already seen; fall back to flow.
+      const existing = byId.get(p.id);
+      byId.set(p.id, {
+        id: p.id,
+        type: existing?.type ?? "flow",
+        name: p.name ?? existing?.name ?? p.id,
+        state: "failed",
+      });
+    }
+  }
+  return Array.from(byId.values()).map((it) => {
+    const raw = j.notes?.[it.id];
+    let noteText: string | null = null;
+    let noteAuthor: string | null = null;
+    if (typeof raw === "string") {
+      noteText = raw || null;
+    } else if (raw && typeof raw === "object") {
+      const r = raw as any;
+      noteText = r.text ?? null;
+      noteAuthor = r.author ?? null;
+    }
+    return { ...it, note: noteText, noteAuthor };
+  });
 }
 
 // GET /api/r/jobs/:id — full job detail (ownership-checked).
@@ -3001,6 +3065,30 @@ async function handleReviewerJobGet(
   const job = await getJobForReviewer(jobId, reviewer.id);
   if (!job) return json(res, 404, { error: `job ${jobId} not found` });
   return json(res, 200, job);
+}
+
+// POST /api/r/jobs/:id/notes — upsert a per-item note for a reviewer-owned
+// job. Body: { itemId: string, note: string }. Empty note clears the entry.
+// Author is the reviewer's display name so admin's bundle download
+// attributes correctly.
+async function handleReviewerJobNotes(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const job = await getJobForReviewer(jobId, reviewer.id);
+  if (!job) return json(res, 404, { error: `job ${jobId} not found` });
+  const body = await readJsonBody(req);
+  const itemId = body.itemId;
+  const note = body.note;
+  if (typeof itemId !== "string" || typeof note !== "string") {
+    return json(res, 400, { error: "itemId and note (string) required" });
+  }
+  const ok = setNote(jobId, itemId, note, reviewer.name);
+  if (!ok) return json(res, 404, { error: `job ${jobId} not found` });
+  return json(res, 200, { ok: true });
 }
 
 // POST /api/r/jobs/:id/inputs — deliver an answer to a needs_input prompt.
@@ -3123,6 +3211,90 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
 
     /* Layout shell — mirrors admin's h-screen / flex-col */
     .shell { height: 100vh; display: flex; flex-direction: column; }
+    .body { display: flex; flex: 1; overflow: hidden; }
+    main { flex: 1; overflow-y: auto; min-width: 0; }
+
+    /* Right-side jobs panel — 1/4 of the viewport, mirrors admin's
+       w-[400px] bg-[#010409] border-l rail. */
+    .jobs-panel {
+      width: 25%; min-width: 280px; max-width: 420px;
+      border-left: 1px solid #21262d;
+      background: #010409;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .jobs-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px; border-bottom: 1px solid #21262d;
+    }
+    .jobs-header .label {
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+      color: #e6edf3;
+    }
+    .jobs-header .total {
+      margin-left: auto; font-size: 11px; color: #6e7681;
+      font-variant-numeric: tabular-nums;
+    }
+    .jobs-list { flex: 1; overflow-y: auto; }
+    .jobs-empty {
+      padding: 32px 16px; text-align: center;
+      color: #484f58; font-size: 11px; line-height: 1.6;
+    }
+    .job-card {
+      border-bottom: 1px solid #161b22; padding: 10px 14px;
+      cursor: pointer;
+    }
+    .job-card:hover { background: #0d1117; }
+    .job-card .row1 { display: flex; align-items: center; gap: 6px; }
+    .job-card .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .job-card .dot.running { background: #58a6ff; animation: pulse 1.5s ease-in-out infinite; }
+    .job-card .dot.completed { background: #3fb950; }
+    .job-card .dot.failed { background: #f85149; }
+    .job-card .dot.awaiting_input { background: #d29922; animation: pulse 1.5s ease-in-out infinite; }
+    .job-card .dot.partial { background: #d29922; }
+    .job-card .store { font-family: 'Instrument Serif', serif; font-size: 15px; color: #e6edf3; line-height: 1.1; }
+    .job-card .when { margin-left: auto; font-size: 10px; color: #6e7681; }
+    .job-card .stats { font-size: 11px; color: #8b949e; margin-top: 4px; }
+    .job-items {
+      background: #0d1117; padding: 8px 14px 12px;
+      border-bottom: 1px solid #161b22;
+    }
+    .job-item {
+      padding: 8px 0; border-bottom: 1px dashed #21262d;
+    }
+    .job-item:last-child { border-bottom: 0; }
+    .job-item .head { display: flex; align-items: center; gap: 6px; }
+    .job-item .kind {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em;
+      padding: 1px 5px; border-radius: 3px; flex-shrink: 0;
+    }
+    .job-item .kind.flow { background: #1c2b4a; color: #79c0ff; }
+    .job-item .kind.template { background: #2d2418; color: #d29922; }
+    .job-item .kind.campaign { background: #1b4721; color: #3fb950; }
+    .job-item .name {
+      font-size: 12px; color: #e6edf3; flex: 1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+    }
+    .job-item .state {
+      font-size: 9px; color: #6e7681; text-transform: uppercase; letter-spacing: 0.05em;
+      flex-shrink: 0;
+    }
+    .job-item .state.failed { color: #f85149; }
+    .job-item .state.imported { color: #3fb950; }
+    .job-item textarea {
+      width: 100%; background: #010409; border: 1px solid #21262d;
+      color: #e6edf3; padding: 6px 8px; border-radius: 4px;
+      font: inherit; font-size: 11px; line-height: 1.4;
+      margin-top: 6px; resize: vertical; min-height: 32px;
+    }
+    .job-item textarea:focus { outline: none; border-color: #58a6ff; }
+    .job-item textarea::placeholder { color: #484f58; }
+    .job-item .note-status {
+      font-size: 10px; color: #6e7681; margin-top: 3px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .job-item .note-status .saved { color: #3fb950; }
+    .job-item .note-status .saving { color: #58a6ff; }
 
     /* Top bar — mirrors admin's bg-[#010409] border-b border-[#21262d] */
     .topbar {
@@ -3369,11 +3541,27 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
       </div>
     </div>
 
-    <main>
-      <div class="container" id="container">
-        <!-- Rendered by JS based on state.view: "stores" | "store" | "job" -->
-      </div>
-    </main>
+    <div class="body">
+      <main>
+        <div class="container" id="container">
+          <!-- Rendered by JS based on state.view: "stores" | "store" | "job" -->
+        </div>
+      </main>
+
+      <!-- Right-side jobs panel: always visible. Lists all reviewer
+           jobs; expand a job to see its imported items with note inputs.
+           Notes are written to the same jobs.notes column the admin's
+           bundle download reads from. -->
+      <aside class="jobs-panel">
+        <div class="jobs-header">
+          <span class="label">Jobs</span>
+          <span class="total" id="jobs-total">…</span>
+        </div>
+        <div class="jobs-list" id="jobs-list">
+          <div class="jobs-empty">Loading…</div>
+        </div>
+      </aside>
+    </div>
   </div>
 
   <!-- Needs-input modal — copies the admin's needs-input.jsx UX:
@@ -3814,6 +4002,8 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
         alert(data.error || ("Import failed: " + r.status));
         return;
       }
+      // Refresh the sidebar so the new job appears immediately.
+      if (typeof loadJobs === "function") loadJobs();
       openJob(data.jobId);
     }
 
@@ -4139,7 +4329,170 @@ const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
     window.submitTextNeedsInput = submitTextNeedsInput;
     window.skipNeedsInput = skipNeedsInput;
 
-    loadMe().then((me) => { if (me) routeFromHash(); });
+    // ─── Jobs sidebar ──────────────────────────────────────────────────
+    // Always-visible right rail listing all reviewer jobs with their
+    // imported items + a note textarea per item. Notes write to the
+    // same jobs.notes column admin's bundle download reads from.
+    const jobsState = {
+      jobs: [],
+      expanded: new Set(), // job ids currently expanded
+      pollTimer: null,
+    };
+
+    async function loadJobs() {
+      try {
+        const r = await fetch("/api/r/jobs", { credentials: "same-origin" });
+        if (!r.ok) return;
+        const { jobs } = await r.json();
+        // Sort newest first.
+        jobsState.jobs = jobs.sort((a, b) =>
+          (b.createdAt || "").localeCompare(a.createdAt || ""),
+        );
+        renderJobsPanel();
+      } catch (_) { /* swallow */ }
+    }
+
+    function renderJobsPanel() {
+      const jobs = jobsState.jobs;
+      $("jobs-total").textContent = jobs.length + " total";
+      if (jobs.length === 0) {
+        $("jobs-list").innerHTML = '<div class="jobs-empty">No jobs yet.<br>Pick items from a store and hit Import.</div>';
+        return;
+      }
+      $("jobs-list").innerHTML = jobs.map(renderJobCard).join("");
+    }
+
+    function renderJobCard(j) {
+      const isExpanded = jobsState.expanded.has(j.id);
+      const dot = j.status === "running" ? "running"
+                : j.status === "awaiting_input" ? "awaiting_input"
+                : j.status === "completed" ? "completed"
+                : j.status === "partial" ? "partial"
+                : j.status === "failed" ? "failed"
+                : "completed";
+      const when = relativeTime(j.createdAt);
+      const itemCount = (j.items || []).length;
+      const noteCount = (j.items || []).filter((it) => it.note).length;
+      return (
+        '<div class="job-card" onclick="toggleJobExpand(\\'' + j.id + '\\')">' +
+          '<div class="row1">' +
+            '<span class="dot ' + dot + '"></span>' +
+            '<span class="store">' + escapeHtml(j.storeName || "—") + '</span>' +
+            '<span class="when">' + when + '</span>' +
+          '</div>' +
+          '<div class="stats">' +
+            escapeHtml(j.status) + ' · ' + itemCount + ' item' + (itemCount === 1 ? '' : 's') +
+            (noteCount > 0 ? ' · <span style="color:#3fb950">' + noteCount + ' noted</span>' : '') +
+          '</div>' +
+        '</div>' +
+        (isExpanded ? renderJobItems(j) : '')
+      );
+    }
+
+    function renderJobItems(j) {
+      const items = j.items || [];
+      if (items.length === 0) {
+        return '<div class="job-items"><div style="font-size:11px;color:#6e7681;padding:4px 0">No items imported yet.</div></div>';
+      }
+      return '<div class="job-items">' + items.map((it) => {
+        const stateLabel = escapeHtml(it.state);
+        const author = it.noteAuthor ? '<span style="color:#6e7681">by ' + escapeHtml(it.noteAuthor) + '</span>' : '';
+        return (
+          '<div class="job-item">' +
+            '<div class="head">' +
+              '<span class="kind ' + escapeHtml(it.type) + '">' + escapeHtml(it.type) + '</span>' +
+              '<span class="name">' + escapeHtml(it.name) + '</span>' +
+              '<span class="state ' + escapeHtml(it.state) + '">' + stateLabel + '</span>' +
+            '</div>' +
+            '<textarea placeholder="Notes (visible to admin)…" data-job="' + escapeHtml(j.id) + '" data-item="' + escapeHtml(it.id) + '">' + escapeHtml(it.note || "") + '</textarea>' +
+            '<div class="note-status" id="note-status-' + escapeHtml(j.id + '-' + it.id) + '">' + author + '</div>' +
+          '</div>'
+        );
+      }).join("") + '</div>';
+    }
+
+    function relativeTime(iso) {
+      if (!iso) return "";
+      const ms = Date.now() - new Date(iso).getTime();
+      if (ms < 60_000) return "just now";
+      const m = Math.floor(ms / 60_000);
+      if (m < 60) return m + "m";
+      const h = Math.floor(m / 60);
+      if (h < 24) return h + "h";
+      const d = Math.floor(h / 24);
+      return d + "d";
+    }
+
+    function toggleJobExpand(jobId) {
+      if (jobsState.expanded.has(jobId)) jobsState.expanded.delete(jobId);
+      else jobsState.expanded.add(jobId);
+      renderJobsPanel();
+    }
+
+    // Debounced note save — write to /api/r/jobs/:id/notes after 600ms
+    // of idle. Status indicator shows saving/saved transitions.
+    const noteSaveTimers = new Map();
+    function onJobNoteInput(textarea) {
+      const jobId = textarea.dataset.job;
+      const itemId = textarea.dataset.item;
+      const note = textarea.value;
+      const key = jobId + ":" + itemId;
+      const statusEl = $("note-status-" + jobId + "-" + itemId);
+      if (statusEl) statusEl.innerHTML = '<span class="saving">saving…</span>';
+
+      clearTimeout(noteSaveTimers.get(key));
+      noteSaveTimers.set(key, setTimeout(async () => {
+        try {
+          const r = await fetch(
+            "/api/r/jobs/" + encodeURIComponent(jobId) + "/notes",
+            {
+              method: "POST",
+              credentials: "same-origin",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ itemId, note }),
+            },
+          );
+          if (r.ok) {
+            if (statusEl) statusEl.innerHTML = '<span class="saved">✓ saved</span>';
+            // Refresh cached jobs so the count badge updates.
+            const job = jobsState.jobs.find((j) => j.id === jobId);
+            if (job) {
+              const it = (job.items || []).find((x) => x.id === itemId);
+              if (it) it.note = note || null;
+            }
+          } else {
+            if (statusEl) statusEl.innerHTML = '<span style="color:#f78166">save failed</span>';
+          }
+        } catch (e) {
+          if (statusEl) statusEl.innerHTML = '<span style="color:#f78166">save failed</span>';
+        }
+      }, 600));
+    }
+
+    // Delegate textarea input → save (one listener covers all current and
+    // future job-item textareas).
+    $("jobs-list").addEventListener("input", (e) => {
+      if (e.target?.tagName === "TEXTAREA" && e.target.dataset?.job) {
+        onJobNoteInput(e.target);
+      }
+    });
+
+    // Poll jobs list every 8s so new imports + status transitions show up
+    // without a manual refresh. Cheap query — reviewer typically has few jobs.
+    function startJobsPolling() {
+      if (jobsState.pollTimer) clearInterval(jobsState.pollTimer);
+      jobsState.pollTimer = setInterval(loadJobs, 8000);
+    }
+
+    window.toggleJobExpand = toggleJobExpand;
+
+    loadMe().then((me) => {
+      if (me) {
+        routeFromHash();
+        loadJobs();
+        startJobsPolling();
+      }
+    });
   </script>
 </body>
 </html>`;
@@ -4229,7 +4582,7 @@ async function dispatchReviewerSurface(
     await handleReviewerJobsList(req, res);
     return true;
   }
-  const jobPath = path.match(/^\/api\/r\/jobs\/([^/?]+)(\/stream|\/inputs)?$/);
+  const jobPath = path.match(/^\/api\/r\/jobs\/([^/?]+)(\/stream|\/inputs|\/notes)?$/);
   if (jobPath) {
     const jid = decodeURIComponent(jobPath[1]);
     const sub = jobPath[2];
@@ -4243,6 +4596,10 @@ async function dispatchReviewerSurface(
     }
     if (req.method === "POST" && sub === "/inputs") {
       await handleReviewerJobInput(req, res, jid);
+      return true;
+    }
+    if (req.method === "POST" && sub === "/notes") {
+      await handleReviewerJobNotes(req, res, jid);
       return true;
     }
   }
