@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: done
 branch: fix/condition-value-measurement
-pr: null
+pr: https://github.com/MCHammer-12/mime/pull/110
 ---
 
 # Flow condition on metric VALUE mistranslated as event COUNT
@@ -69,4 +69,50 @@ Partial existing infra: [`resolveTriggerField:162`](../../../src/flow/condition-
 
 ## Done
 
-(filled by executor on completion)
+- PR: https://github.com/MCHammer-12/mime/pull/110
+- Confirmed the bug exactly as written: `translateProfileMetricCondition`
+  read `measurement_filter.value` (74.99) and routed it through
+  `translateCount` → `Math.floor` → `{ greater_than_n, n: 74 }`, with
+  `whereConditions: []` hardcoded. Silent — no warning.
+- Fix shape (all in [`condition-mapping.ts`](../../../src/flow/condition-mapping.ts)):
+  - Read the Klaviyo `measurement` selector. `VALUE_MEASUREMENTS` =
+    {`sum_value`, `value`, `sum`} route through the value path; `count`
+    (or absent) keeps the existing count behavior.
+  - Value path emits `count: { type: "at_least_once" }` + a numeric
+    whereCondition on the activity's monetary dimension.
+  - `ACTIVITY_VALUE_DIMENSION`: `added-product-to-cart → cart_subtotal`,
+    `order-placed → order_total`. Activities with no monetary field
+    (viewed-product, checkout-started) warn + skip.
+  - `KLAVIYO_NUMERIC_OP_TO_REDO`: greater-than→gt, -or-equal→gte, etc.
+  - Unknown measurements (e.g. `unique`) warn + skip instead of silently
+    counting.
+- **Target shape confirmed from redoapp source (not guessed):**
+  - `cart_subtotal` / `order_total` are NUMERIC fields in
+    `redo/model/src/marketing/segments/segment-data-structures.ts`
+    (`ProductAddedToCartSegmentFields`, `OrderPlacedSegmentFields`)
+  - whereCondition shape `{ type: "numeric", dimension, comparison:
+    { type: "numeric", operator: "gt", value } }` matches redoapp's own
+    `evaluate-segment-membership.it.spec.ts`
+  - `NumericCompareOperator` = eq/gt/lt/gte/lte/neq from
+    `segment-where-condition.ts`
+- **Semantic note (emitted as degraded-mapping warning):** Klaviyo's
+  "Value" measurement SUMS the value over the window; Redo's
+  whereCondition matches per-event. They coincide for the common
+  single-event intent and match the hand-built Redo equivalent Michael
+  verified. Flagged for review rather than silently assumed.
+- Verification: 6 new `condition-mapping.smoke.ts` cases (cart→cart_subtotal,
+  order→order_total, no-dim warn+skip, count regression, absent-measurement
+  regression, unknown-measurement guard) all pass; existing flow smoke
+  tests pass; batch-test 416 templates 0 failures.
+- **Pending:** corpus has only `count` measurements today (value splits
+  surface from live merchant flows), so blast-radius scan + a real
+  value-split re-import to confirm in the Redo flow builder is left as a
+  follow-up.
+- **Process note:** local checkout had fallen ~20 commits behind
+  `origin/main` (concurrent worktree drift, flagged repeatedly this
+  session). Caught it before pushing — re-synced to `origin/main`
+  (f99a83e), re-cut the branch, re-applied the patch on the current base
+  (which already includes Yes Homo #93's phone-country-code work in the
+  same file), so no stale-base conflict.
+
+## Done
