@@ -30,6 +30,36 @@ const TIMEFRAME_UNITS: Record<string, string> = {
   month: "month", months: "month",
 };
 
+// Klaviyo numeric operator → Redo NumericCompareOperator (segment-where-
+// condition.ts: eq/gt/lt/gte/lte/neq). Used for the value-measurement
+// whereCondition (e.g. "cart subtotal greater-than 74.99 → gt").
+const KLAVIYO_NUMERIC_OP_TO_REDO: Record<string, string> = {
+  "equals": "eq",
+  "not-equals": "neq",
+  "greater-than": "gt",
+  "greater-than-or-equal": "gte",
+  "less-than": "lt",
+  "less-than-or-equal": "lte",
+};
+
+// Redo activity → the NUMERIC whereCondition dimension that carries the
+// event's monetary value, for translating Klaviyo "Value" (sum_value)
+// measurements. Confirmed against redoapp segment-data-structures.ts:
+//   - added-product-to-cart → "cart_subtotal" (ProductAddedToCartSegmentFields)
+//   - order-placed          → "order_total"   (OrderPlacedSegmentFields)
+// checkout-started / active-on-site / viewed-product expose no monetary
+// field, so a value split on those can't be mapped — caller warns.
+const ACTIVITY_VALUE_DIMENSION: Record<string, string> = {
+  "added-product-to-cart": "cart_subtotal",
+  "order-placed": "order_total",
+};
+
+// Klaviyo `measurement` selectors that mean "sum of the $value property"
+// rather than a count of events. Anything here routes through the value
+// path (count: at_least_once + a numeric whereCondition); `count` (or
+// absent) keeps the existing count-threshold behavior.
+const VALUE_MEASUREMENTS = new Set(["sum_value", "value", "sum"]);
+
 // Translate Klaviyo's {operator, value} into Redo's ActivityCount shape.
 // Enum values from segment-types.ts:198 (ActivityCountType).
 function translateCount(
@@ -124,11 +154,66 @@ function translateProfileMetricCondition(
   }
   const operator = c.measurement_filter?.operator ?? "greater-than";
   const value = Number(c.measurement_filter?.value ?? 0);
+  const measurement = String(c.measurement ?? "count").toLowerCase();
+  const timeframe = translateTimeframe(c.timeframe_filter, warnings, actionId);
+
+  // Value-measurement path: Klaviyo "Added to Cart VALUE > 74.99" is a
+  // dollar threshold on the event's value property — NOT an event count.
+  // Routing it through translateCount would emit "added to cart > 74
+  // TIMES" (Math.floor(74.99)). Instead emit count: at_least_once + a
+  // numeric whereCondition on the activity's monetary dimension.
+  if (VALUE_MEASUREMENTS.has(measurement)) {
+    const dimension = ACTIVITY_VALUE_DIMENSION[activityType];
+    const redoOp = KLAVIYO_NUMERIC_OP_TO_REDO[operator];
+    if (!dimension || !redoOp) {
+      warnings.push({
+        kind: "requires-review",
+        actionId,
+        message: `condition on "${metric.name}" value (${operator} ${value}) — no Redo value dimension for activity "${activityType}"; manual config required`,
+      });
+      return null;
+    }
+    // Semantic note: Klaviyo's "Value" measurement is a SUM of the value
+    // property across the window; Redo's whereCondition is per-event
+    // (∃ an event whose value crosses the threshold). They coincide for
+    // the common single-event intent ("a cart/order worth > $X") and this
+    // matches the hand-built Redo equivalent — flagged for verification.
+    warnings.push({
+      kind: "degraded-mapping",
+      actionId,
+      message: `"${metric.name}" value measurement (${operator} ${value}) mapped to Redo activity where ${dimension} ${redoOp} ${value}. Klaviyo sums the value over the window; Redo matches per-event — verify the split in the Redo flow builder.`,
+    });
+    return {
+      type: "customer_activity",
+      activityType,
+      count: { type: "at_least_once" },
+      timeframe,
+      whereConditions: [
+        {
+          type: "numeric",
+          dimension,
+          comparison: { type: "numeric", operator: redoOp, value },
+        },
+      ],
+    };
+  }
+
+  // Unrecognized non-count measurement (e.g. "unique") — don't silently
+  // route a non-count value through the count path. Warn + skip.
+  if (measurement !== "count") {
+    warnings.push({
+      kind: "requires-review",
+      actionId,
+      message: `condition on "${metric.name}" uses measurement "${measurement}" which mime doesn't translate yet — manual config required`,
+    });
+    return null;
+  }
+
   return {
     type: "customer_activity",
     activityType,
     count: translateCount(operator, value),
-    timeframe: translateTimeframe(c.timeframe_filter, warnings, actionId),
+    timeframe,
     whereConditions: [],
   };
 }

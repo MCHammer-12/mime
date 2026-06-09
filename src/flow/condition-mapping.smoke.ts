@@ -256,3 +256,149 @@ console.log("✓ profile-marketing-consent smoke tests pass");
 }
 
 console.log("✓ phone-country-code smoke tests pass");
+
+// ─── Value measurement: Added to Cart VALUE > 74.99 → whereCondition ──────
+// Regression for the silent count-vs-value bug: the dollar threshold must
+// become a numeric whereCondition on cart_subtotal, NOT an event count.
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-metric",
+        metric_id: "m_atc",
+        measurement: "sum_value",
+        measurement_filter: { type: "numeric", operator: "greater-than", value: 74.99 },
+        timeframe_filter: { type: "date", operator: "in-the-last", unit: "day", quantity: 30 },
+      },
+    ]),
+    { m_atc: { id: "m_atc", name: "Added to Cart", integration_name: null } } as any,
+    warnings,
+  ) as any;
+  const c = out.inlineSegment.conditions[0];
+  if (c?.type !== "customer_activity") fail(`value: type=${c?.type}`);
+  if (c.activityType !== "added-product-to-cart") fail(`value: activityType=${c.activityType}`);
+  if (c.count?.type !== "at_least_once") fail(`value: count=${JSON.stringify(c.count)} (expected at_least_once, NOT a >74 count)`);
+  if (c.timeframe?.value !== 30 || c.timeframe?.units !== "day") fail(`value: timeframe=${JSON.stringify(c.timeframe)}`);
+  const w = c.whereConditions?.[0];
+  if (!w) fail("value: expected a whereCondition, got none");
+  if (w.type !== "numeric") fail(`value: whereCondition.type=${w.type}`);
+  if (w.dimension !== "cart_subtotal") fail(`value: dimension=${w.dimension}`);
+  if (w.comparison?.type !== "numeric" || w.comparison?.operator !== "gt" || w.comparison?.value !== 74.99)
+    fail(`value: comparison=${JSON.stringify(w.comparison)} (expected gt 74.99)`);
+  if (!warnings.some((x) => x.kind === "degraded-mapping" && x.message.includes("cart_subtotal")))
+    fail("value: expected degraded-mapping warning naming cart_subtotal");
+  console.log("✓ Added to Cart VALUE > 74.99 → at_least_once + cart_subtotal gt 74.99");
+}
+
+// ─── Value measurement on order-placed → order_total ──────────────────────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-metric",
+        metric_id: "m_ord",
+        measurement: "value",
+        measurement_filter: { type: "numeric", operator: "greater-than-or-equal", value: 100 },
+        timeframe_filter: { type: "date", operator: "all-time" },
+      },
+    ]),
+    { m_ord: { id: "m_ord", name: "Placed Order", integration_name: null } } as any,
+    warnings,
+  ) as any;
+  const w = out.inlineSegment.conditions[0]?.whereConditions?.[0];
+  if (w?.dimension !== "order_total") fail(`order value: dimension=${w?.dimension}`);
+  if (w.comparison?.operator !== "gte") fail(`order value: operator=${w.comparison?.operator} (expected gte)`);
+  if (w.comparison?.value !== 100) fail(`order value: value=${w.comparison?.value}`);
+  console.log("✓ Placed Order VALUE >= 100 → order_total gte 100");
+}
+
+// ─── Value measurement on an activity with no monetary dim → warn + skip ──
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-metric",
+        metric_id: "m_vp",
+        measurement: "sum_value",
+        measurement_filter: { type: "numeric", operator: "greater-than", value: 5 },
+        timeframe_filter: { type: "date", operator: "all-time" },
+      },
+    ]),
+    { m_vp: { id: "m_vp", name: "Viewed Product", integration_name: null } } as any,
+    warnings,
+  ) as any;
+  if (out.inlineSegment.conditions.length !== 0) fail("value no-dim: expected no condition emitted");
+  if (!warnings.some((x) => x.message.includes("no Redo value dimension")))
+    fail("value no-dim: expected 'no Redo value dimension' warning");
+  console.log("✓ value measurement on viewed-product → warn + skip (no monetary dim)");
+}
+
+// ─── Count measurement still works (regression) ───────────────────────────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-metric",
+        metric_id: "m_atc",
+        measurement: "count",
+        measurement_filter: { type: "numeric", operator: "greater-than", value: 3 },
+        timeframe_filter: { type: "date", operator: "all-time" },
+      },
+    ]),
+    { m_atc: { id: "m_atc", name: "Added to Cart", integration_name: null } } as any,
+    warnings,
+  ) as any;
+  const c = out.inlineSegment.conditions[0];
+  if (c?.count?.type !== "greater_than_n" || c.count?.n !== 3) fail(`count regression: count=${JSON.stringify(c?.count)}`);
+  if (c.whereConditions?.length !== 0) fail("count regression: whereConditions should be empty");
+  if (warnings.length !== 0) fail(`count regression: unexpected warnings ${JSON.stringify(warnings)}`);
+  console.log("✓ count measurement → count threshold (unchanged, no warning)");
+}
+
+// ─── Absent measurement defaults to count (regression) ────────────────────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-metric",
+        metric_id: "m_atc",
+        measurement_filter: { type: "numeric", operator: "equals", value: 0 },
+        timeframe_filter: { type: "date", operator: "flow-start" },
+      },
+    ]),
+    { m_atc: { id: "m_atc", name: "Added to Cart", integration_name: null } } as any,
+    warnings,
+  ) as any;
+  const c = out.inlineSegment.conditions[0];
+  if (c?.count?.type !== "zero_times") fail(`absent-measurement: count=${JSON.stringify(c?.count)}`);
+  console.log("✓ absent measurement → count path (zero_times)");
+}
+
+// ─── Unknown measurement (e.g. unique) → warn + skip, not count ───────────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-metric",
+        metric_id: "m_atc",
+        measurement: "unique",
+        measurement_filter: { type: "numeric", operator: "greater-than", value: 2 },
+        timeframe_filter: { type: "date", operator: "all-time" },
+      },
+    ]),
+    { m_atc: { id: "m_atc", name: "Added to Cart", integration_name: null } } as any,
+    warnings,
+  ) as any;
+  if (out.inlineSegment.conditions.length !== 0) fail("unique: expected no condition emitted");
+  if (!warnings.some((x) => x.message.includes('"unique"')))
+    fail("unique: expected warning naming the measurement");
+  console.log("✓ unknown measurement 'unique' → warn + skip (not silently counted)");
+}
+
+console.log("✓ value-measurement smoke tests pass");
