@@ -323,6 +323,28 @@ export async function filterFontsNotInBrandKit(
 }
 
 /**
+ * Return the team's brand-kit custom font family NAMES (e.g.
+ * ["Futura PT", "Poppins SemiBold"]). Used by the preflight to fuzzy-match
+ * a still-missing Klaviyo font against fonts the operator just added under
+ * a different name. Empty array on any fetch issue (caller degrades to
+ * "no auto-match, prompt for all").
+ */
+export async function getBrandKitFontFamilies(
+  options: ImportOptions,
+): Promise<string[]> {
+  const teamResponse = await getTeam(options);
+  const teamDoc: any = teamResponse?.team ?? teamResponse ?? {};
+  const families: any[] = Array.isArray(
+    teamDoc?.settings?.brandKit?.customFontFamilies,
+  )
+    ? teamDoc.settings.brandKit.customFontFamilies
+    : [];
+  return families
+    .map((f: any) => String(f.fontFamily ?? "").trim())
+    .filter((s: string) => s.length > 0);
+}
+
+/**
  * Upload all resolved fonts referenced by the batch's templates to the target
  * merchant's brand kit. Idempotent by family name — we fetch the current
  * brand kit and merge (skipping families that already exist).

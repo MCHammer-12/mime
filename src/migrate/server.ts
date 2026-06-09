@@ -33,11 +33,13 @@ import type { ImportProgressEvent } from "./import-rpc.js";
 import {
   decodeJwtAud,
   filterFontsNotInBrandKit,
+  getBrandKitFontFamilies,
   importFlowRpc,
   importTemplateRpc,
   RedoAuthExpiredError,
   uploadFontsForTemplates,
 } from "./import-rpc.js";
+import { matchFontToBrandKit, rewriteTemplateFontFamilies } from "../fonts.js";
 import { disableDb, isDbEnabled, reapStuckJobs, runMigrations } from "./db.js";
 import {
   createJob,
@@ -1116,11 +1118,17 @@ async function runImport(
        * a NEW unresolved font triggers a fresh prompt rather than reusing
        * an unrelated cached answer.
        */
+      // Returns a map of Klaviyo-font-name (lowercased) → brand-kit font
+      // name for any unresolved font the operator reconciled to a font they
+      // added under a different name. Empty map when nothing needed mapping.
+      // Callers apply it to template JSON (rewriteTemplateFontFamilies) so
+      // the imported blocks reference the brand-kit name and actually render.
       async function preflightUnresolvedFonts(
         unresolved: Array<{ family: string; reason: string; usedBy: string[] }>,
         label: string,
-      ): Promise<void> {
-        if (unresolved.length === 0) return;
+      ): Promise<Map<string, string>> {
+        const fontMapping = new Map<string, string>();
+        if (unresolved.length === 0) return fontMapping;
         let stillMissing: typeof unresolved;
         try {
           stillMissing = await withFreshJwt(
@@ -1140,7 +1148,7 @@ async function runImport(
             kind: "info",
             text: `Unresolved ${label} fonts already present in brand kit — proceeding.`,
           });
-          return;
+          return fontMapping;
         }
         const fontKey = stillMissing
           .map((u) => u.family.toLowerCase())
@@ -1150,10 +1158,11 @@ async function runImport(
           .map((u) => `• ${u.family} — used by ${u.usedBy.join(", ")}`)
           .join("\n");
         const plural = stillMissing.length === 1 ? "" : "s";
+        // ─── Step 1: confirm the operator added the fonts ───────────────
         const answer = await ctrl.prompt({
           questionKey: `font-preflight:${fontKey}`,
           question: `${stillMissing.length} custom font${plural} couldn't be auto-uploaded. Add ${stillMissing.length === 1 ? "it" : "them"} to your Redo brand kit (Settings → Brand Kit → Fonts), then click "Continue".`,
-          context: `These fonts aren't on Google Fonts so they can't be fetched automatically:\n\n${fontList}\n\nWithout adding them, the imported templates will reference fonts that don't exist and fall back to a generic sans/serif at render time.`,
+          context: `These fonts aren't on Google Fonts so they can't be fetched automatically:\n\n${fontList}\n\nWithout adding them, the imported templates will reference fonts that don't exist and fall back to a generic sans/serif at render time.\n\nThe font name in your brand kit doesn't have to match exactly — after you continue, we'll reconcile any name differences.`,
           type: "boolean",
           default: "true",
           trueLabel: "Continue (added them)",
@@ -1166,17 +1175,90 @@ async function runImport(
             kind: "warn",
             text: `Importing ${label} anyway with ${stillMissing.length} unresolved font${plural} (${stillMissing.map((u) => u.family).join(", ")}) — fallback rendering will apply.`,
           });
-        } else {
+          return fontMapping;
+        }
+
+        // ─── Step 2: reconcile each font's Klaviyo name → brand-kit name ─
+        // Re-fetch the brand kit (now that the operator added fonts), then
+        // auto-match where confident; only ambiguous / no-match fonts reach
+        // a per-font picker. The chosen brand-kit name is recorded so the
+        // template's fontFamily references get rewritten before import.
+        let brandKitFamilies: string[] = [];
+        try {
+          brandKitFamilies = await withFreshJwt(
+            (jwt) => getBrandKitFontFamilies({ jwt, serverBase, account }),
+            `fetching brand kit fonts for ${label}`,
+          );
+        } catch (e: any) {
+          emit({
+            kind: "warn",
+            text: `Could not re-fetch brand kit fonts (${e.message ?? e}); skipping name reconciliation. If a font renders wrong, its name may differ from the import.`,
+          });
+          return fontMapping;
+        }
+
+        for (const u of stillMissing) {
+          const match = matchFontToBrandKit(u.family, brandKitFamilies);
+          if (match.kind === "match") {
+            if (match.family.toLowerCase() !== u.family.toLowerCase()) {
+              fontMapping.set(u.family.toLowerCase(), match.family);
+              emit({
+                kind: "info",
+                text: `Font "${u.family}" → matched brand-kit font "${match.family}" automatically.`,
+              });
+            }
+            // Exact-name match: nothing to rewrite, font already aligns.
+            continue;
+          }
+          // Ambiguous or no match → ask the operator which brand-kit font
+          // they added for this Klaviyo font. One prompt per font; cached
+          // per-font so a recurring font across templates is asked once.
+          const options =
+            match.kind === "ambiguous" ? match.candidates : brandKitFamilies;
+          if (options.length === 0) {
+            emit({
+              kind: "warn",
+              text: `No brand-kit fonts found to map "${u.family}" to — it will render with a generic fallback. Add it to Settings → Brand Kit → Fonts and re-import.`,
+            });
+            continue;
+          }
+          const pick = await ctrl.prompt({
+            questionKey: `font-map:${u.family.toLowerCase()}`,
+            question: `Klaviyo font "${u.family}" — which brand-kit font did you add for it?`,
+            context: `Pick the font you added to your Redo brand kit for "${u.family}" (used by ${u.usedBy.join(", ")}). The names often differ (e.g. "Futura" vs "Futura PT").`,
+            type: "choice",
+            options: [
+              ...options.map((f) => ({ value: f, label: f })),
+              { value: "__fallback__", label: "Leave as-is (generic fallback)" },
+            ],
+            itemLabel: u.family,
+            hideApplyAll: true,
+          });
+          if (pick === "__skip__" || pick === "__fallback__" || !pick) {
+            emit({
+              kind: "warn",
+              text: `Font "${u.family}" left unmapped — it will render with a generic fallback.`,
+            });
+            continue;
+          }
+          if (pick.toLowerCase() !== u.family.toLowerCase()) {
+            fontMapping.set(u.family.toLowerCase(), pick);
+          }
           emit({
             kind: "info",
-            text: `${label}: proceeding — assuming the ${stillMissing.length} missing font${plural} ${stillMissing.length === 1 ? "has" : "have"} been added to brand kit.`,
+            text: `Font "${u.family}" → mapped to brand-kit font "${pick}".`,
           });
         }
+        return fontMapping;
       }
 
       // ─── Template phase ────────────────────────────────────────────
       let templateImportOk = 0;
       let templateImportFail = 0;
+      // Klaviyo-font-name (lowercased) → brand-kit font name, filled by the
+      // font preflight when the operator reconciled a name mismatch. Applied
+      // to each template's blocks before import so fonts render correctly.
+      let templateFontMapping = new Map<string, string>();
       if (hasTemplatesToImport) {
         // Load the exported template JSON once so we can upload fonts (union
         // across the batch) before creating templates.
@@ -1212,7 +1294,7 @@ async function runImport(
             skipped: fontResult.skipped,
             unresolved: fontResult.unresolved,
           });
-          await preflightUnresolvedFonts(fontResult.unresolved, "templates");
+          templateFontMapping = await preflightUnresolvedFonts(fontResult.unresolved, "templates");
         } catch (e: any) {
           emit({ kind: "warn", text: `font upload failed: ${e.message ?? e}. Continuing with template import.` });
         }
@@ -1220,6 +1302,15 @@ async function runImport(
         emit({ kind: "step", label: "Creating templates…" });
         for (const l of loaded) {
           emit({ kind: "step", label: `Importing ${l.name}…` });
+          // Repoint any Klaviyo font name the operator mapped to a
+          // differently-named brand-kit font so the imported blocks
+          // reference the registered font (else: generic fallback render).
+          if (templateFontMapping.size > 0) {
+            const n = rewriteTemplateFontFamilies(l.json, templateFontMapping);
+            if (n > 0) {
+              emit({ kind: "log", source: "stdout", text: `${l.name}: rewrote ${n} font reference${n === 1 ? "" : "s"} to brand-kit names` });
+            }
+          }
           try {
             const result = await withFreshJwt(
               (jwt) =>
@@ -1456,10 +1547,22 @@ async function runImport(
                 skipped: fontResult.skipped,
                 unresolved: fontResult.unresolved,
               });
-              await preflightUnresolvedFonts(
+              const flowFontMapping = await preflightUnresolvedFonts(
                 fontResult.unresolved,
                 `flow "${flowName}"`,
               );
+              // placeholderJsons are the same `fullTemplate` object refs
+              // importFlowRpc consumes, so rewriting in place reaches the
+              // imported flow's emails.
+              if (flowFontMapping.size > 0) {
+                let rewritten = 0;
+                for (const t of placeholderJsons) {
+                  rewritten += rewriteTemplateFontFamilies(t, flowFontMapping);
+                }
+                if (rewritten > 0) {
+                  emit({ kind: "log", source: "stdout", text: `flow "${flowName}": rewrote ${rewritten} font reference${rewritten === 1 ? "" : "s"} to brand-kit names` });
+                }
+              }
             }
           } catch (e: any) {
             emit({
