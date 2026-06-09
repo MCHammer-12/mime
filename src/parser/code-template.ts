@@ -50,19 +50,28 @@ import {
   parsePx,
 } from "./style-utils.js";
 import { nextId } from "./helpers.js";
+import { classifyKlaviyoUrl } from "./url-mapping.js";
 import type { ParseContext, ParseResult } from "./index.js";
 
 type $El = cheerio.Cheerio<El>;
 
 // ─── Entry point ─────────────────────────────────────────────────
 
-export function parseCodeTemplateHtml(html: string): ParseResult {
+export function parseCodeTemplateHtml(
+  html: string,
+  opts: { storeUrl?: string | null } = {},
+): ParseResult {
   const $ = cheerio.load(html);
+  // Strip trailing slashes; reject non-http so the url-mapping cart-link
+  // fallback only fires on a real store URL (mirrors index.ts).
+  const rawStore = (opts.storeUrl ?? "").trim().replace(/\/+$/, "");
+  const storeUrl = /^https?:\/\//i.test(rawStore) ? rawStore : null;
   const ctx: ParseContext = {
     warnings: [],
     unsupportedFeatures: [],
     reviewItems: [],
     skippedBlocks: [],
+    storeUrl,
   };
 
   const bodyStyle = parseInlineStyles($("body").attr("style"));
@@ -127,6 +136,13 @@ type ContainerKind = "table" | "div";
 
 function findContainer($: $): { kind: ContainerKind; $el: $El } | null {
   // Prefer the inner table that's constrained to email width.
+  // ─────────────────────────────────────────────────────────────────
+  // KEEP THIS FIRST and unchanged. ~270 of Otishi's CODE templates find
+  // their container here; reordering or broadening the table match would
+  // shift their section output. The Zaymo / inline-width fallbacks below
+  // only fire for templates that currently find NO table and deep-walk
+  // the whole body (the double-emit case — see #1/#2 in the CODE-fidelity
+  // plan), so they're additive, not a behavior change for table templates.
   const tableCandidates = $("table")
     .toArray()
     .map((el) => $(el))
@@ -143,13 +159,30 @@ function findContainer($: $): { kind: ContainerKind; $el: $El } | null {
     return { kind: "table", $el: tableCandidates[0]! };
   }
 
+  // Zaymo "root-container" convention. Zaymo (app.zaymo.com) renders a
+  // Klaviyo email as TWO parallel copies directly under <body> — one in a
+  // generic `<div style="display:table">` and one in `<div id="bodyTable"
+  // class="root-container">`. Without a recognized container we'd deep-walk
+  // the body and emit BOTH copies (Castle Sports RYCBtZ: 33 sections, every
+  // block twice). Scoping to the single root-container div deduplicates.
+  // Prefer the id'd outer wrapper, else the first .root-container.
+  const $byId = $("div#bodyTable").first();
+  if ($byId.length > 0) return { kind: "div", $el: $byId };
+  const $rootContainer = $("div.root-container").first();
+  if ($rootContainer.length > 0) return { kind: "div", $el: $rootContainer };
+
   // Fallback for div-wrapped templates (Hypermatic / Stripo / MSO-heavy).
+  // Match both `max-width:600` and a bare inline `width:600px` — Zaymo and
+  // some builders constrain the content div with the latter.
   const divCandidates = $("div")
     .toArray()
     .map((el) => $(el))
     .filter(($d) => {
       const style = parseInlineStyles($d.attr("style"));
-      return /max-width\s*:\s*600/.test(style["max-width"] || "");
+      return (
+        /max-width\s*:\s*600/.test(style["max-width"] || "") ||
+        /(?:^|[^-])width\s*:\s*600px/.test($d.attr("style") || "")
+      );
     });
   if (divCandidates.length > 0) {
     return { kind: "div", $el: divCandidates[0]! };
@@ -301,6 +334,7 @@ function parseSectionTd(
           sectionPadding,
           sectionColor,
           tdAlign,
+          ctx,
         );
         if (btn) out.push(btn);
         continue;
@@ -543,6 +577,7 @@ function buildButtonFromTable(
   sectionPadding: { top: number; right: number; bottom: number; left: number },
   sectionColor: string,
   tdAlign: string,
+  ctx: ParseContext,
 ): ButtonBlock | null {
   const $tr = directTrChildren($table).first();
   const $td = $tr.children("td").first();
@@ -576,6 +611,10 @@ function buildButtonFromTable(
 
   const buttonText = $a.text().trim();
   const href = $a.attr("href") || "";
+  // Rewrite Klaviyo checkout-URL variables ({{ event.extra.checkout_url }}
+  // etc.) to <storeUrl>/cart, same as the block-editor button parser. With
+  // no storeUrl the variable stays and a reviewItem is pushed for review.
+  const mapped = href ? classifyKlaviyoUrl(href, EmailBlockType.BUTTON, ctx) : null;
 
   return {
     type: EmailBlockType.BUTTON,
@@ -593,7 +632,7 @@ function buildButtonFromTable(
     alignment,
     padding,
     linkType: ButtonLinkType.WEB_PAGE,
-    buttonLink: href,
+    buttonLink: mapped?.buttonLink ?? href,
   };
 }
 
@@ -922,6 +961,7 @@ function deepWalkContent(
           { top: 0, right: 0, bottom: 0, left: 0 },
           "#ffffff",
           "",
+          ctx,
         );
         if (btn) out.push(btn);
         seen.add(el);

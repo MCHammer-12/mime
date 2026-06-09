@@ -77,7 +77,7 @@ export async function exportTemplateFromHtml(
     skippedBlocks,
     bodyBackgroundColor,
   } = useCodeParser
-    ? parseCodeTemplateHtml(html)
+    ? parseCodeTemplateHtml(html, { storeUrl: opts.account?.websiteUrl ?? null })
     : parseKlaviyoHtml(html, { storeUrl: opts.account?.websiteUrl ?? null });
 
   let sections = rawSections;
