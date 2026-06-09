@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: done
 branch: fix/font-name-mismatch-mapping
-pr: null
+pr: https://github.com/MCHammer-12/mime/pull/111
 ---
 
 # Font preflight: let operator map Klaviyo font → brand-kit font after adding
@@ -86,4 +86,45 @@ Before `createEmailTemplate`, walk each exported template JSON and rewrite block
 
 ## Done
 
-(filled by executor on completion)
+- PR: https://github.com/MCHammer-12/mime/pull/111
+- Implemented the two-step flow + template rewrite exactly as proposed:
+  - **Step 1** (reworded): the existing boolean "added them?" prompt, now
+    telling the operator the name doesn't have to match exactly.
+  - **Step 2** (new): re-fetch the brand kit
+    ([`getBrandKitFontFamilies`](../../../src/migrate/import-rpc.ts) — new
+    sibling to `filterFontsNotInBrandKit`), auto-match each still-missing
+    font, prompt per-font only when ambiguous/no-match via the existing
+    `type: "choice"` modal. Per-font `questionKey` caches the answer.
+  - **Step 3** (new): `rewriteTemplateFontFamilies` repoints block-level
+    `fontFamily` to the chosen brand-kit name before import — applied in
+    BOTH the template phase AND the flow phase (flow placeholder templates
+    are the same object refs `importFlowRpc` consumes, so in-place rewrite
+    reaches the flow emails).
+- New helpers in [`src/fonts.ts`](../../../src/fonts.ts):
+  - `normalizeForFontMatch` — tokenize + drop weight/foundry tokens for
+    comparison. Futura / Futura PT / FuturaStd-Medium all → "futura".
+  - `matchFontToBrandKit` — 3 tiers (exact / normalized-eq / length-guarded
+    containment). Conservative: ≥2 candidates → ambiguous (prompt), never
+    silently guesses wrong.
+  - `rewriteTemplateFontFamilies` — generic walk over the template JSON;
+    catches text/menu/button/products + nested column cells. WeakSet guard.
+- **No new prompt machinery / no UI cache-buster bump** — reuses the
+  existing `PendingInput` `choice` type (same as the flow-trigger picker).
+  Confirmed `mock-stream.js` already renders `input.options`.
+- **Auto-match is conservative** per the task's guidance: a code-review
+  pass caught a Tier-3 containment false-positive (a short generic
+  residual like "PT Sans" → "sans" could match an unrelated font) — fixed
+  with a min-length/ratio guard + a regression smoke case.
+- Verification: 14 `fonts.smoke.ts` cases; end-to-end (real export →
+  inject "Futura" → match "Futura PT" → rewrite → block references
+  "Futura PT"); batch-test 416 templates 0 failures; flow/condition smoke
+  unchanged; `tsc` 0 errors in touched files.
+- **Pending:** live re-import for a real non-Google-font merchant
+  (Blackline's Futura, Charlie's Century Gothic Charlie) to confirm the
+  font renders correctly in the Redo editor end-to-end.
+- **Scope note:** brand-kit-LEVEL default font references
+  (`settings.brandKit.font.*`) aren't in the exported template JSON (the
+  brand kit is team-level, separate), so there's nothing to rewrite there
+  — the per-block walk covers everything the template carries.
+
+## Done
