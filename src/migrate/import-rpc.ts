@@ -512,7 +512,10 @@ async function uploadAttachment(
       body?.error ??
       body?.message ??
       (text && text.length > 0 ? text.slice(0, 2000) : res.statusText);
-    if (res.status === 401 || res.status === 403) {
+    // 401 = JWT expired / invalid → refreshable. 403 = authenticated but
+    // lacks permission for this resource → no refresh fixes it; let the
+    // caller see Redo's "Lacking required permissions" message and stop.
+    if (res.status === 401) {
       throw new RedoAuthExpiredError("/team/upload-attachment", res.status, msg);
     }
     throw new Error(`upload-attachment ${res.status}: ${msg}`);
@@ -532,7 +535,9 @@ async function getTeam(options: ImportOptions): Promise<any> {
   });
   const text = await res.text();
   if (!res.ok) {
-    if (res.status === 401 || res.status === 403) {
+    // Only 401 means refreshable JWT issue. 403 is a permission denial
+    // that a token paste can't resolve.
+    if (res.status === 401) {
       throw new RedoAuthExpiredError("/team", res.status, text?.slice(0, 500));
     }
     throw new Error(`get team ${res.status}: ${text?.slice(0, 2000) ?? res.statusText}`);
@@ -593,7 +598,11 @@ async function postAtPath(
       body?.error ??
       body?.message ??
       (text && text.length > 0 ? text.slice(0, 2000) : res.statusText);
-    if (res.status === 401 || res.status === 403) {
+    // 401 → JWT expired/invalid → refreshable via prompt. 403 → user is
+    // authenticated but lacks the required permission for this RPC; no
+    // amount of token-pasting fixes it. Let Redo's "Lacking required
+    // permissions" message bubble up so the caller sees the real reason.
+    if (res.status === 401) {
       throw new RedoAuthExpiredError(path, res.status, msg);
     }
     throw new Error(`POST ${path} ${res.status}: ${msg}`);
