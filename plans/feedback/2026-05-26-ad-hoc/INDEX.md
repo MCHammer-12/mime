@@ -9,6 +9,7 @@ workflow as the merchant batches.
 | # | Status | Task | Branch | PR |
 |---|--------|------|--------|----|
 | 1 | unclaimed | [Flow condition on metric VALUE mistranslated as event COUNT](cart-value-condition-mistranslated.md) | `fix/condition-value-measurement` | — |
+| 2 | unclaimed | [Font preflight: map Klaviyo font → brand-kit font after adding](font-name-mismatch-mapping.md) | `fix/font-name-mismatch-mapping` | — |
 
 ## Cross-cutting notes
 
