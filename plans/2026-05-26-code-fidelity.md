@@ -1,7 +1,20 @@
 # Plan: CODE-template parser fidelity
 
-**Status:** Draft (v2, post-Castle ground-truth)
+**Status:** P0a + P0c shipped ([#112](https://github.com/MCHammer-12/mime/pull/112) 2026-06-09); P0b deferred; P1/P2/P3 open
 **Created:** 2026-05-26
+
+**Execution note (2026-06-09):** P0a was scoped more conservatively than
+drafted. The plan suggested globally preferring the Zaymo root-container,
+but a corpus scan found **118 of 368** Otishi CODE templates carry
+`root-container` — preferring it everywhere would shift their parse output.
+Instead table detection stays first (untouched), and root-container /
+inline-`width:600px` are added only as fallbacks for the **96** templates
+that currently deep-walk (the plan's "16" estimate was low). Result: Castle
+RYCBtZ 33→16, and **0 section-count changes across all 368 Otishi
+templates** (verified per-template), warnings 141→119. P0b turned out moot
+for Castle (P0a scopes past the body-level preheader) so it was deferred
+rather than adding `isVisualSkip` heuristics that risk false-positives on
+the corpus.
 **Trigger:** Castle Sports' `[EG]` abandonment flows (3 of 6 affected). Per [Castle Task 1](feedback/2026-05-26-castle-sports/eg-templates-blank-emails.md), Michael picked "fix CODE parser fidelity first, then ungate" — but actual current state is that the parser is already wired up via [src/export-template.ts:69-71](src/export-template.ts).
 
 ## Context
@@ -141,9 +154,9 @@ Klaviyo's "rounded pill" pattern. Emit `reviewItem` when adjacent cells have dif
 
 | # | Workstream | Verification | Status |
 |---|------------|-------------|--------|
-| 1 | P0a — Container detection (Zaymo root-container, inline width:600, MSO-class skip, subtree scoping) | Castle `RYCBtZ` → ~16 sections (not 33); Otishi warnings down to <5 | unclaimed |
-| 2 | P0b — Preheader / non-visual top-level skip | Castle `RYCBtZ` section [0] gone; no Otishi regressions | unclaimed |
-| 3 | P0c — Button link Klaviyo-variable substitution + storeUrl plumb | Castle button [5] → `<storeUrl>/cart`; no Otishi regressions | unclaimed |
+| 1 | P0a — Container detection (Zaymo root-container, inline width:600) | Castle `RYCBtZ` → 16 sections (not 33); Otishi 0 section changes, warnings 141→119 | **done** ([#112](https://github.com/MCHammer-12/mime/pull/112)) |
+| 2 | P0b — Preheader / non-visual top-level skip | Moot for Castle once P0a scopes into root-container (section [0] preheader already dropped). Deferred — `isVisualSkip` hardening adds regression surface across 368 templates for no Castle benefit; revisit if another template puts a preheader INSIDE the container. | deferred |
+| 3 | P0c — Button link Klaviyo-variable substitution + storeUrl plumb | Castle button → `https://castlesports.com/cart`; Otishi 0 regressions | **done** ([#112](https://github.com/MCHammer-12/mime/pull/112)) |
 | 4 | P1 — Image width preservation + asymmetric alignment + reviewItem on missing-width | Smoke test passes; Otishi visual diff on known-narrow-logo template | unclaimed |
 | 5 | P1 — Text whitespace preservation across fragment boundaries | Footer-style address renders with line breaks | unclaimed |
 | 6 | P2 — SOCIALS block detection from icon-URL pattern | Castle social row → 1 SOCIALS block | unclaimed |
