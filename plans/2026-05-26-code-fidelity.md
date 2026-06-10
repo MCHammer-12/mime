@@ -1,20 +1,18 @@
 # Plan: CODE-template parser fidelity
 
-**Status:** P0a + P0c shipped ([#112](https://github.com/MCHammer-12/mime/pull/112) 2026-06-09); P0b deferred; P1/P2/P3 open
+**Status:** P0+P1+P2+P3 shipped on `fix/code-parser-fidelity` (PR #91, rebased over the earlier P0-only #112 on 2026-06-09); ready for review/merge
 **Created:** 2026-05-26
 
-**Execution note (2026-06-09):** P0a was scoped more conservatively than
-drafted. The plan suggested globally preferring the Zaymo root-container,
-but a corpus scan found **118 of 368** Otishi CODE templates carry
-`root-container` — preferring it everywhere would shift their parse output.
-Instead table detection stays first (untouched), and root-container /
-inline-`width:600px` are added only as fallbacks for the **96** templates
-that currently deep-walk (the plan's "16" estimate was low). Result: Castle
-RYCBtZ 33→16, and **0 section-count changes across all 368 Otishi
-templates** (verified per-template), warnings 141→119. P0b turned out moot
-for Castle (P0a scopes past the body-level preheader) so it was deferred
-rather than adding `isVisualSkip` heuristics that risk false-positives on
-the corpus.
+**Rebase note (2026-06-09):** a parallel session shipped the earlier
+P0-only [#112](https://github.com/MCHammer-12/mime/pull/112) (conservative
+container detection: table-first, root-container as fallback) to `main`
+before this fuller PR #91 was merged. #91 (the complete P0–P3 batch) was
+then rebased onto `main`; conflicts in `findContainer` / button
+substitution were resolved in favor of #91's canonical versions — which
+prefer the Zaymo `root-container` FIRST (catches more deep-walk templates;
+Otishi warnings 141→62 vs #112's 141→119). #112's narrower changes are
+fully subsumed. Re-verify the Otishi section delta on merge (root-first
+can change parse for the 118 root-container templates — see Open questions).
 **Trigger:** Castle Sports' `[EG]` abandonment flows (3 of 6 affected). Per [Castle Task 1](feedback/2026-05-26-castle-sports/eg-templates-blank-emails.md), Michael picked "fix CODE parser fidelity first, then ungate" — but actual current state is that the parser is already wired up via [src/export-template.ts:69-71](src/export-template.ts).
 
 ## Context
@@ -152,17 +150,34 @@ Klaviyo's "rounded pill" pattern. Emit `reviewItem` when adjacent cells have dif
 
 ## Sections (tasks)
 
-| # | Workstream | Verification | Status |
-|---|------------|-------------|--------|
-| 1 | P0a — Container detection (Zaymo root-container, inline width:600) | Castle `RYCBtZ` → 16 sections (not 33); Otishi 0 section changes, warnings 141→119 | **done** ([#112](https://github.com/MCHammer-12/mime/pull/112)) |
-| 2 | P0b — Preheader / non-visual top-level skip | Moot for Castle once P0a scopes into root-container (section [0] preheader already dropped). Deferred — `isVisualSkip` hardening adds regression surface across 368 templates for no Castle benefit; revisit if another template puts a preheader INSIDE the container. | deferred |
-| 3 | P0c — Button link Klaviyo-variable substitution + storeUrl plumb | Castle button → `https://castlesports.com/cart`; Otishi 0 regressions | **done** ([#112](https://github.com/MCHammer-12/mime/pull/112)) |
-| 4 | P1 — Image width preservation + asymmetric alignment + reviewItem on missing-width | Smoke test passes; Otishi visual diff on known-narrow-logo template | unclaimed |
-| 5 | P1 — Text whitespace preservation across fragment boundaries | Footer-style address renders with line breaks | unclaimed |
-| 6 | P2 — SOCIALS block detection from icon-URL pattern | Castle social row → 1 SOCIALS block | unclaimed |
-| 7 | P2 — Per-span text styling visual repro on Castle template | Either close as works, or file Redo Asks, or land narrow parser fix | unclaimed |
-| 8 | P3 — Asymmetric border-radius warning (no rendering change) | `reviewItem` emitted when detected | unclaimed |
-| 9 | Cleanup — update memory `project_code_template_parser`, archive CONTEXT.md mention | Memory reflects new state; CONTEXT.md status line updated | unclaimed |
+| # | Workstream | Verification | Status | Commit |
+|---|------------|-------------|--------|--------|
+| 1 | P0a — Container detection (Zaymo root-container, inline width:600, MSO-class skip, regex bugfix) | Castle `RYCBtZ` → 16 sections (was 33); Otishi warnings 141 → 62 | ✅ done | `1845cba` |
+| 2 | P0b — Preheader / non-visual top-level skip (mso-hide:all, body-noise filter) | Castle `RYCBtZ` preheader Liquid blob no longer in output; no Otishi regressions | ✅ done | `1845cba` |
+| 3 | P0c — Button link Klaviyo-variable substitution + storeUrl plumb | Castle "Return to your cart" → `https://castlesports.com/cart`; no Otishi regressions | ✅ done | `1845cba` |
+| 4 | P1 — Image width preservation + asymmetric alignment + reviewItem on missing-width | 5 smoke cases pass (center/left/right/missing/full-width) | ✅ done | `1845cba` |
+| 5 | P1 — Inline structure preservation (br/span) across fragment boundaries | Castle footer preserves `<br>` line breaks + per-span color styles; Otishi unchanged | ✅ done | `84994ae` |
+| 6 | P2 — SOCIALS block detection from icon-URL pattern (post-pass) | Castle social row → 1 SOCIALS block (4 platforms + hrefs); Otishi: 30 SOCIALS blocks from 60 collapsed images | ✅ done | `a1089fe` |
+| 7 | P2 — Per-span text styling visual repro on Castle template | Deferred — preserved in HTML; needs live Redo builder check to confirm Quill doesn't strip on load | ⏸ deferred | — |
+| 8 | P3 — Asymmetric border-radius warning (no rendering change) | `asymmetric-cell-border-radius` reviewItem emitted on heuristic match | ✅ done | `b8a0806` |
+| 9 | Cleanup — memory `project_code_template_parser` + CONTEXT.md + Castle Task 1 | Memory + status reflect new state; Castle Task 1 marked unblocked/done | ✅ done | (this commit) |
+
+### Cross-flow Castle verification
+
+After landing P0-P3, fetched all 8 CODE templates referenced by Castle's 3
+`[EG]` abandonment flows (`RYCBtZ`, `R5yNiY`, `VuPSMk`, `X6ueP8`, `Trghwt`,
+`RuLppU`, `XnqQ45`, `RX8bn7`) — same family of Zaymo-built emails plus 2
+older `browse_` templates. Batch-parsed:
+
+```
+Files: 8 | Failures: 0 | Empty: 0 | Warnings: 0
+Sections: 91 (text 35, image 26, button 14, column 8, socials 8)
+```
+
+Every Castle CODE template now produces a populated, deduplicated Section[]
+with the social row collapsed into a SOCIALS block and the cart-recovery
+button rewritten to `<storeUrl>/cart`. The 3 `[EG]` flows Castle flagged as
+"blank emails" are unblocked.
 
 ## Verification (cross-cutting)
 
