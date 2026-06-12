@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: done
 branch: fix/branch-conditions-dropped
-pr: null
+pr: https://github.com/MCHammer-12/mime/pull/116
 ---
 
 # Branch/split conditions on profile + event properties silently dropped
@@ -63,4 +63,39 @@ Add smoke cases in [`condition-mapping.smoke.ts`](../../../src/flow/condition-ma
 
 ## Done
 
-(filled by executor on completion)
+- PR: https://github.com/MCHammer-12/mime/pull/116
+- Inspected the bundled `klaviyo-flow.json` for each flagged flow; exact
+  shapes:
+  - SD8SuS: `{profile-property, property: properties['$viewed_items'],
+    filter: {type:list, value:"ePropulsion", operator:contains}}`
+  - X3KsN3: `{trigger-split/metric-property, field:"Items", filter:{type:
+    list, value:"Epropulsion", operator:contains}}`
+  - W2yEfw: `{profile-property, property:phone_number, filter:{type:
+    existence, operator:is-set}}`
+- All targets confirmed against checked-out redoapp source (no guessing):
+  - **SD8SuS → mapped.** `customer_activity` `viewed-product` +
+    `collection_name` TOKEN_LIST whereCondition (`{type:list, operator:any,
+    values:["ePropulsion"]}`). `ProductViewedSegmentFields.COLLECTION_NAME`
+    = `collection_name` (TOKEN_LIST), `ListCompareOperators` any/none.
+    `not-contains` → none. degraded-mapping warning notes the
+    profile-snapshot → event-history approximation.
+  - **X3KsN3 → mapped.** trigger-data `text_match` on `productInCartName`
+    (`includes`). `resolveTriggerField` now maps `Items` → productInCartName
+    for cart abandonment; new list-filter branch in
+    `translateTriggerSplitExpression` does contains→includes /
+    not-contains→notIncludes.
+  - **W2yEfw → precise warning.** Redo has NO is-set/existence operator
+    (where-condition operators: token ANY/NONE, numeric eq/gt, boolean).
+    Keeps the placeholder, which emits `phone_number is-set ""` — loud,
+    not silent. Per `feedback_flow_status_mapping`, imported flows land
+    inactive so the operator reviews.
+- Verified each against the real flow JSON via direct translator calls;
+  outputs exactly as above. 5 new smoke cases; existing condition / flow /
+  416-template batch unchanged; tsc clean.
+- **Not in scope (per the task's scope-discipline note):** other arbitrary
+  Klaviyo profile-property operators (`equals`/`starts-with` on custom
+  fields, `is-in-set`, group membership). Those still hit the
+  manual-config placeholder — a broader design conversation, not this
+  3-shape fix.
+
+## Done
