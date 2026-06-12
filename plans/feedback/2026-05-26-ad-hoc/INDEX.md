@@ -12,10 +12,19 @@ workflow as the merchant batches.
 | 2 | done | [Font preflight: map Klaviyo font → brand-kit font after adding](font-name-mismatch-mapping.md) | `fix/font-name-mismatch-mapping` | [#111](https://github.com/MCHammer-12/mime/pull/111) |
 | 3 | unclaimed | [Klaviyo date / predictive triggers crash import (50KB Zod 400)](date-predictive-trigger-failure.md) | `fix/date-predictive-trigger-failure` | _on [#113](https://github.com/MCHammer-12/mime/pull/113)_ |
 | 4 | unclaimed | [Auto-create Redo segments at import (copy static lists, members included)](segment-auto-creation-at-import.md) | `fix/segment-auto-creation-at-import` | — |
+| 5 | unclaimed | [Started Checkout → Checkout Abandonment (reverse PR #43)](started-checkout-to-checkout-abandonment.md) | `fix/started-checkout-to-checkout-abandonment` | — |
+
+## Michael's decisions — 2026-06-12
+
+Four open questions resolved this session (memory `feedback_segment_import_decision` + `feedback_migration_decisions`):
+1. **Started Checkout → Checkout Abandonment** (reverses #43) → Task 5.
+2. **Segment member-copy: ship buildable, defer copy.** Tag actions + list-update actions + rule-based segments now (Task 4's match-by-name/create path); static-list-membership *conditions* wait on a redoapp add-members RPC. SHOC Task 1 stays deferred; Tiny Boat Task 2's tag half ships now.
+3. **WAIT time-of-day / weekday: accept as degraded mapping.** No new work — the existing degraded-mapping warning stands. Don't re-raise.
+4. **Unknown custom-event metrics: always surface to the picker**, never silently map to a real trigger (e.g. survey → order_fulfilled). Locks Rufskin Task 1's direction.
 
 ## Cross-cutting notes
 
-**Segment auto-creation (Task 4) is the foundational unblocker** for the condition/segment cluster. Decision by Michael 2026-06-12 (memory `feedback_segment_import_decision`): auto-create Redo segments at import; copy static Klaviyo lists with members. Dependents: SHOC Task 1 (list-membership condition), Tiny Boat Task 2 (list-update action). Gated on a merchant-facing create-segment RPC that does NOT yet exist in redoapp — Task 4's step 0 confirms/adds it. (Task 3 file lives on PR #113 until merged.)
+**Segment auto-creation (Task 4) is the foundational unblocker** for the condition/segment cluster. Decision 2026-06-12 (memory `feedback_segment_import_decision`): ship the buildable parts now, defer static-list member-copy until redoapp adds an add-members RPC. Dependents: SHOC Task 1 (list-membership condition, deferred), Tiny Boat Task 2 (list-update action, buildable). (Task 3 file lives on PR #113 until merged.)
 
 **Related condition-mapping work:** Yes Homo Task 1 ([`phone-country-code-condition`](../2026-05-26-yes-homo/phone-country-code-condition.md)) is also in `src/flow/condition-mapping.ts`. Different operator (profile-property phone-country vs metric value-measurement) but same file — coordinate if both executors run in parallel to avoid edit conflicts.
 
