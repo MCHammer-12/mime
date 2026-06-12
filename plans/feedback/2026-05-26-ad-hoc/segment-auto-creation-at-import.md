@@ -23,16 +23,47 @@ The silent-empty-branch fallback breaks targeting. Redo has the receiving struct
 - `manage_static_segment` step — `redo/model/src/advanced-flow/advanced-flow-db-parser.ts:886` (`{ operation: add|remove, segmentId, ... }`).
 - Both key on a real `segmentId` → the segment must exist. Auto-creating it is what makes the migrated flow work.
 
-## The blocker — confirm/build a merchant-facing RPC FIRST
+## Step 0 RESOLVED (2026-06-12) — RPCs exist; one gap
 
-**There is no merchant-callable create-segment / add-members RPC in `redo/server/src/rpc` today.** Segment creation in redoapp is admin-side (`redo/admin/server/src/rpc/handler/marketing/create-expansion-segments.ts`) and klaviyo-push-side (`redo/integration/clients/klaviyo`). mime imports with a **merchant JWT** via merchant RPCs — it can't call admin handlers.
+The "no merchant-callable create-segment RPC" premise is **stale**. The
+merchant marketing RPC layer (`redo/merchant/marketing/rpc/src/schema/segments/`)
+now exposes, callable with a merchant JWT:
 
-So step 0 is a redoapp dependency: confirm (or add) a merchant-facing RPC for:
-1. **Create static segment** → returns `segmentId`.
-2. **Add customers to a static segment** (by email or Redo customer id).
-3. (Rule-based) **Create rule segment** from a `SegmentCondition[]` definition.
+| RPC | Input | Output | Use |
+|-----|-------|--------|-----|
+| `createStaticSegment` | `{ name }` | staticGroup (has `_id`) | create empty static segment |
+| `createDynamicSegment` | `{ name, conditions: segmentSchema }` | dynamicGroup | create rule segment |
+| `fetchTeamSegments` | `{ segmentType?, searchText?, page?, pageSize? }` | `{ segments[], totalCount }` | dedup + match-by-name |
+| `updateStaticSegment` | `{ _id, name }` | staticGroup | **rename only** |
+| `getSegmentMembers` | preview / export / static modes | members | read members |
 
-Use the Redo MCP (`list_segments` / `get_segment`) + redoapp source to see what's exposed. If the RPC doesn't exist, this task's first deliverable is the redoapp PR that adds it — coordinate with Michael / Redo eng. **Do not proceed to the mime side until the RPC contract is known.**
+**The one real gap: there is NO merchant RPC to ADD members to a static
+segment.** `createStaticSegment` makes it empty, `updateStaticSegment`
+only renames, `staticGroupSchema` carries no member array. So the
+decision's "copy the static list WITH members" cannot be done merchant-side
+today — it needs a new redoapp RPC (`addCustomersToStaticSegment` or
+equivalent). That part stays blocked on redoapp.
+
+**This splits the work by consumer:**
+
+- **`list-update` ACTION (Tiny Boat Task 2) — buildable now.** The
+  `manage_static_segment` step populates the segment at flow RUNTIME
+  (`operation: add`), exactly like Klaviyo's list-update did. It only
+  needs the segment to EXIST, not be pre-filled. So: match-by-name via
+  `fetchTeamSegments`, else `createStaticSegment`, emit the step with the
+  resolved `_id`. No member-copy required. ✅
+- **List-membership CONDITION (SHOC Task 1) — still gapped for STATIC
+  lists.** A "is in list X" condition needs the segment pre-populated to
+  evaluate, which requires the missing add-members RPC. **Exception:** if
+  the Klaviyo audience is RULE-BASED, translate it → `createDynamicSegment`
+  (membership is computed, no copy needed). Static-list conditions wait on
+  the add-members RPC.
+
+Architecture note: the parser runs without a Redo connection (pure
+translation), so it emits an intent marker (Klaviyo list id + name); the
+IMPORT path (import-rpc.ts) resolves marker → real `segmentId` before
+`createAdvancedFlow`. Mirrors the existing `__PLACEHOLDER_X__` template
+resolution.
 
 ## Proposed change (once the RPC exists)
 
