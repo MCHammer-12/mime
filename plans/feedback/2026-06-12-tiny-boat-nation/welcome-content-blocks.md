@@ -4,15 +4,14 @@ branch: fix/welcome-content-blocks
 pr: null
 ---
 
-**Blocked 2026-06-12 — needs the Tiny Boat Klaviyo key.** All 4 issues
-(background image, hero buttons, trust bar, footer links) are content-
-parsing bugs that require the real `RpEqCA` Welcome-email source HTML to
-diagnose and fix. The troubleshoot bundle only contains `klaviyo-flow.json`
-+ `parse-result.json` + `notes.md` — **no template HTML** (parse-result has
-placeholders only). Can't reproduce or fix without fetching the template
-from Klaviyo (`/api/debug/resolve-template` or the Klaviyo API), which
-needs Tiny Boat's private key. Unblock: provide the key, then this becomes
-a straightforward investigate-each-block task.
+**Diagnosed 2026-06-12 (key provided).** Fetched the real source (template
+`Vb8bZR` = Welcome #1, via the Klaviyo API) and parsed it through
+`parseKlaviyoHtml`. The 4 issues split very differently than the planner
+assumed — see **## Executor investigation** below. Net: only **#3 (trust-bar
+images)** is a clean mime bug; **#1 (bg image)** needs a Redo-schema decision;
+**#2 (hero buttons)** already works in current code; **#4 (footer links)** is
+a source-data issue (placeholder URLs), not a mime bug. Not a single-PR
+"investigate-each-block" task — kept blocked pending direction on #1 + #3.
 
 
 # Welcome Series — background image, hero buttons, trust bar, footer links broken
@@ -57,6 +56,56 @@ Each is independently shippable — the executor may split into sub-PRs if they 
 - Footer-links issue overlaps Charlie Task 3 (inline-anchor-url-rewrite) — if that's merged, check whether it already fixes the footer links before doing more.
 - Trust-bar overlaps Castle socials-from-icon-src (PR #90) pattern (row of branded icons). Reuse, don't reinvent.
 - Fonts are NOT mentioned for this flow — unlike Rufskin/others, RpEqCA's complaint is purely structural. Keep it scoped to the 4 block issues.
+
+## Executor investigation 2026-06-12 (key provided, parsed Vb8bZR)
+
+Fetched template `Vb8bZR` (Welcome #1) via the Klaviyo API and ran it through
+`parseKlaviyoHtml`. `editor_type` is block-editor (13 kl-row sections parsed
+cleanly; not CODE). Findings per issue:
+
+**#1 Background image — real mime limitation, needs a Redo-schema decision.**
+The hero bg is set with the CSS `background:url(...)` **shorthand** (not
+`background-image:`). `findAncestorBackgroundColor`
+([`style-utils.ts:155`](../../../src/parser/style-utils.ts)) deliberately runs
+the shorthand through `extractCssColor` and **keeps only the color token,
+discarding the `url(...)`** — because Redo's `sectionColor` is a plain color
+String (passing the full shorthand 500'd `createSavedEmailTemplate`, SHOC
+2026-06-08). So section background *images* are universally dropped. Fix needs
+one of: (a) confirm Redo's email-template section schema has a background-image
+field and populate it, or (b) emit the hero as an Image block with the text +
+buttons placed after. **(a)/(b) is a Redo-schema + layout decision — not a
+unilateral parser tweak.**
+
+**#2 Hero buttons — already works.** Current parser emits all 3 hero buttons
+(`button, button, button` after the "WELCOME ABOARD!" text). The troubleshoot
+predates whatever fixed this. No code change; verify on re-import. (If they
+"feel" missing it's because they sit below the dropped bg-image hero rather
+than overlaid on it — that's a consequence of #1, not a button bug.)
+
+**#3 Trust-bar badges — the one real, fixable mime bug.** The source has 5
+non-social content `<img>`s; the parser emits only **2** image blocks (logo +
+one content image), so ~3 badge images are dropped. They sit in a nested
+`<table><tr>…<a><img></a></table>` badge row that the kl-row/column walker
+isn't turning into image blocks. **Fixable in the parser**, but needs care in
+[`column.ts`](../../../src/parser/blocks/column.ts) /
+[`image.ts`](../../../src/parser/blocks/image.ts) row handling + a batch-test
+regression pass (the walker is shared). This is the concrete win if pursued.
+
+**#4 Footer links — source-data, NOT a mime bug.** The footer text block *does*
+preserve its `<a href>` anchors (3 of them survive). But the source hrefs are
+literally `http://www.klaviyo.com` — Klaviyo's default placeholder links the
+merchant never updated. mime migrated them faithfully; it cannot invent the
+real FAQ/contact URLs. Only `{% unsubscribe %}` resolves to a real link because
+Klaviyo fills it server-side. **Optional marginal improvement:** emit a
+review-warning when a footer anchor points at `klaviyo.com` so the operator
+knows to fix it. No faithful auto-fix exists.
+
+**Recommendation:** pursue **#3** as a focused parser PR (with regression
+guard); get a decision on **#1** (Redo section bg-image support vs
+hero-as-Image-block) before coding; close **#2** as already-working on
+re-import; treat **#4** as source-data (optionally add the klaviyo.com-href
+warning). Source HTML cached at `migrations/tiny-boat/templates/` (gitignored)
++ `/tmp/tbn-Vb8bZR.html` for re-runs.
 
 ## Done
 
