@@ -1,7 +1,7 @@
 ---
 status: done
 branch: fix/survey-metric-trigger-filter
-pr: 123
+pr: 124
 ---
 
 # Survey/custom-event metric mis-resolved to order_fulfilled + trigger_filter dropped
@@ -68,7 +68,7 @@ Scope: **the trigger resolution + filter for survey/custom-event metrics.** Don'
 
 ## Done
 
-**Shipped — PR #123 (2026-06-12).**
+**Shipped — PR #124 (2026-06-12).**
 
 **Part 1 (silent wrong-default) was already fixed — verified + locked.** Current
 `resolveMetricTrigger` returns `null` (→ skip → trigger picker) for any metric

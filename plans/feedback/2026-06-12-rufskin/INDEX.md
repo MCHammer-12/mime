@@ -8,7 +8,7 @@ Items: 4 flows (3 feedback + 1 hard failure)
 
 | # | Status | Task | Branch | PR |
 |---|--------|------|--------|----|
-| 1 | done | [Survey/custom-event metric mis-resolved + trigger_filter not migrated](survey-metric-trigger-filter.md) | `fix/survey-metric-trigger-filter` | [#123](https://github.com/MCHammer-12/mime/pull/123) |
+| 1 | done | [Survey/custom-event metric mis-resolved + trigger_filter not migrated](survey-metric-trigger-filter.md) | `fix/survey-metric-trigger-filter` | [#124](https://github.com/MCHammer-12/mime/pull/124) |
 | 2 | unclaimed | [Welcome Series — "SHOP NOW" text link dropped + text formatting distorted](welcome-shop-now-link-formatting.md) | `fix/welcome-shop-now-link-formatting` | — |
 
 ## ~~Needs Michael's decision~~ → RESOLVED (PR #122)
@@ -33,6 +33,6 @@ Items: 4 flows (3 feedback + 1 hard failure)
 
 **Flow IDs + triggers (from parse-results):**
 - H8K2Tu — Welcome Series — `email_signup` (Task 2 + font/formatting)
-- Y7HwZ3 — SURVEY COMPLETED (GV support) — now → null (skip → trigger picker), no longer `order_fulfilled` (Task 1 done #123); trigger_filter `survey_code equals 689d034ddda30` surfaced by name
+- Y7HwZ3 — SURVEY COMPLETED (GV support) — now → null (skip → trigger picker), no longer `order_fulfilled` (Task 1 done #124); trigger_filter `survey_code equals 689d034ddda30` surfaced by name
 - HseqBM — Abandoned Cart — Started Checkout → **Checkout Abandonment** as of #122 (was `cart_abandoned`); fonts + dynamic product collapsed
 - HFqsSH — Happy Birthday Email - Standard — `date`/`marketing_date` — **FAILED** (ad-hoc Task 3)
