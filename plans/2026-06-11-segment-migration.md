@@ -1,7 +1,17 @@
 # Plan: Klaviyo → Redo Segment Migration
 
-**Status:** In Progress
+**Status:** Built (engine + CLI + dashboard tab) — pending live-account validation
 **Created:** 2026-06-11
+
+## Built (2026-06-11, branch `feat/segment-migration`)
+Engine (`src/segments/*`, 45-assertion smoke green), CLI (`import-one`/`batch`),
+and the dashboard **Segments tab** (per-store: list → lazy preview → job-backed
+import with substitution-approval + ±tolerance gate via the shared NeedsInputModal).
+Server: `POST /api/segments/{list,preview}` + segment branch in `handleJobCreate`
+→ `runSegmentImport`. TS typechecks clean; JSX esbuild-parses clean. Not yet run
+against a live Klaviyo account (this checkout lacks `pg`/`archiver` so the server
+won't boot locally) — validate the live `definition` field names + the ±10% count
+checks with a real key + test store.
 
 ## Context
 Klaviyo dynamic segments (audiences) are fully readable via the public REST API
