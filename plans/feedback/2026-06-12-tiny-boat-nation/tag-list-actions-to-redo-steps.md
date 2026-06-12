@@ -1,5 +1,5 @@
 ---
-status: unclaimed
+status: blocked
 branch: fix/tag-list-actions-to-redo-steps
 pr: null
 ---
@@ -57,6 +57,46 @@ Files:
 - **Two halves to the complaint.** "Custom tags" → mappable now (this task). "Custom fields" (profile property writes) → likely still unsupported; keep dropped with a precise warning naming the field. Don't conflate.
 - `manage_static_segment` needing a `segmentId` is the same auto-create-segment question raised in Yes Homo Task 1. If Michael wants segment auto-creation, it's reusable across both. If not, fall back to drop+warn for list-update and only ship the tag mapping now.
 - This unblocks a category that recurs (tag-based flows are common in Klaviyo). Worth doing even though only one merchant flagged it.
+
+## Notes — executor investigation 2026-06-12 (blocked on ID resolution)
+
+Confirmed the Redo step schemas against checked-out redoapp source
+(`advanced-flow/advanced-flow-db-parser.ts`):
+
+- `manage_customer_tags`: `{ operation: "add"|"remove", tagIds: string[].min(1) }`
+- `manage_static_segment`: `{ operation, segmentId: string }`
+
+**Both require Redo internal IDs with no name fallback in the schema.** That
+is the blocker:
+
+1. **W2yEfw has only ONE mappable action — `list-update`** —
+   `{ list_id: "XxFujr", on_execution: true }` (add to Klaviyo list XxFujr).
+   `manage_static_segment` needs a Redo `segmentId`; the Klaviyo `list_id`
+   is not one and can't be resolved without either (a) creating a Redo
+   static segment at import time, or (b) matching the Klaviyo list name to
+   an existing Redo segment. Neither exists today, and (a) is the **same
+   segment-auto-create decision raised in Yes Homo Task 1** — needs
+   Michael's call before coding.
+2. **No tag action to map.** W2yEfw's other actions are `send-internal-alert`
+   (intended drop) and `back-in-stock-delay`. There is NO add-tag/remove-tag
+   action in any Tiny Boat flow, so the `manage_customer_tags` mapping has
+   nothing to build against / verify this batch. Building it speculatively
+   would also hit a name→`tagId` resolution gap (Klaviyo tag names aren't
+   Redo tag IDs) — and per memory `feedback_skipped_action_mappings`, don't
+   speculatively map an unseen action shape.
+
+**Why not ship the documented fallback (drop + precise warning) now:** the
+current behavior already drops `list-update` with a warning naming the
+action type. Tightening it to name the `list_id` is marginal and doesn't
+deliver the task's actual value (representing the action in Redo). Not
+worth a PR on its own.
+
+**Unblock needs a decision from Michael:** do we build segment/tag
+ID-resolution at import time (auto-create a Redo static segment from a
+Klaviyo list / create-or-match tags), or keep dropping list/tag actions
+with a precise warning? This is the same open question as Yes Homo's
+segment route — answering it once unblocks both. Until then, no confident
+mapping exists.
 
 ## Done
 

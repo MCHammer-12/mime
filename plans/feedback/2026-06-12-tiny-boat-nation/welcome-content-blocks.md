@@ -1,8 +1,19 @@
 ---
-status: unclaimed
+status: blocked
 branch: fix/welcome-content-blocks
 pr: null
 ---
+
+**Blocked 2026-06-12 — needs the Tiny Boat Klaviyo key.** All 4 issues
+(background image, hero buttons, trust bar, footer links) are content-
+parsing bugs that require the real `RpEqCA` Welcome-email source HTML to
+diagnose and fix. The troubleshoot bundle only contains `klaviyo-flow.json`
++ `parse-result.json` + `notes.md` — **no template HTML** (parse-result has
+placeholders only). Can't reproduce or fix without fetching the template
+from Klaviyo (`/api/debug/resolve-template` or the Klaviyo API), which
+needs Tiny Boat's private key. Unblock: provide the key, then this becomes
+a straightforward investigate-each-block task.
+
 
 # Welcome Series — background image, hero buttons, trust bar, footer links broken
 
