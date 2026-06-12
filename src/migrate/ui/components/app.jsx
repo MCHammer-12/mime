@@ -1285,6 +1285,17 @@ function MigrationScreen({ store, data, state, updateState, imports, priorImport
   // "no flows match these filters" once enough rows had completed.
   const hideSet = priorImports || { flows: new Set(), tmpls: new Set(), campaigns: new Set() };
 
+  // Credentials for the Segments tab (self-contained: lists/previews/imports
+  // segments via its own job). `store` carries klaviyoKey + redoToken (JWT).
+  const segCreds = {
+    klaviyoKey: store?.klaviyoKey ?? data?.klaviyoKey,
+    redoJwt: store?.redoToken ?? null,
+    redoServerBase: store?.redoServerBase ?? data?.redoServerBase ?? null,
+    storeId: data?.decodedStoreId ?? store?.decodedStoreId ?? store?.id ?? "unknown",
+    storeName: store?.name ?? data?.name ?? "store",
+    merchantSlug: store?.merchantSlug ?? data?.merchantSlug ?? data?.name ?? "store",
+  };
+
   const visibleFlows = useM(() => data.flows.filter(f => {
     if (state.flowStatus !== "all" && f.flowStatus !== state.flowStatus) return false;
     if (state.flowFilter && !f.flowName.toLowerCase().includes(state.flowFilter.toLowerCase())) return false;
@@ -1383,7 +1394,9 @@ function MigrationScreen({ store, data, state, updateState, imports, priorImport
       )}
 
       <div className="flex-1 overflow-hidden">
-        {state.tab === "flows" ? (
+        {state.tab === "segments" ? (
+          <SegmentsTab creds={segCreds} />
+        ) : state.tab === "flows" ? (
           <ListShell
             items={visibleFlows} selectedIds={state.selectedFlowIds}
             onToggle={toggleFlow} onToggleAll={toggleAllFlows}
@@ -1586,6 +1599,7 @@ function Tabs({ tab, onChange, flowCount, tmplCount, campaignCount, flowSelCount
       {mk("flows", "Flows", flowCount, flowSelCount)}
       {mk("campaigns", "Campaigns", campaignCount, campaignSelCount)}
       {mk("templates", "Templates", tmplCount, tmplSelCount)}
+      {mk("segments", "Segments")}
     </div>
   );
 }
