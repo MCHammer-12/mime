@@ -133,17 +133,22 @@ async function main() {
     console.log("✓ no time-delay action → defaults to 24h + warns");
   }
 
-  // ─── Non-browse trigger (Cart Abandonment) — no viewed-product skip ────
+  // ─── Non-browse trigger (Started Checkout → Checkout Abandonment) ──────
+  // Started Checkout maps to CHECKOUT abandonment (reversed PR #43, 2026-06-12).
+  // Asserts: no viewed-product inline-segment skip, and the auto skip field is
+  // isCheckoutAbandoned (not isCartAbandoned).
   {
     const res = await parseFlow(flowWith("Started Checkout", 1), metricsFor("Started Checkout"), {
       teamId: "team-x",
     });
-    if (!res.automation) fail("cart: no automation");
+    if (!res.automation) fail("checkout: no automation");
     const skips = getSkipConditions(res.automation);
-    if (skips.length !== 1) fail(`cart: expected exactly 1 skip (isCartAbandoned), got ${skips.length}`);
+    if (skips.length !== 1) fail(`checkout: expected exactly 1 skip (isCheckoutAbandoned), got ${skips.length}`);
     const seg = skips.find((s) => s.dataSource === "inline-segment");
-    if (seg) fail(`cart: unexpected inline-segment skip on non-browse trigger`);
-    console.log("✓ Cart Abandonment trigger unchanged (no viewed-product skip)");
+    if (seg) fail(`checkout: unexpected inline-segment skip on non-browse trigger`);
+    const field = skips[0]?.schemaBooleanExpression?.field;
+    if (field !== "isCheckoutAbandoned") fail(`checkout: expected skip field isCheckoutAbandoned, got ${field}`);
+    console.log("✓ Started Checkout → Checkout Abandonment (isCheckoutAbandoned skip, no viewed-product skip)");
   }
 }
 
