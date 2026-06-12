@@ -103,6 +103,12 @@ import {
   setCardOrder,
 } from "./imported-items.js";
 import { getReviewerByToken, type ReviewerRecord } from "./reviewers.js";
+import {
+  listSegments,
+  previewSegment,
+  runSegmentImport,
+  type SegmentRunParams,
+} from "./segments-import.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
 const DEFAULT_REDOAPP_DIR = join(homedir(), "code/redoapp");
@@ -1963,6 +1969,14 @@ async function handleRun(req: IncomingMessage, res: ServerResponse) {
 
 async function handleJobCreate(req: IncomingMessage, res: ServerResponse) {
   const body = await readJsonBody(req);
+
+  // Segment-import jobs take a different body (segmentIds + AOV/tolerance) and
+  // a different runner. Branch before parseRunBody (which requires
+  // templateIds/flowIds/campaignIds).
+  if (Array.isArray(body.segmentIds) && body.segmentIds.length > 0) {
+    return handleSegmentJobCreate(body, res);
+  }
+
   const params = parseRunBody(body);
   if ("error" in params) {
     return json(res, 400, { error: params.error });
@@ -1994,6 +2008,78 @@ async function handleJobCreate(req: IncomingMessage, res: ServerResponse) {
         severity: "error",
         text: e?.message ?? String(e),
       });
+      setStatus(job.id, "failed", { error: e?.message ?? String(e) });
+    });
+}
+
+// ─── API: POST /api/segments/list — list Klaviyo segments ─────────────────
+
+async function handleSegmentsList(req: IncomingMessage, res: ServerResponse) {
+  const body = await readJsonBody(req);
+  const key = body.klaviyoKey as string;
+  if (!key) return json(res, 400, { error: "klaviyoKey required" });
+  try {
+    const segments = await listSegments(key);
+    json(res, 200, { segments });
+  } catch (e: any) {
+    json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// ─── API: POST /api/segments/preview — translate one segment (no write) ────
+
+async function handleSegmentsPreview(req: IncomingMessage, res: ServerResponse) {
+  const body = await readJsonBody(req);
+  const key = body.klaviyoKey as string;
+  const segmentId = body.segmentId as string;
+  const aov = body.aov != null ? Number(body.aov) : undefined;
+  if (!key || !segmentId) return json(res, 400, { error: "klaviyoKey and segmentId required" });
+  try {
+    const preview = await previewSegment(key, segmentId, aov);
+    json(res, 200, preview);
+  } catch (e: any) {
+    json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// Segment-import job: validates the segment body, creates a job, runs the
+// segment pipeline in the background (events + needs_input via the job).
+function handleSegmentJobCreate(body: any, res: ServerResponse) {
+  const klaviyoKey = (body.klaviyoKey as string | undefined)?.trim();
+  const redoJwt = (body.redoJwt as string | undefined)?.trim();
+  const segmentIds = (body.segmentIds as string[]).filter((s) => typeof s === "string" && s);
+  if (!klaviyoKey || !redoJwt || segmentIds.length === 0) {
+    return json(res, 400, { error: "klaviyoKey, redoJwt, and segmentIds[] required" });
+  }
+  const storeId = (body.storeId as string | undefined)?.trim() || "unknown";
+  const merchantSlug = (body.merchantSlug as string | undefined)?.trim() || "segments";
+  const storeName = (body.storeName as string | undefined)?.trim() || merchantSlug;
+
+  const params: SegmentRunParams = {
+    klaviyoKey,
+    redoJwt,
+    redoServerBase: (body.redoServerBase as string | undefined)?.trim() || undefined,
+    storeId,
+    storeName,
+    merchantSlug,
+    segmentIds,
+    aov: body.aov != null ? Number(body.aov) : undefined,
+    tolerance: body.tolerance != null ? Number(body.tolerance) : undefined,
+    listToSegment:
+      body.listToSegment && typeof body.listToSegment === "object"
+        ? (body.listToSegment as Record<string, string>)
+        : undefined,
+  };
+
+  const job = createJob({ storeId, storeName, merchantSlug, templateIds: [], flowIds: [] });
+  const ctrl = jobController(job.id);
+  json(res, 202, { jobId: job.id, status: job.status });
+
+  setStatus(job.id, "running");
+  void runSegmentImport(params, ctrl)
+    .then((summary) => setStatus(job.id, "completed", { summary }))
+    .catch((e: any) => {
+      ctrl.emit({ kind: "error", severity: "error", text: e?.message ?? String(e) });
       setStatus(job.id, "failed", { error: e?.message ?? String(e) });
     });
 }
@@ -5463,6 +5549,14 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/api/flows/list") {
       if (!(await requireFullAdmin(req, res))) return;
       return handleFlowsList(req, res);
+    }
+    if (req.method === "POST" && req.url === "/api/segments/list") {
+      if (!(await requireFullAdmin(req, res))) return;
+      return handleSegmentsList(req, res);
+    }
+    if (req.method === "POST" && req.url === "/api/segments/preview") {
+      if (!(await requireFullAdmin(req, res))) return;
+      return handleSegmentsPreview(req, res);
     }
     if (req.method === "POST" && req.url === "/api/flows/walk-batch") {
       if (!(await requireFullAdmin(req, res))) return;
