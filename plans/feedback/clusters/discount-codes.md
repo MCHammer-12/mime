@@ -15,30 +15,33 @@ Scoped 2026-06-12 (Michael: "scope it now"). Recurs on welcome / promo flows
 
 So mime **recognizes** coupons and emits a discount block. The gap is downstream.
 
-## The gap (import side) — the actual work
+## Decisions (Michael, 2026-06-12) + redoapp findings
 
-Per memory `project_discount_codes_open_question`: a migrated discount block references a code that **doesn't exist in Redo**. Klaviyo's `{% coupon_code %}` renders a per-recipient code from a Klaviyo-managed pool; Redo has its own discount/code system. mime can't just copy the Klaviyo code — it needs Redo to **create a discount + generate/attach a code at import time**, then point the block at it. This blocks both email and SMS discount UX (user confirmed 2026-05-06).
+| Question | Answer | Grounding |
+|----------|--------|-----------|
+| What does the block bind to? | **A pre-created Redo discount — reference its `discountId`** (ObjectId). Create the discount, then bind the ID. | `email-builder.ts:141 discountId: string`; `email-template.ts:70,566 discountId: zExt.objectId().optional()` |
+| Static code or per-recipient? | **Redo generates per-recipient.** mime creates the discount *config* only — no code to copy. | Redo "generated discount code" system: MCP `get_generated_discount_code`; `redo/marketing/manage/src/{test,backfill}-generated-discount-code*.ts` |
+| Where do amount + type come from? | **Fetch from the Klaviyo API** (coupon definition), not operator input. | mime does NOT extract coupons today — new work (below) |
 
-Two unknowns to resolve first:
-1. **Does a merchant-facing Redo RPC exist to create a discount + code?** Same shape of question as the segment RPC (Task 4) — check `redo/merchant/**/rpc` for create-discount / generate-code. The Redo MCP has `get_discount_config` + `get_generated_discount_code` (read side) — use them + redoapp source to find the write side. If no merchant create-discount RPC exists, this is a redoapp dependency (like segment add-members).
-2. **What does the discount block need to render?** A discount id? A static code string? A dynamic-code reference? Confirm the Redo discount-block schema + how it binds to a code (via MCP `get_discount_config` on a hand-built discount email, or redoapp `email-builder` discount block).
+Redo discount model is `redo/model/src/discount.ts`: `DiscountValueType` = `PERCENTAGE` \| `AMOUNT` (maps Klaviyo % vs fixed), plus `DiscountType` (ORDER / FREE_SHIPPING / PRODUCT / BUY_X_GET_Y), expiration, min-requirement.
 
-## Inputs required from the merchant (per memory `project_coupon_to_discount`)
+**Executor step 0 — confirm the merchant-facing create-discount RPC.** The grep found the model + service utils (`lookup-discount-reference.ts`, the manage scripts) but not a clean merchant RPC handler. Find it (or confirm it's a redoapp dependency, same pattern as segment Task 4's add-members RPC). Use MCP `get_discount_config` on a hand-built discount email to see the live shape.
 
-A Klaviyo coupon doesn't carry enough to recreate the Redo discount:
-- **Prefix** (default "RE" per memory `project_migration_human_input_ux`)
-- **Amount + type** (% vs fixed) — Klaviyo's coupon definition may not be in the template HTML; needs the Klaviyo coupon/promotion API or operator input.
-- These are human-input touchpoints — surface in the import preflight (the `choice`/`text` prompt infra already exists, used by fonts + triggers).
+## New extraction work — Klaviyo coupon definitions
+
+Amount + type live in Klaviyo's **coupon** objects, not the template HTML. mime's extractors (`src/klaviyo.ts`, `src/extract-*.ts`) don't fetch them today. Add a Klaviyo coupons API pull (`GET /api/coupons` / coupon-codes), keyed by the coupon **name** the template references.
+
+**Gotcha:** `discount.ts buildDiscountBlock` currently **discards** the coupon name (`_couponName`, unused — confirmed in code). It must be **carried on the DiscountBlock** (e.g. a `_pendingCoupon: { name }` marker, like `_pendingProducts` / `_pendingFilter`) so the import path can look up its amount/type via the Klaviyo coupons API and create the Redo discount.
 
 ## Proposed change
 
-1. **Resolve the two unknowns** (RPC existence + block binding shape). If the create-discount RPC is missing → file the redoapp dependency, ship an interim (emit the discount block with a placeholder + a precise "create this discount in Redo" warning, the current behavior).
-2. **If the RPC exists:**
-   - At import (`import-rpc.ts`), for each emitted discount block: create the Redo discount (prefix + amount + type from preflight input), generate/attach a code, bind the block to it.
-   - Dedup per (prefix, amount, type) so one Redo discount serves N templates in a batch (like segment dedup).
-   - Preflight-prompt for prefix/amount/type once per distinct coupon.
-3. **Apply the same binding to SMS** discount placeholders (the SMS path emits `{% coupon_code %}` too).
-4. **Coordinate with the "copy mismatch" flag** (Roden Gray Task 2): the AI rewrite around `{% coupon_code %}` is a prime suspect for altered copy — keep the rewrite scoped to the coupon token, not surrounding sentences. Verify together.
+1. **Carry the coupon name.** `discount.ts` → stop dropping `_couponName`; emit a `_pendingCoupon` marker on the DiscountBlock.
+2. **Extract Klaviyo coupons.** New `src/extract-coupons.ts` (or fold into existing extract) → fetch coupon definitions (value, value-type, expiration) keyed by name.
+3. **Create the Redo discount at import.** In `import-rpc.ts`, for each `_pendingCoupon`: map Klaviyo value/type → `DiscountValueType` + value, call the create-discount RPC (once confirmed), get the `discountId`, set it on the block. Redo handles per-recipient code generation.
+4. **Dedup** per coupon name / (value, type) so one Redo discount serves N templates.
+5. **SMS** discount placeholders bind the same `discountId` path.
+6. **Interim if the create-discount RPC isn't ready:** keep the current placeholder block + a precise warning naming the coupon + amount (now that we fetch it) so the operator finishes it. No silent empty discount.
+7. **Coordinate with the "copy mismatch" flag** (Roden Gray Task 2): the AI rewrite around `{% coupon_code %}` is the prime suspect for altered copy — keep the rewrite scoped to the coupon token, not surrounding sentences. Verify together.
 
 ## Verify
 
