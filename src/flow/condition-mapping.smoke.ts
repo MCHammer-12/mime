@@ -4,8 +4,11 @@
  *
  *   npx tsx src/flow/condition-mapping.smoke.ts
  */
-import { translateConditionalSplitExpression } from "./condition-mapping.js";
-import type { KlaviyoAction, ParseWarning } from "./types.js";
+import {
+  translateConditionalSplitExpression,
+  translateTriggerSplitExpression,
+} from "./condition-mapping.js";
+import { SchemaType, type KlaviyoAction, type ParseWarning } from "./types.js";
 
 function action(conditions: any[]): KlaviyoAction {
   return {
@@ -402,3 +405,116 @@ console.log("✓ phone-country-code smoke tests pass");
 }
 
 console.log("✓ value-measurement smoke tests pass");
+
+// ─── $viewed_items contains → viewed-product collection_name (SD8SuS) ──────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-property",
+        property: "properties['$viewed_items']",
+        filter: { type: "list", value: "ePropulsion", operator: "contains" },
+      },
+    ]),
+    {},
+    warnings,
+  ) as any;
+  const c = out.inlineSegment.conditions[0];
+  if (c?.type !== "customer_activity") fail(`viewed_items: type=${c?.type}`);
+  if (c.activityType !== "viewed-product") fail(`viewed_items: activityType=${c.activityType}`);
+  if (c.count?.type !== "at_least_once") fail(`viewed_items: count=${JSON.stringify(c.count)}`);
+  const w = c.whereConditions?.[0];
+  if (w?.type !== "token_list") fail(`viewed_items: whereCondition.type=${w?.type}`);
+  if (w.dimension !== "collection_name") fail(`viewed_items: dimension=${w.dimension}`);
+  if (w.comparison?.type !== "list" || w.comparison?.operator !== "any") fail(`viewed_items: comparison=${JSON.stringify(w.comparison)}`);
+  if (JSON.stringify(w.comparison.values) !== JSON.stringify(["ePropulsion"])) fail(`viewed_items: values=${JSON.stringify(w.comparison.values)}`);
+  if (!warnings.some((x) => x.kind === "degraded-mapping" && x.message.includes("collection_name"))) fail("viewed_items: expected degraded-mapping warning");
+  console.log("✓ $viewed_items contains X → viewed-product collection_name any [X]");
+}
+
+// ─── $viewed_items not-contains → operator none ────────────────────────────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-property",
+        property: "properties['$viewed_items']",
+        filter: { type: "list", value: "Kayaks", operator: "not-contains" },
+      },
+    ]),
+    {},
+    warnings,
+  ) as any;
+  const w = out.inlineSegment.conditions[0]?.whereConditions?.[0];
+  if (w?.comparison?.operator !== "none") fail(`viewed_items not-contains: operator=${w?.comparison?.operator}`);
+  console.log("✓ $viewed_items not-contains X → collection_name none [X]");
+}
+
+// ─── trigger Items contains → text_match productInCartName (X3KsN3) ─────────
+{
+  const warnings: ParseWarning[] = [];
+  const act = {
+    id: "ts1",
+    type: "trigger-split",
+    data: {
+      trigger_filter: {
+        condition_groups: [{
+          conditions: [{
+            type: "metric-property",
+            field: "Items",
+            filter: { type: "list", value: "Epropulsion", operator: "contains" },
+            metric_id: "Un3Z8i",
+          }],
+        }],
+      },
+    },
+    links: {},
+  } as any;
+  const out = translateTriggerSplitExpression(act, SchemaType.MARKETING_CART_ABANDONMENT, warnings) as any;
+  if (out?.dataSource !== "trigger-data") fail(`trigger Items: dataSource=${out?.dataSource}`);
+  const e = out.schemaBooleanExpression;
+  if (e?.type !== "text_match") fail(`trigger Items: type=${e?.type}`);
+  if (e.field !== "productInCartName") fail(`trigger Items: field=${e.field}`);
+  if (e.operator !== "includes") fail(`trigger Items: operator=${e.operator}`);
+  if (JSON.stringify(e.matchValues) !== JSON.stringify(["Epropulsion"])) fail(`trigger Items: matchValues=${JSON.stringify(e.matchValues)}`);
+  console.log("✓ trigger Items contains X → text_match productInCartName includes [X]");
+}
+
+// ─── phone_number is-set → precise warning, no silent-empty mapping ────────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-property",
+        property: "phone_number",
+        filter: { type: "existence", operator: "is-set" },
+      },
+    ]),
+    {},
+    warnings,
+  ) as any;
+  if (out.inlineSegment.conditions.length !== 0) fail("phone is-set: expected no native condition (Redo has no is-set operator)");
+  const w = warnings.find((x) => x.message.includes("phone_number") && x.message.includes("is-set"));
+  if (!w) fail(`phone is-set: expected precise warning naming property + operator, got ${JSON.stringify(warnings)}`);
+  console.log("✓ phone_number is-set → precise warning (no native is-set operator)");
+}
+
+// ─── non-viewed-items profile-property still hits placeholder (regression) ──
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      { type: "profile-property", property: "favorite_brand", filter: { operator: "equals", value: "Acme" } },
+    ]),
+    {},
+    warnings,
+  ) as any;
+  if (out.inlineSegment.conditions.length !== 0) fail("other profile-property: expected placeholder (no condition)");
+  if (!warnings.some((x) => x.message.includes("manual config required"))) fail("other profile-property: expected placeholder warning");
+  console.log("✓ non-mappable profile-property → manual-config placeholder (unchanged)");
+}
+
+console.log("✓ Tiny Boat branch-condition smoke tests pass");

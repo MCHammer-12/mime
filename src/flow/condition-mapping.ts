@@ -233,7 +233,11 @@ function resolveTriggerField(
 ): string | null {
   const f = klaviyoField.toLowerCase();
   // "Name" = product name on Added to Cart / Viewed Product events.
-  if (f === "name") {
+  // "Items" = the cart's line items; an "added specific product" split keys
+  // on it. Redo's cart-abandonment trigger exposes the cart product name as
+  // `productInCartName` (a string), so both map there — the list-`contains`
+  // filter becomes a text_match `includes` on the product name.
+  if (f === "name" || f === "items") {
     if (
       schemaType === SchemaType.MARKETING_CART_ABANDONMENT ||
       schemaType === SchemaType.MARKETING_COMMENTSOLD_CART_ABANDONMENT
@@ -368,6 +372,45 @@ export function translateTriggerSplitExpression(
     };
   }
 
+  // List filter — Klaviyo "cart Items contains X" (added specific product).
+  // The redoField is a string (productInCartName), so a list-`contains`
+  // collapses to a text_match `includes` on the product name. Collect all
+  // values sharing field + operator (mirrors the string path).
+  if (filterType === "list") {
+    const LIST_OP_TO_TEXT_MATCH: Record<string, string> = {
+      "contains": "includes",
+      "not-contains": "notIncludes",
+    };
+    const op = LIST_OP_TO_TEXT_MATCH[opKey];
+    if (!op) {
+      warnings.push({
+        kind: "requires-review",
+        actionId: action.id,
+        message: `trigger-split list operator "${opKey}" not translatable`,
+      });
+      return null;
+    }
+    const matchValues: string[] = [];
+    for (const c of conditions) {
+      if (
+        c.type === "metric-property" &&
+        c.field === first.field &&
+        c.filter?.operator === opKey
+      ) {
+        matchValues.push(String(c.filter.value));
+      }
+    }
+    return {
+      dataSource: "trigger-data",
+      schemaBooleanExpression: {
+        type: "text_match",
+        field: redoField,
+        operator: op,
+        matchValues,
+      },
+    };
+  }
+
   warnings.push({
     kind: "requires-review",
     actionId: action.id,
@@ -440,6 +483,55 @@ function translatePhoneCountryCodeCondition(
         values,
       },
     },
+  };
+}
+
+// ---------- Klaviyo profile-property: $viewed_items → Redo viewed-product ----------
+//
+// Klaviyo's `properties['$viewed_items']` is a profile list of recently
+// viewed products/collections. A `contains "X"` branch ("recently viewed
+// the X collection") has no profile-attribute equivalent in Redo, but it
+// maps cleanly to a customer-ACTIVITY condition: "viewed a product whose
+// collection_name includes X". Confirmed against redoapp
+// segment-data-structures.ts (ProductViewedSegmentFields.COLLECTION_NAME =
+// "collection_name", dataType TOKEN_LIST) + segment-where-condition.ts
+// (ListCompareOperators any/none, ComparisonType.LIST).
+//
+// SEMANTIC NOTE: Klaviyo's $viewed_items is a profile property snapshot;
+// Redo's viewed-product is event history (all-time here). They align for
+// the common "has viewed X" intent — flagged for review.
+const VIEWED_ITEMS_RE = /\$viewed_items/i;
+
+function translateViewedItemsCondition(
+  c: any,
+  warnings: ParseWarning[],
+  actionId: string,
+): unknown | null {
+  if (!VIEWED_ITEMS_RE.test(String(c.property ?? ""))) return null;
+  const op = c.filter?.operator;
+  const listOp = op === "contains" ? "any" : op === "not-contains" ? "none" : null;
+  if (!listOp) return null;
+  const value = String(c.filter?.value ?? "").trim();
+  if (!value) return null;
+
+  warnings.push({
+    kind: "degraded-mapping",
+    actionId,
+    message: `$viewed_items ${op} "${value}" mapped to Redo activity "viewed a product in collection ${value}" (collection_name ${listOp}). Klaviyo's $viewed_items is a profile snapshot; Redo matches viewed-product event history — verify the branch in the Redo flow builder.`,
+  });
+
+  return {
+    type: "customer_activity",
+    activityType: "viewed-product",
+    count: { type: "at_least_once" },
+    timeframe: { type: "all-time" },
+    whereConditions: [
+      {
+        type: "token_list",
+        dimension: "collection_name",
+        comparison: { type: "list", operator: listOp, values: [value] },
+      },
+    ],
   };
 }
 
@@ -575,10 +667,15 @@ export function translateConditionalSplitExpression(
         break;
       }
       case "profile-property": {
-        // phone-country-code maps cleanly to Redo's country dimension;
-        // anything else falls back to the manual-config placeholder.
-        const phoneCountry = translatePhoneCountryCodeCondition(kc, warnings, action.id);
-        if (phoneCountry) {
+        // Cleanly-mappable profile properties first; anything else falls
+        // back to the manual-config placeholder (still a precise warning).
+        const viewedItems = translateViewedItemsCondition(kc, warnings, action.id);
+        const phoneCountry = viewedItems
+          ? null
+          : translatePhoneCountryCodeCondition(kc, warnings, action.id);
+        if (viewedItems) {
+          redoConditions.push(viewedItems);
+        } else if (phoneCountry) {
           redoConditions.push(phoneCountry);
         } else {
           profilePropertyPlaceholder(kc, warnings, action.id);
