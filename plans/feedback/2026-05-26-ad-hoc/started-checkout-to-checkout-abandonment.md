@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: done
 branch: fix/started-checkout-to-checkout-abandonment
-pr: null
+pr: 122
 ---
 
 # Started Checkout → Checkout Abandonment (reverse the PR #43 cart-abandonment mapping)
@@ -50,4 +50,26 @@ Confirm `MarketingTriggerKey.CHECKOUT_ABANDONED` (`"checkout_abandoned"`) + `Sch
 
 ## Done
 
-(filled by executor on completion)
+**Shipped — PR #122 (2026-06-12).** Flipped the two Started-Checkout aliases in
+`trigger-mapping.ts` to `CHECKOUT_ABANDONED` / `MARKETING_CHECKOUT_ABANDONMENT`;
+`added to cart` left as cart abandonment. Comment rewritten to record the #43
+reversal + reason + date.
+
+Ramifications resolved:
+1. **Skip-condition (ram #3) auto-flips.** `AUTO_SKIP_ABANDONMENT_FIELD`
+   (trigger-mapping.ts:185-189) maps the trigger key → skip field, so flipping
+   the key to `CHECKOUT_ABANDONED` automatically emits an `isCheckoutAbandoned`
+   skip (was `isCartAbandoned`). No separate change needed.
+2. **Checkout-URL `/cart` links (ram #1)** key on Klaviyo checkout-URL variables,
+   not the trigger, so button resolution is unchanged by the flip.
+3. **Dynamic vars (ram #2)** follow schemaType (PR #61). `MARKETING_CHECKOUT_ABANDONMENT`
+   is a valid, already-used schemaType (condition-mapping.ts:252); templates
+   inherit it. Live var-exposure parity is a Redo-side guarantee.
+
+Verify: `browse-trigger-mapping.smoke.ts` updated to assert Started Checkout →
+`isCheckoutAbandoned` skip + no inline-segment skip (real regression guard);
+`trigger-mapping.smoke` 21/21; template `batch-test` 416 flows / 0 failed;
+`sms.smoke` passes. (Pre-existing unrelated `treeify.batch` HKxNAS 6→7 failure is
+on main already — not from this change.) No Started-Checkout flow fixture is in
+the local corpus, so the Rufskin HseqBM / SHOC R3uzmb live re-parse is deferred
+to a real import.
