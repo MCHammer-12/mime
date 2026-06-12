@@ -12,6 +12,7 @@ import {
   type AbTestStep,
   type ConditionStep,
   type DoNothingStep,
+  type ManageStaticSegmentStep,
   type ParseWarning,
   type SendEmailStep,
   type SendSmsStep,
@@ -84,6 +85,9 @@ export function treeifyFlow(
       case StepType.SEND_WEBHOOK:
         if (step.nextId) step.nextId = nextClonedId(step.nextId);
         return;
+      case StepType.MANAGE_STATIC_SEGMENT:
+        if (step.nextId) step.nextId = nextClonedId(step.nextId);
+        return;
       case StepType.CONDITION:
         step.nextTrueId = nextClonedId(step.nextTrueId);
         step.nextFalseId = nextClonedId(step.nextFalseId);
@@ -131,6 +135,8 @@ function cloneStepWithNewId(step: Step, newId: string): Step {
       return { ...(step as SendSmsStep), id: newId };
     case StepType.SEND_WEBHOOK:
       return { ...(step as SendWebhookStep), id: newId };
+    case StepType.MANAGE_STATIC_SEGMENT:
+      return { ...(step as ManageStaticSegmentStep), id: newId };
     case StepType.DO_NOTHING:
       return { ...(step as DoNothingStep), id: newId };
     case StepType.CONDITION:
