@@ -1,7 +1,7 @@
 ---
 status: done
 branch: fix/code-parser-fidelity
-pr: null
+pr: https://github.com/MCHammer-12/mime/pull/91
 ---
 
 **Status note (2026-05-26):** Done. Cross-referenced into [`plans/2026-05-26-code-fidelity.md`](../../2026-05-26-code-fidelity.md). The "Option C" rewording is also slightly stale — the CODE parser was already wired up via `src/export-template.ts:69-71`, not gated off. The actual gaps were:
