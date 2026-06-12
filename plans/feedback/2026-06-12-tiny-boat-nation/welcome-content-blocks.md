@@ -1,18 +1,17 @@
 ---
-status: blocked
-branch: fix/welcome-content-blocks
-pr: null
+status: partial
+branch: fix/tbn-trust-bar-images
+pr: 126
 ---
 
-**Blocked 2026-06-12 — needs the Tiny Boat Klaviyo key.** All 4 issues
-(background image, hero buttons, trust bar, footer links) are content-
-parsing bugs that require the real `RpEqCA` Welcome-email source HTML to
-diagnose and fix. The troubleshoot bundle only contains `klaviyo-flow.json`
-+ `parse-result.json` + `notes.md` — **no template HTML** (parse-result has
-placeholders only). Can't reproduce or fix without fetching the template
-from Klaviyo (`/api/debug/resolve-template` or the Klaviyo API), which
-needs Tiny Boat's private key. Unblock: provide the key, then this becomes
-a straightforward investigate-each-block task.
+**Diagnosed + #3 fixed 2026-06-12 (key provided).** Fetched the real source
+(template `Vb8bZR` = Welcome #1, via the Klaviyo API) and parsed it. The 4
+reviewer issues split very differently than the planner assumed — see
+**## Executor investigation**. **#3 (trust-bar images) is FIXED in this PR
+(#126).** The rest are NOT a parser fix: **#1 (bg image)** needs a Redo-schema
+decision; **#2 (hero buttons)** already works in current code; **#4 (footer
+links)** is a source-data issue (placeholder URLs). Status stays `partial`
+pending direction on #1.
 
 
 # Welcome Series — background image, hero buttons, trust bar, footer links broken
@@ -58,6 +57,52 @@ Each is independently shippable — the executor may split into sub-PRs if they 
 - Trust-bar overlaps Castle socials-from-icon-src (PR #90) pattern (row of branded icons). Reuse, don't reinvent.
 - Fonts are NOT mentioned for this flow — unlike Rufskin/others, RpEqCA's complaint is purely structural. Keep it scoped to the 4 block issues.
 
+## Executor investigation 2026-06-12 (key provided, parsed Vb8bZR)
+
+Fetched template `Vb8bZR` (Welcome #1) via the Klaviyo API and ran it through
+`parseKlaviyoHtml`. `editor_type` is block-editor (13 kl-row sections parsed
+cleanly; not CODE). Findings per issue:
+
+**#3 Trust-bar badges — FIXED (PR #126).** Root cause: the badges live in a
+Klaviyo "Table" block (`kl-table` → `kl-table-subblock` cells, each a small
+`kl-img`). `parseColumnContent` had no general `kl-table` handler (only
+product-card kl-tables are caught, earlier), so the table fell through to the
+"Unknown block" fallback and all 3 badges were dropped (image blocks: only 2 of
+5 content imgs emitted). Fix: new `parseTableImageRow` (column.ts) emits the
+image cells as a ColumnBlock (one badge per column), reusing `parseSplitSubblock`
+per cell. Vb8bZR now emits 5 image blocks (3 badges recovered as a 3-col row),
+0 Unknown-block warnings. Locked by `trust-bar.smoke.ts`; batch 416/0-failed
+(Clean 69→70). Strictly additive — only affects previously-dropped kl-tables.
+
+**#1 Background image — real limitation, needs a Redo-schema decision (NOT
+fixed here).** The hero bg is the CSS `background:url(...)` **shorthand** (not
+`background-image:`). `findAncestorBackgroundColor`
+([`style-utils.ts:155`](../../../src/parser/style-utils.ts)) deliberately runs
+the shorthand through `extractCssColor` and **keeps only the color token,
+discarding the `url(...)`** — Redo's `sectionColor` is a plain color String
+(passing the full shorthand 500'd `createSavedEmailTemplate`, SHOC 2026-06-08).
+Section background *images* are therefore universally dropped. Needs: (a) confirm
+Redo's section schema has a background-image field and populate it, or (b) emit
+the hero as an Image block with text/buttons after. **Decision needed before
+coding.**
+
+**#2 Hero buttons — already works (NOT a bug).** Current parser emits all 3 hero
+buttons. The troubleshoot predates the fix. (If they "feel" missing it's because
+they sit below the dropped bg-image hero rather than overlaid — a consequence of
+#1.) Verify on re-import.
+
+**#4 Footer links — source-data, NOT a mime bug.** The footer text block
+preserves its `<a href>` anchors, but the source hrefs are literally
+`http://www.klaviyo.com` — Klaviyo's default placeholders the merchant never
+updated. mime migrated them faithfully; it can't invent the real FAQ/contact
+URLs. Only `{% unsubscribe %}` resolves (Klaviyo fills it server-side). Optional
+marginal follow-up: warn when a footer anchor points at `klaviyo.com`.
+
+Source HTML cached at `migrations/tiny-boat/templates/` (gitignored) +
+`/tmp/tbn-Vb8bZR.html` for re-runs.
+
 ## Done
 
-(filled by executor on completion)
+**#3 trust-bar shipped — PR #126 (2026-06-12).** See investigation above. #1
+awaits a Redo-schema decision; #2 already works; #4 is source-data. Task stays
+`partial` until #1 is decided.
