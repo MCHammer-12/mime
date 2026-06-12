@@ -313,15 +313,23 @@ export function substituteStringVars(
       note(`{{ shop.name|shop_name }} → ${ctx.orgName}`);
     }
   }
-  // Customer profile shortcuts: {{ first_name }} / {{ person.X }} → Redo equivalents.
-  for (const [klaviyoVar, redoVar] of Object.entries(TEXT_VAR_MAP)) {
-    const escaped = klaviyoVar.replace(/\./g, "\\.");
-    const re = new RegExp(`\\{\\{\\s*${escaped}\\s*\\}\\}`, "g");
-    if (re.test(result)) {
-      result = result.replace(re, `{{ ${redoVar} }}`);
-      note(`{{ ${klaviyoVar} }} → {{ ${redoVar} }}`);
-    }
-  }
+  // Customer profile shortcuts: {{ first_name }} / {{ person.X }} → Redo
+  // equivalents. Preserve any Liquid filter (`{{ first_name|default:'' }}`)
+  // so Redo's runtime can apply it at send time — mirrors mapProfileVars'
+  // regex below. Without the filter group, subject lines like Klaviyo's
+  // Post Purchase Email 1 ("Thank you {{ first_name|default:'' }} :)")
+  // ship to Redo with the literal Klaviyo variable intact, and the
+  // merchant sees the raw token in their email preview.
+  result = result.replace(
+    /\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*(\|[^}]*)?\}\}/g,
+    (full, varPath: string, filters = "") => {
+      const mapped = TEXT_VAR_MAP[varPath];
+      if (!mapped) return full;
+      note(`{{ ${varPath} }} → {{ ${mapped} }}`);
+      const f = filters || "";
+      return `{{ ${mapped}${f ? " " + f : ""} }}`;
+    },
+  );
   return result;
 }
 

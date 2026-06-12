@@ -13,6 +13,7 @@ import {
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
+import { classifyKlaviyoUrl } from "../url-mapping.js";
 import { normalizeFontFamilyName, substituteSystemFontsInHtml, weightedFamilyName } from "../../fonts.js";
 import type * as cheerio from "cheerio";
 
@@ -62,6 +63,35 @@ function wrapText(html: string): string {
 /** Strip empty <table> elements that are template noise. */
 function stripEmptyTables(html: string): string {
   return html.replace(/<table[^>]*>\s*<\/table>/gi, "").trim();
+}
+
+/**
+ * Rewrite Klaviyo template variables in inline `<a href>` values inside the
+ * text HTML to their Redo equivalents. Button + image blocks already do this
+ * via their own `classifyKlaviyoUrl` calls (see `button.ts` / `image.ts`);
+ * text blocks were the only carrier of `<a href>` that wasn't running URLs
+ * through the mapper, leaving Charlie 1 Horse's inline
+ * "complete your purchase" link pointing at `{{ event.extra.checkout_url }}`
+ * which renders nowhere in Redo.
+ *
+ * Only touches hrefs that contain Klaviyo Jinja-like syntax (`{{` or `{%`).
+ * Static URLs pass through untouched.
+ */
+function rewriteAnchorHrefs(html: string, ctx: ParseContext): string {
+  return html.replace(
+    /(<a\b[^>]*?\bhref\s*=\s*)(["'])([^"']*)(\2)/gi,
+    (full, prefix, quote, href, _q2) => {
+      if (!href.includes("{{") && !href.includes("{%")) return full;
+      const mapped = classifyKlaviyoUrl(href, EmailBlockType.TEXT, ctx);
+      // classifyKlaviyoUrl handles unsupported/review push to ctx already;
+      // we just inject the (possibly-unchanged) mapped link back.
+      const safe = mapped.buttonLink
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;");
+      return `${prefix}${quote}${safe}${quote}`;
+    },
+  );
 }
 
 /**
@@ -144,6 +174,39 @@ function parseFontList(raw: string): string[] {
     .split(",")
     .map((f) => f.trim().replace(/^['"]|['"]$/g, ""))
     .filter(Boolean);
+}
+
+/**
+ * If every inline `font-size:` declaration in the text HTML (on `<span>` /
+ * `<p>` / `<hN>` tags) agrees on the same value, return that value.
+ *
+ * Klaviyo commonly emits a block-level `<div>` wrapper with a "reset" size
+ * (14px or 18px) and lets inner spans declare the real intended size
+ * (e.g. Charlie 1 Horse's first text wraps `font-size:32px` in a span
+ * inside a 14px outer div, where 32px is the merchant's intent). Hoisting
+ * the unanimous inline size to the block level makes Redo's UI dropdown
+ * reflect what the merchant authored.
+ *
+ * The unanimity requirement is the safety net: a text block that mixes
+ * sizes (e.g. a heading span + a body span at different sizes) has no
+ * single "intent" to hoist — promoting the most-common size would silently
+ * grow or shrink whichever spans disagree. In that case return null and
+ * let the caller fall back to the outer div's size.
+ */
+const INLINE_FONT_SIZE_RE =
+  /<(?:span|p|h[1-6])\b[^>]*style\s*=\s*"[^"]*\bfont-size:\s*(\d+(?:\.\d+)?)px[^"]*"/gi;
+
+export function extractDominantInlineFontSize(html: string): number | null {
+  const sizes = new Set<number>();
+  INLINE_FONT_SIZE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = INLINE_FONT_SIZE_RE.exec(html)) !== null) {
+    const px = Math.round(parseFloat(m[1]!));
+    if (!px) continue;
+    sizes.add(px);
+  }
+  if (sizes.size !== 1) return null;
+  return [...sizes][0]!;
 }
 
 /**
@@ -344,7 +407,7 @@ export function stripStandaloneCoupons(html: string): string {
 export function parseTextBlock(
   $: $,
   $td: cheerio.Cheerio<El>,
-  _ctx: ParseContext,
+  ctx: ParseContext,
 ): TextBlock | null {
   const $div = $td.children("div").first();
   if ($div.length === 0) return null;
@@ -377,6 +440,12 @@ export function parseTextBlock(
 
   textHtml = stripEmptyTables(textHtml);
   textHtml = stripStandaloneCoupons(textHtml);
+  // Rewrite Klaviyo variable hrefs (`{{ event.extra.checkout_url }}` etc.)
+  // BEFORE suppressUrlAutolink — the autolink suppressor splits on <a>
+  // tags, and rewriting first means downstream passes see the final URL.
+  // BEFORE the AI/coupon rewrites (when those land) for the same reason:
+  // the AI pass should see the Redo URL, not the Klaviyo variable.
+  textHtml = rewriteAnchorHrefs(textHtml, ctx);
   textHtml = suppressUrlAutolink(textHtml);
   textHtml = substituteSystemFontsInHtml(textHtml);
   textHtml = rewriteWeightedCustomFontSpans(textHtml);
@@ -470,6 +539,14 @@ export function parseTextBlock(
   const inlineCustomFont = extractDominantCustomFont(textHtml);
   const fontFamily = inlineCustomFont ?? divFontFamily;
 
+  // Same idea for font-size: Klaviyo's outer block-level div is often a
+  // "reset" (14px) wrapper, with inner `<span style="font-size: 32px">`
+  // declaring the intended visual size. Reading only the outer drops the
+  // headline to body size in Redo's renderer.
+  const inlineFontSize = extractDominantInlineFontSize(textHtml);
+  const divFontSize = parseFontSize(divStyle["font-size"]);
+  const fontSize = inlineFontSize ?? divFontSize;
+
   const sectionColor =
     tdStyle["background-color"] ||
     tdStyle["background"] ||
@@ -503,7 +580,7 @@ export function parseTextBlock(
     sectionColor,
     text: textHtml,
     textColor,
-    fontSize: parseFontSize(divStyle["font-size"]),
+    fontSize,
     fontFamily,
     linkColor,
     ...(textAlign ? { textAlign } : {}),

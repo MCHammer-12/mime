@@ -1,5 +1,5 @@
 ---
-status: unclaimed
+status: blocked
 branch: fix/ac-product-block-dynamic-cart
 pr: null
 ---
@@ -54,6 +54,55 @@ Wait until **Task 1 (universal duplication)** lands before merging — visual ve
 
 - Don't conflate this with the static-product → AI Shopify-name resolver (`_pendingProducts`) — that's for static product lists in non-AC contexts. This task is about dynamic cart-items, which is a different Redo block type.
 - Browse Abandonment uses the same general kl-product detection but with a different filter (Viewed Product) and a different dynamic-variable shape — see Task 7 for the BA-specific work.
+
+## Notes — executor investigation 2026-05-26
+
+**Task premise doesn't match the parse output.** Re-investigated against
+the current parser (with PRs #75, #76, #77 merged) and the raw source HTML
+for WgXbn6 + U3cE5u (pulled live from Klaviyo).
+
+**Findings:**
+
+1. Neither Case A nor Case B applies. WgXbn6 + U3cE5u contain **no
+   `kl-product` blocks at all**. Their abandoned-cart product display uses
+   Klaviyo's "universal content block" pattern instead: a `<table>`
+   wrapping `{% for item in event.extra.line_items %}` Liquid loop.
+2. The parser **already handles this** via
+   [`parseLineItemsUcbBlock`](../../../src/parser/blocks/product.ts) (called
+   from the dispatcher in [`index.ts`](../../../src/parser/index.ts)). It
+   correctly emits an `interactive-cart` block with:
+   - `productSelectionType: "dynamic"`
+   - `schemaFieldName: "cartContext"`
+   - `_pendingFilter.name: "Cart Item"` (`productRecommendationType: "products_added_to_cart"`)
+3. Confirmed identical, correct output for both WgXbn6 and U3cE5u. The
+   warning `"Cart items UCB (event.extra.line_items loop) → Products
+   block with Cart Item filter."` is fired exactly once per template.
+
+**What might be the actual issue (Redo-side, not mime):**
+
+- The bundle was captured 2026-05-21, BEFORE PRs #75 / #76 / #77. The
+  pre-#75 parse output had the interactive-cart block duplicated
+  alongside other blocks; possibly the second copy / mobile variant was
+  the one the merchant saw as "static".
+- Redo's editor may be rendering the interactive-cart with an empty
+  placeholder when no cart fixture is loaded — the merchant could be
+  interpreting an empty preview as "an image is showing".
+- The importer side (`redo/manage/src/import-klaviyo-templates.ts`) may
+  not be honoring `_pendingFilter` on the `interactive-cart` block —
+  worth checking that the imported block actually carries the Cart Item
+  filter when it lands in Redo's editor.
+
+**Recommended next step:**
+
+Re-import Charlie 1 Horse's AC emails NOW (post-#75/#76/#77 merge),
+capture a fresh troubleshoot bundle, and check whether the merchant
+still reports "static image". If yes → it's a Redo importer/editor
+issue, not a mime parser issue. If no → the original complaint was the
+duplication artifact and Task 1 already resolved it.
+
+Marking `blocked` because the parser fix the planner described isn't
+needed; the right move depends on what the post-merge re-import looks
+like.
 
 ## Done
 

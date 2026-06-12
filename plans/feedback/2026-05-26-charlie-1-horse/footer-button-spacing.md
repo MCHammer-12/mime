@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: done
 branch: fix/footer-button-spacing
-pr: null
+pr: https://github.com/MCHammer-12/mime/pull/80
 ---
 
 # Footer buttons joined together without spacing
@@ -49,4 +49,30 @@ Wait for **Task 1 (duplication)** to land — easier to see footer spacing when 
 
 ## Done
 
-(filled by executor on completion)
+- PR: https://github.com/MCHammer-12/mime/pull/80
+- Confirmed Pattern A from the planner notes — Charlie 1 Horse's footer
+  buttons live in a column block (`kl-column`s with `width:33.3334%`,
+  `gap:0`). The `<a>` tags have asymmetric padding (`padding:15px 0 15px
+  30px` on the first, `0 0 0 0` in the middle, `0 30px 0 0` on the last)
+  so each `<a>` background fills its full 33.33% column width. With every
+  button using the same `#FDFDFD` background color, the rendered email
+  looks like a single joined bar across the footer.
+- Fix shape:
+  - In [`parseColumnRow`](../../../src/parser/blocks/column.ts), detect
+    rows where **every column slot in every zipper row is a Button** and
+    set the emitted `ColumnBlock.gap` to `8` instead of `0`. Mixed-content
+    rows (image+text product cards, etc.) still emit `gap: 0`.
+- Verification:
+  - Charlie WgXbn6 / U3cE5u / VRDxJu — both the 2-col STORIES/SIZE CHART
+    row AND the 3-col CONTACT US / SHIPPING & RETURNS / STORE LOCATOR row
+    now emit `gap: 8`.
+  - Counted all-button column blocks in the historical corpus:
+    **0 of 370** column blocks across `test-account` + `merchant-2` are
+    all-button. The new branch never fires on the existing corpus.
+  - batch-test on 416-template corpus: 0 failures, identical clean/warned
+    counts (75 / 341).
+- **Not in scope (deferred):**
+  - The merchant's "no padding on 2nd text" complaint on SxWYeY (folded
+    into Task 1's discovery in the cross-cutting notes) — verify
+    separately in Redo's editor post-merge; may resolve with Task 1's
+    de-dup or may need its own padding fix.

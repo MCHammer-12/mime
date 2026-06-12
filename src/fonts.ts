@@ -410,6 +410,161 @@ export function resolveFallbackFont(family: string): AllowedFallback {
   return "Arial";
 }
 
+// ─── Brand-kit font reconciliation (preflight name-mismatch) ─────
+//
+// When a Klaviyo template references "Futura" but the operator added the
+// font to Redo's brand kit under the file's internal name ("Futura PT",
+// "FuturaStd-Medium", "Century Gothic"), an exact-name check never
+// recognizes it: the preflight keeps insisting the font is missing AND
+// the imported template still references "Futura" → generic fallback at
+// render. These helpers reconcile the names.
+
+// Tokens dropped during fuzzy matching — weight names (so "Poppins
+// SemiBold" ≈ "Poppins") and foundry/format tags font files carry but
+// humans drop ("Futura PT", "FuturaStd-Medium" ≈ "Futura"). Lowercased.
+const FONT_MATCH_NOISE_TOKENS = new Set([
+  // weights
+  "thin", "extralight", "ultralight", "light", "regular", "normal", "book",
+  "medium", "semibold", "demibold", "bold", "extrabold", "ultrabold",
+  "black", "heavy",
+  // CamelCase-split weight fragments ("SemiBold" → "Semi" "Bold",
+  // "ExtraLight" → "Extra" "Light") — these prefixes never stand alone as
+  // a real font-name word, so dropping them is safe for matching.
+  "semi", "demi", "extra", "ultra",
+  // italics / widths (rare on Klaviyo names but harmless to ignore)
+  "italic", "oblique", "condensed", "narrow", "expanded",
+  // foundry / format tags
+  "pt", "std", "mt", "lt", "itc", "bt", "fb", "ce", "pro",
+]);
+
+/**
+ * Aggressively normalize a font family name for fuzzy matching: strip
+ * quotes, split CamelCase + hyphens/underscores into tokens, drop weight
+ * and foundry tokens, join the rest, lowercase, drop punctuation. Used
+ * ONLY for comparison — never as a display/registration name.
+ *
+ *   "Futura"           → "futura"
+ *   "Futura PT"        → "futura"
+ *   "FuturaStd-Medium" → "futura"   (hyphen split → Std + Medium dropped)
+ *   "Poppins SemiBold" → "poppins"
+ *   "Century Gothic"   → "centurygothic"
+ */
+export function normalizeForFontMatch(family: string): string {
+  const cleaned = family.trim().replace(/^['"]|['"]$/g, "");
+  // Hyphens/underscores → spaces, then split CamelCase boundaries.
+  const spaced = cleaned
+    .replace(/[-_]+/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
+  const kept = spaced
+    .split(/\s+/)
+    .map((t) => t.replace(/[^a-z0-9]/gi, "").toLowerCase())
+    .filter((t) => t && !FONT_MATCH_NOISE_TOKENS.has(t));
+  const joined = kept.join("");
+  // If we dropped EVERYTHING (e.g. a font literally named "Bold"), fall
+  // back to the punctuation-stripped original so we don't match anything-
+  // to-everything on an empty string.
+  return joined || cleaned.replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+export type FontMatchResult =
+  | { kind: "match"; family: string }
+  | { kind: "ambiguous"; candidates: string[] }
+  | { kind: "none" };
+
+/**
+ * Try to match a Klaviyo font family against the team's brand-kit font
+ * families. Conservative: returns a confident single match, or "ambiguous"
+ * with the candidates (caller should prompt), or "none".
+ *
+ * Order:
+ *   1. exact (case-insensitive) — the brand-kit name IS the Klaviyo name
+ *   2. normalized equality — "Futura" ≈ "Futura PT" ≈ "FuturaStd-Medium"
+ *   3. normalized prefix/containment either direction
+ * A wrong silent auto-map is worse than a prompt, so ≥2 candidates at any
+ * tier returns "ambiguous" rather than guessing.
+ */
+export function matchFontToBrandKit(
+  klaviyoFamily: string,
+  brandKitFamilies: string[],
+): FontMatchResult {
+  const kRaw = klaviyoFamily.trim();
+  if (!kRaw || brandKitFamilies.length === 0) return { kind: "none" };
+
+  // Tier 1: exact, case-insensitive.
+  const kLower = kRaw.toLowerCase();
+  const exact = brandKitFamilies.filter((b) => b.trim().toLowerCase() === kLower);
+  if (exact.length === 1) return { kind: "match", family: exact[0]! };
+  if (exact.length > 1) return { kind: "ambiguous", candidates: exact };
+
+  // Tier 2: normalized equality.
+  const kNorm = normalizeForFontMatch(kRaw);
+  if (!kNorm) return { kind: "none" };
+  const normEq = brandKitFamilies.filter((b) => normalizeForFontMatch(b) === kNorm);
+  if (normEq.length === 1) return { kind: "match", family: normEq[0]! };
+  if (normEq.length > 1) return { kind: "ambiguous", candidates: normEq };
+
+  // Tier 3: normalized prefix/containment either direction. Guarded so a
+  // short generic residual left after noise-stripping can't false-positive
+  // (e.g. "PT Sans" → "sans" must NOT containment-match "Sans Forgetica").
+  // Require the shorter side to be ≥4 chars AND ≥half the longer — a real
+  // family-name overlap ("Century Gothic" ⊃ "Century Gothic Charlie"), not
+  // a shared generic stem.
+  const contains = brandKitFamilies.filter((b) => {
+    const bNorm = normalizeForFontMatch(b);
+    if (!bNorm) return false;
+    if (!(bNorm.startsWith(kNorm) || kNorm.startsWith(bNorm))) return false;
+    const shorter = Math.min(bNorm.length, kNorm.length);
+    const longer = Math.max(bNorm.length, kNorm.length);
+    return shorter >= 4 && shorter >= longer * 0.5;
+  });
+  if (contains.length === 1) return { kind: "match", family: contains[0]! };
+  if (contains.length > 1) return { kind: "ambiguous", candidates: contains };
+
+  return { kind: "none" };
+}
+
+/**
+ * Rewrite block-level `fontFamily` references in an exported template JSON
+ * from Klaviyo font names to the operator-chosen brand-kit names. Walks the
+ * whole object so it catches every block type that carries a `fontFamily`
+ * (text, menu, button, products + nested checkoutButton/lineItemButtons,
+ * and column-nested blocks). Matching is case-insensitive on the raw name.
+ *
+ * `mapping` keys are lowercased Klaviyo family names → brand-kit family name.
+ * Returns the number of fields rewritten (for logging). Mutates in place.
+ */
+export function rewriteTemplateFontFamilies(
+  templateJson: unknown,
+  mapping: Map<string, string>,
+): number {
+  if (mapping.size === 0) return 0;
+  let rewritten = 0;
+  const seen = new WeakSet<object>();
+  const walk = (o: any): void => {
+    if (!o || typeof o !== "object") return;
+    if (seen.has(o)) return; // circular-ref guard (template JSON never has them, but cheap insurance)
+    seen.add(o);
+    if (Array.isArray(o)) {
+      for (const x of o) walk(x);
+      return;
+    }
+    if (typeof o.fontFamily === "string") {
+      const target = mapping.get(o.fontFamily.trim().toLowerCase());
+      if (target && target !== o.fontFamily) {
+        o.fontFamily = target;
+        rewritten++;
+      }
+    }
+    for (const k of Object.keys(o)) {
+      if (k === "fontFamily") continue;
+      walk(o[k]);
+    }
+  };
+  walk(templateJson);
+  return rewritten;
+}
+
 export interface FontFileSpec {
   weight: number;
   italic: boolean;

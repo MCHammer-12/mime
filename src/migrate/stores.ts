@@ -25,6 +25,7 @@ export interface StoreRecord {
   storeId: string;
   redoServerBase: string | null;
   createdBy: string | null;
+  createdByReviewer: string | null;
   createdAt: string;
   updatedAt: string;
   lastImportedAt: string | null;
@@ -45,6 +46,7 @@ export interface StoreSummary {
   redoJwtMasked: string | null;
   redoServerBase: string | null;
   createdBy: string | null;
+  createdByReviewer: string | null;
   createdAt: string;
   updatedAt: string;
   lastImportedAt: string | null;
@@ -60,6 +62,7 @@ function rowToRecord(row: any): StoreRecord {
     storeId: row.store_id,
     redoServerBase: row.redo_server_base ?? null,
     createdBy: row.created_by ?? null,
+    createdByReviewer: row.created_by_reviewer ?? null,
     createdAt: row.created_at?.toISOString?.() ?? String(row.created_at),
     updatedAt: row.updated_at?.toISOString?.() ?? String(row.updated_at),
     lastImportedAt:
@@ -107,6 +110,7 @@ export function toSummary(rec: StoreRecord): StoreSummary {
     redoJwtMasked: rec.redoJwt ? maskKey(rec.redoJwt) : null,
     redoServerBase: rec.redoServerBase,
     createdBy: rec.createdBy,
+    createdByReviewer: rec.createdByReviewer,
     createdAt: rec.createdAt,
     updatedAt: rec.updatedAt,
     lastImportedAt: rec.lastImportedAt,
@@ -149,6 +153,7 @@ export interface CreateStoreInput {
   storeId: string;
   redoServerBase?: string | null;
   createdBy?: string | null;
+  createdByReviewer?: string | null;
 }
 
 export async function createStore(
@@ -158,8 +163,8 @@ export async function createStore(
   const id = input.id ?? `str_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const r = await getPool().query(
     `INSERT INTO stores
-       (id, name, merchant_slug, klaviyo_key, redo_jwt, store_id, redo_server_base, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (id, name, merchant_slug, klaviyo_key, redo_jwt, store_id, redo_server_base, created_by, created_by_reviewer)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
     [
       id,
@@ -170,6 +175,7 @@ export async function createStore(
       input.storeId,
       input.redoServerBase ?? null,
       input.createdBy ?? null,
+      input.createdByReviewer ?? null,
     ],
   );
   return rowToRecord(r.rows[0]);
@@ -221,5 +227,56 @@ export async function updateStore(
 export async function deleteStore(id: string): Promise<boolean> {
   if (!isDbEnabled()) return false;
   const r = await getPool().query(`DELETE FROM stores WHERE id = $1`, [id]);
+  return (r.rowCount ?? 0) > 0;
+}
+
+// ─── Reviewer-scoped queries ───────────────────────────────────────────────
+//
+// Used by the public_review surface. A reviewer can only see stores they
+// created themselves (created_by_reviewer = their id). Admins on the
+// internal surface use the unscoped functions above.
+
+export async function listStoresForReviewer(
+  reviewerId: string,
+): Promise<StoreRecord[]> {
+  if (!isDbEnabled()) return [];
+  const r = await getPool().query(
+    `SELECT * FROM stores
+      WHERE created_by_reviewer = $1
+      ORDER BY name ASC`,
+    [reviewerId],
+  );
+  return r.rows.map(rowToRecord);
+}
+
+/** Ownership-checked fetch. Returns the store ONLY when the reviewer
+ *  created it; returns null otherwise (404 from the caller's POV).
+ *  Single source of truth so every /api/r/* endpoint that takes a
+ *  storeId param can `if (!await getStoreForReviewer(id, reviewer.id)) 404`. */
+export async function getStoreForReviewer(
+  storeId: string,
+  reviewerId: string,
+): Promise<StoreRecord | null> {
+  if (!isDbEnabled()) return null;
+  const r = await getPool().query(
+    `SELECT * FROM stores
+      WHERE id = $1 AND created_by_reviewer = $2`,
+    [storeId, reviewerId],
+  );
+  if (r.rowCount === 0) return null;
+  return rowToRecord(r.rows[0]);
+}
+
+/** Scoped delete — only removes if the store belongs to this reviewer. */
+export async function deleteStoreForReviewer(
+  storeId: string,
+  reviewerId: string,
+): Promise<boolean> {
+  if (!isDbEnabled()) return false;
+  const r = await getPool().query(
+    `DELETE FROM stores
+      WHERE id = $1 AND created_by_reviewer = $2`,
+    [storeId, reviewerId],
+  );
   return (r.rowCount ?? 0) > 0;
 }

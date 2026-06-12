@@ -115,7 +115,7 @@ function resolveServerBase(serverBase: string | undefined | null): string {
  *  for non-JWTs (e.g. `redo_pat_…` personal access tokens) or malformed
  *  tokens. Matches the priority order used by the credentials editor:
  *  `aud` ?? `teamId` ?? `team_id` ?? `sub` (see ui/mock-stores.js). */
-function decodeJwtAud(jwt: string | null | undefined): string | null {
+export function decodeJwtAud(jwt: string | null | undefined): string | null {
   if (!jwt) return null;
   const t = jwt.trim();
   if (t.startsWith("redo_pat_")) return null;
@@ -323,6 +323,28 @@ export async function filterFontsNotInBrandKit(
 }
 
 /**
+ * Return the team's brand-kit custom font family NAMES (e.g.
+ * ["Futura PT", "Poppins SemiBold"]). Used by the preflight to fuzzy-match
+ * a still-missing Klaviyo font against fonts the operator just added under
+ * a different name. Empty array on any fetch issue (caller degrades to
+ * "no auto-match, prompt for all").
+ */
+export async function getBrandKitFontFamilies(
+  options: ImportOptions,
+): Promise<string[]> {
+  const teamResponse = await getTeam(options);
+  const teamDoc: any = teamResponse?.team ?? teamResponse ?? {};
+  const families: any[] = Array.isArray(
+    teamDoc?.settings?.brandKit?.customFontFamilies,
+  )
+    ? teamDoc.settings.brandKit.customFontFamilies
+    : [];
+  return families
+    .map((f: any) => String(f.fontFamily ?? "").trim())
+    .filter((s: string) => s.length > 0);
+}
+
+/**
  * Upload all resolved fonts referenced by the batch's templates to the target
  * merchant's brand kit. Idempotent by family name — we fetch the current
  * brand kit and merge (skipping families that already exist).
@@ -512,7 +534,10 @@ async function uploadAttachment(
       body?.error ??
       body?.message ??
       (text && text.length > 0 ? text.slice(0, 2000) : res.statusText);
-    if (res.status === 401 || res.status === 403) {
+    // 401 = JWT expired / invalid → refreshable. 403 = authenticated but
+    // lacks permission for this resource → no refresh fixes it; let the
+    // caller see Redo's "Lacking required permissions" message and stop.
+    if (res.status === 401) {
       throw new RedoAuthExpiredError("/team/upload-attachment", res.status, msg);
     }
     throw new Error(`upload-attachment ${res.status}: ${msg}`);
@@ -532,7 +557,9 @@ async function getTeam(options: ImportOptions): Promise<any> {
   });
   const text = await res.text();
   if (!res.ok) {
-    if (res.status === 401 || res.status === 403) {
+    // Only 401 means refreshable JWT issue. 403 is a permission denial
+    // that a token paste can't resolve.
+    if (res.status === 401) {
       throw new RedoAuthExpiredError("/team", res.status, text?.slice(0, 500));
     }
     throw new Error(`get team ${res.status}: ${text?.slice(0, 2000) ?? res.statusText}`);
@@ -593,7 +620,11 @@ async function postAtPath(
       body?.error ??
       body?.message ??
       (text && text.length > 0 ? text.slice(0, 2000) : res.statusText);
-    if (res.status === 401 || res.status === 403) {
+    // 401 → JWT expired/invalid → refreshable via prompt. 403 → user is
+    // authenticated but lacks the required permission for this RPC; no
+    // amount of token-pasting fixes it. Let Redo's "Lacking required
+    // permissions" message bubble up so the caller sees the real reason.
+    if (res.status === 401) {
       throw new RedoAuthExpiredError(path, res.status, msg);
     }
     throw new Error(`POST ${path} ${res.status}: ${msg}`);

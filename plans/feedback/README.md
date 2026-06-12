@@ -95,6 +95,26 @@ On completion:
 - The planner can add new tasks to an open batch. Just append to
   INDEX.md and write the new task file.
 
+### Parallel-session git hygiene (lessons from the wild)
+
+Both planner and executor sessions share the same working tree. The
+two pitfalls below show up reliably when ≥2 sessions are active.
+
+- **Stage explicitly, verify before commit.** Another session may have
+  files staged but not yet committed. `git commit` will sweep those
+  in. Steps:
+  1. `git add <your-explicit-paths>` only — no `git add .` / `git add -A`
+  2. `git diff --staged --stat` to confirm only your files are listed
+  3. Commit
+- **Pass `--head <branch> --base main` explicitly to `gh pr create`.**
+  Parallel sessions can switch the working branch back to `main`
+  between your commands. Without explicit flags, gh reads HEAD at
+  execution time and errors with "head branch 'main' is the same as
+  base branch 'main'". Always:
+  ```bash
+  gh pr create --head <your-branch> --base main --title "..." --body "..."
+  ```
+
 ## Templates
 
 ### `INDEX.md`

@@ -31,12 +31,15 @@ import { klaviyo, paginate, slug } from "../klaviyo.js";
 import { fetchAllMetrics } from "../extract-metrics.js";
 import type { ImportProgressEvent } from "./import-rpc.js";
 import {
+  decodeJwtAud,
   filterFontsNotInBrandKit,
+  getBrandKitFontFamilies,
   importFlowRpc,
   importTemplateRpc,
   RedoAuthExpiredError,
   uploadFontsForTemplates,
 } from "./import-rpc.js";
+import { matchFontToBrandKit, rewriteTemplateFontFamilies } from "../fonts.js";
 import { disableDb, isDbEnabled, reapStuckJobs, runMigrations } from "./db.js";
 import {
   createJob,
@@ -45,6 +48,7 @@ import {
   hydrateFromDb,
   jobController,
   listJobs,
+  refreshJobNotesFromDb,
   resolveInput,
   setNote,
   setNoteResolved,
@@ -59,9 +63,12 @@ import { streamBundle, type BundleItemRequest } from "./bundle.js";
 import {
   createStore,
   deleteStore,
+  deleteStoreForReviewer,
   getStoreById,
   getStoreBySlug,
+  getStoreForReviewer,
   listStores,
+  listStoresForReviewer,
   toSummary,
   updateStore,
 } from "./stores.js";
@@ -95,6 +102,7 @@ import {
   setAssistDone,
   setCardOrder,
 } from "./imported-items.js";
+import { getReviewerByToken, type ReviewerRecord } from "./reviewers.js";
 
 const MIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../");
 const DEFAULT_REDOAPP_DIR = join(homedir(), "code/redoapp");
@@ -113,6 +121,21 @@ const IS_HOSTED_DEPLOY = Boolean(
 const AI_AVAILABLE = Boolean(
   process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY,
 );
+
+// Surface mode — which deployment is this process running as?
+//   "admin"          → existing internal deployment (Toby 2.0, import wizard,
+//                      assist surface). Default; matches pre-2026-05-26 behavior.
+//   "public_review"  → external reviewer deployment. Only /r/<token>/, /dashboard,
+//                      and /api/r/* routes are reachable; admin/assist/import
+//                      endpoints 404. Same repo + Postgres, different Replit
+//                      Autoscale deployment with MIME_SURFACE=public_review.
+//
+// The split exists because external reviewers (non-Redo employees) can't be
+// added to the Replit workspace and so can't reach the private deploy at all.
+// See plans/2026-05-26-reviewer-dashboard.md for the full architecture.
+type MimeSurface = "admin" | "public_review";
+const MIME_SURFACE: MimeSurface =
+  process.env.MIME_SURFACE === "public_review" ? "public_review" : "admin";
 
 // Optional HTTP Basic auth. Gated on BASIC_AUTH_USER + BASIC_AUTH_PASS env vars;
 // if either is unset, auth is skipped entirely (local dev).
@@ -1095,11 +1118,17 @@ async function runImport(
        * a NEW unresolved font triggers a fresh prompt rather than reusing
        * an unrelated cached answer.
        */
+      // Returns a map of Klaviyo-font-name (lowercased) → brand-kit font
+      // name for any unresolved font the operator reconciled to a font they
+      // added under a different name. Empty map when nothing needed mapping.
+      // Callers apply it to template JSON (rewriteTemplateFontFamilies) so
+      // the imported blocks reference the brand-kit name and actually render.
       async function preflightUnresolvedFonts(
         unresolved: Array<{ family: string; reason: string; usedBy: string[] }>,
         label: string,
-      ): Promise<void> {
-        if (unresolved.length === 0) return;
+      ): Promise<Map<string, string>> {
+        const fontMapping = new Map<string, string>();
+        if (unresolved.length === 0) return fontMapping;
         let stillMissing: typeof unresolved;
         try {
           stillMissing = await withFreshJwt(
@@ -1119,7 +1148,7 @@ async function runImport(
             kind: "info",
             text: `Unresolved ${label} fonts already present in brand kit — proceeding.`,
           });
-          return;
+          return fontMapping;
         }
         const fontKey = stillMissing
           .map((u) => u.family.toLowerCase())
@@ -1129,10 +1158,11 @@ async function runImport(
           .map((u) => `• ${u.family} — used by ${u.usedBy.join(", ")}`)
           .join("\n");
         const plural = stillMissing.length === 1 ? "" : "s";
+        // ─── Step 1: confirm the operator added the fonts ───────────────
         const answer = await ctrl.prompt({
           questionKey: `font-preflight:${fontKey}`,
           question: `${stillMissing.length} custom font${plural} couldn't be auto-uploaded. Add ${stillMissing.length === 1 ? "it" : "them"} to your Redo brand kit (Settings → Brand Kit → Fonts), then click "Continue".`,
-          context: `These fonts aren't on Google Fonts so they can't be fetched automatically:\n\n${fontList}\n\nWithout adding them, the imported templates will reference fonts that don't exist and fall back to a generic sans/serif at render time.`,
+          context: `These fonts aren't on Google Fonts so they can't be fetched automatically:\n\n${fontList}\n\nWithout adding them, the imported templates will reference fonts that don't exist and fall back to a generic sans/serif at render time.\n\nThe font name in your brand kit doesn't have to match exactly — after you continue, we'll reconcile any name differences.`,
           type: "boolean",
           default: "true",
           trueLabel: "Continue (added them)",
@@ -1145,17 +1175,90 @@ async function runImport(
             kind: "warn",
             text: `Importing ${label} anyway with ${stillMissing.length} unresolved font${plural} (${stillMissing.map((u) => u.family).join(", ")}) — fallback rendering will apply.`,
           });
-        } else {
+          return fontMapping;
+        }
+
+        // ─── Step 2: reconcile each font's Klaviyo name → brand-kit name ─
+        // Re-fetch the brand kit (now that the operator added fonts), then
+        // auto-match where confident; only ambiguous / no-match fonts reach
+        // a per-font picker. The chosen brand-kit name is recorded so the
+        // template's fontFamily references get rewritten before import.
+        let brandKitFamilies: string[] = [];
+        try {
+          brandKitFamilies = await withFreshJwt(
+            (jwt) => getBrandKitFontFamilies({ jwt, serverBase, account }),
+            `fetching brand kit fonts for ${label}`,
+          );
+        } catch (e: any) {
+          emit({
+            kind: "warn",
+            text: `Could not re-fetch brand kit fonts (${e.message ?? e}); skipping name reconciliation. If a font renders wrong, its name may differ from the import.`,
+          });
+          return fontMapping;
+        }
+
+        for (const u of stillMissing) {
+          const match = matchFontToBrandKit(u.family, brandKitFamilies);
+          if (match.kind === "match") {
+            if (match.family.toLowerCase() !== u.family.toLowerCase()) {
+              fontMapping.set(u.family.toLowerCase(), match.family);
+              emit({
+                kind: "info",
+                text: `Font "${u.family}" → matched brand-kit font "${match.family}" automatically.`,
+              });
+            }
+            // Exact-name match: nothing to rewrite, font already aligns.
+            continue;
+          }
+          // Ambiguous or no match → ask the operator which brand-kit font
+          // they added for this Klaviyo font. One prompt per font; cached
+          // per-font so a recurring font across templates is asked once.
+          const options =
+            match.kind === "ambiguous" ? match.candidates : brandKitFamilies;
+          if (options.length === 0) {
+            emit({
+              kind: "warn",
+              text: `No brand-kit fonts found to map "${u.family}" to — it will render with a generic fallback. Add it to Settings → Brand Kit → Fonts and re-import.`,
+            });
+            continue;
+          }
+          const pick = await ctrl.prompt({
+            questionKey: `font-map:${u.family.toLowerCase()}`,
+            question: `Klaviyo font "${u.family}" — which brand-kit font did you add for it?`,
+            context: `Pick the font you added to your Redo brand kit for "${u.family}" (used by ${u.usedBy.join(", ")}). The names often differ (e.g. "Futura" vs "Futura PT").`,
+            type: "choice",
+            options: [
+              ...options.map((f) => ({ value: f, label: f })),
+              { value: "__fallback__", label: "Leave as-is (generic fallback)" },
+            ],
+            itemLabel: u.family,
+            hideApplyAll: true,
+          });
+          if (pick === "__skip__" || pick === "__fallback__" || !pick) {
+            emit({
+              kind: "warn",
+              text: `Font "${u.family}" left unmapped — it will render with a generic fallback.`,
+            });
+            continue;
+          }
+          if (pick.toLowerCase() !== u.family.toLowerCase()) {
+            fontMapping.set(u.family.toLowerCase(), pick);
+          }
           emit({
             kind: "info",
-            text: `${label}: proceeding — assuming the ${stillMissing.length} missing font${plural} ${stillMissing.length === 1 ? "has" : "have"} been added to brand kit.`,
+            text: `Font "${u.family}" → mapped to brand-kit font "${pick}".`,
           });
         }
+        return fontMapping;
       }
 
       // ─── Template phase ────────────────────────────────────────────
       let templateImportOk = 0;
       let templateImportFail = 0;
+      // Klaviyo-font-name (lowercased) → brand-kit font name, filled by the
+      // font preflight when the operator reconciled a name mismatch. Applied
+      // to each template's blocks before import so fonts render correctly.
+      let templateFontMapping = new Map<string, string>();
       if (hasTemplatesToImport) {
         // Load the exported template JSON once so we can upload fonts (union
         // across the batch) before creating templates.
@@ -1191,7 +1294,7 @@ async function runImport(
             skipped: fontResult.skipped,
             unresolved: fontResult.unresolved,
           });
-          await preflightUnresolvedFonts(fontResult.unresolved, "templates");
+          templateFontMapping = await preflightUnresolvedFonts(fontResult.unresolved, "templates");
         } catch (e: any) {
           emit({ kind: "warn", text: `font upload failed: ${e.message ?? e}. Continuing with template import.` });
         }
@@ -1199,6 +1302,15 @@ async function runImport(
         emit({ kind: "step", label: "Creating templates…" });
         for (const l of loaded) {
           emit({ kind: "step", label: `Importing ${l.name}…` });
+          // Repoint any Klaviyo font name the operator mapped to a
+          // differently-named brand-kit font so the imported blocks
+          // reference the registered font (else: generic fallback render).
+          if (templateFontMapping.size > 0) {
+            const n = rewriteTemplateFontFamilies(l.json, templateFontMapping);
+            if (n > 0) {
+              emit({ kind: "log", source: "stdout", text: `${l.name}: rewrote ${n} font reference${n === 1 ? "" : "s"} to brand-kit names` });
+            }
+          }
           try {
             const result = await withFreshJwt(
               (jwt) =>
@@ -1435,10 +1547,22 @@ async function runImport(
                 skipped: fontResult.skipped,
                 unresolved: fontResult.unresolved,
               });
-              await preflightUnresolvedFonts(
+              const flowFontMapping = await preflightUnresolvedFonts(
                 fontResult.unresolved,
                 `flow "${flowName}"`,
               );
+              // placeholderJsons are the same `fullTemplate` object refs
+              // importFlowRpc consumes, so rewriting in place reaches the
+              // imported flow's emails.
+              if (flowFontMapping.size > 0) {
+                let rewritten = 0;
+                for (const t of placeholderJsons) {
+                  rewritten += rewriteTemplateFontFamilies(t, flowFontMapping);
+                }
+                if (rewritten > 0) {
+                  emit({ kind: "log", source: "stdout", text: `flow "${flowName}": rewrote ${rewritten} font reference${rewritten === 1 ? "" : "s"} to brand-kit names` });
+                }
+              }
             }
           } catch (e: any) {
             emit({
@@ -1903,6 +2027,11 @@ async function handleJobList(req: IncomingMessage, res: ServerResponse) {
 // ─── API: GET /api/jobs/:id — full detail ─────────────────────────────────
 
 async function handleJobGet(res: ServerResponse, jobId: string) {
+  // Refresh notes from DB so the admin sees notes the reviewer wrote on
+  // the separate public_review deploy. Mime runs as two processes sharing
+  // one Postgres; in-memory job.notes is stale on whichever process
+  // didn't write the note.
+  await refreshJobNotesFromDb(jobId);
   const job = getJob(jobId);
   if (!job) return json(res, 404, { error: `job ${jobId} not found` });
   json(res, 200, job);
@@ -2298,6 +2427,9 @@ async function handleJobBundle(
   res: ServerResponse,
   jobId: string,
 ) {
+  // Same cross-process freshness as handleJobGet — reviewer-written
+  // notes need to land in the bundle's notes.md files.
+  await refreshJobNotesFromDb(jobId);
   const job = getJob(jobId);
   if (!job) return json(res, 404, { error: `job ${jobId} not found` });
   const body = await readJsonBody(req);
@@ -2502,6 +2634,2107 @@ async function handleDebugResolveTemplate(
   } catch (e: any) {
     json(res, 500, { error: e.message ?? String(e) });
   }
+}
+
+// ─── Reviewer surface (MIME_SURFACE=public_review) ─────────────────────────
+//
+// Public-facing deploy for external reviewers. Per-reviewer URL token sets a
+// HttpOnly cookie; subsequent /api/r/* calls authenticate via the cookie.
+// See plans/2026-05-26-reviewer-dashboard.md.
+
+const REVIEWER_COOKIE = "reviewer_token";
+
+function parseCookie(req: IncomingMessage, name: string): string | null {
+  const header = req.headers["cookie"] ?? "";
+  for (const part of String(header).split(/;\s*/)) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    if (part.slice(0, eq) === name) {
+      return decodeURIComponent(part.slice(eq + 1));
+    }
+  }
+  return null;
+}
+
+function setReviewerCookie(res: ServerResponse, token: string): void {
+  // 1-year expiry, HttpOnly + SameSite=Lax. The public deploy may not
+  // be on HTTPS during dev — Secure flag is set only when we can detect
+  // HTTPS (Replit Autoscale terminates TLS and sets x-forwarded-proto).
+  const cookie = [
+    `${REVIEWER_COOKIE}=${encodeURIComponent(token)}`,
+    "Path=/",
+    `Max-Age=${60 * 60 * 24 * 365}`,
+    "HttpOnly",
+    "SameSite=Lax",
+  ].join("; ");
+  res.setHeader("set-cookie", cookie);
+}
+
+async function requireReviewer(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<ReviewerRecord | null> {
+  // Open access by design: anyone hitting the public surface gets a
+  // synthetic "public" reviewer identity. If a real reviewer_token
+  // cookie is present and resolves to a row, prefer that (so per-
+  // reviewer scoping still works for any future use), otherwise
+  // everyone shares the same public id and store list.
+  const token = parseCookie(req, REVIEWER_COOKIE);
+  if (token) {
+    const reviewer = await getReviewerByToken(token);
+    if (reviewer) return reviewer;
+  }
+  return PUBLIC_REVIEWER;
+}
+
+// Synthetic identity for non-cookie visitors. All public access shares
+// this single id so stores created without a cookie are all owned by
+// "public" and visible to anyone else who lands here.
+const PUBLIC_REVIEWER: ReviewerRecord = {
+  id: "public",
+  name: "Reviewer",
+  token: "",
+  email: null,
+  createdAt: new Date(0).toISOString(),
+  disabledAt: null,
+};
+
+// GET /r/<token>/ — handshake. If the token matches a real reviewer row,
+// set the cookie so future requests authenticate as that reviewer. If it
+// doesn't, just redirect to /dashboard anyway — the public surface is
+// open access, so an unrecognized token isn't an error, just an anonymous
+// visitor.
+async function handleReviewerHandshake(
+  req: IncomingMessage,
+  res: ServerResponse,
+  token: string,
+): Promise<void> {
+  const reviewer = await getReviewerByToken(token);
+  if (reviewer) setReviewerCookie(res, token);
+  res.writeHead(302, { location: "/dashboard" });
+  res.end();
+}
+
+// GET /api/r/me — minimum payload the dashboard needs to render a header.
+async function handleReviewerMe(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  return json(res, 200, {
+    reviewerId: reviewer.id,
+    reviewerName: reviewer.name,
+  });
+}
+
+// GET /api/r/stores — reviewer's own stores only.
+async function handleReviewerStoresList(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const recs = await listStoresForReviewer(reviewer.id);
+  // Use the summary shape so masked keys + JWT expiry are exposed to the
+  // dashboard without leaking raw secrets.
+  return json(res, 200, { stores: recs.map(toSummary) });
+}
+
+// GET /api/r/stores/:id — reviewer's own store, full record (unmasked) so
+// the edit form can populate. Ownership-checked.
+async function handleReviewerStoreGet(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const rec = await getStoreForReviewer(storeId, reviewer.id);
+  if (!rec) return json(res, 404, { error: `store ${storeId} not found` });
+  return json(res, 200, { store: rec });
+}
+
+// POST /api/r/stores — create a store owned by the current reviewer.
+// Reviewer only supplies: name, klaviyoKey, redoJwt. The server derives:
+//   - merchantSlug from name (kebab-case; appends random suffix on
+//     collision with an existing slug)
+//   - storeId from the redoJwt's aud/teamId/team_id/sub claim (same path
+//     the admin uses via decodeJwtAud)
+// Mirrors the admin's setup-modal "couldn't read store ID" hint by
+// returning a 400 when the JWT can't be decoded.
+async function handleReviewerStoreCreate(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
+  const body = await readJsonBody(req);
+  const name = String(body.name ?? "").trim();
+  const klaviyoKey = String(body.klaviyoKey ?? "").trim();
+  const redoJwt = body.redoJwt ? String(body.redoJwt).trim() : "";
+  if (!name || !klaviyoKey || !redoJwt) {
+    return json(res, 400, {
+      error: "name, klaviyoKey, and redoJwt required",
+    });
+  }
+  // Auto-extract storeId from the JWT (mongo ObjectId from aud/teamId/etc).
+  const storeId = decodeJwtAud(redoJwt);
+  if (!storeId) {
+    return json(res, 400, {
+      error: "Couldn't read your Redo store ID from the JWT — paste a fresh session token.",
+    });
+  }
+  // Auto-derive merchantSlug from name. Falls back to a generic random
+  // suffix on collision so two stores named "Acme" can coexist.
+  const baseSlug = nameToSlug(name);
+  let merchantSlug = baseSlug;
+  for (let i = 0; i < 5; i++) {
+    const existing = await getStoreBySlug(merchantSlug);
+    if (!existing) break;
+    merchantSlug = baseSlug + "-" + Math.random().toString(36).slice(2, 6);
+  }
+  try {
+    const rec = await createStore({
+      name,
+      merchantSlug,
+      klaviyoKey,
+      redoJwt,
+      storeId,
+      redoServerBase: null,
+      // Tag with reviewer id so listStoresForReviewer() filters to this
+      // reviewer only. createdBy stays null since there's no admin user
+      // associated with a reviewer-created store.
+      createdByReviewer: reviewer.id,
+    });
+    return json(res, 201, { store: rec });
+  } catch (e: any) {
+    const msg = e?.message ?? String(e);
+    if (msg.includes("idx_stores_slug") || msg.includes("duplicate key")) {
+      return json(res, 409, { error: `merchantSlug "${merchantSlug}" already exists — try again` });
+    }
+    return json(res, 500, { error: msg });
+  }
+}
+
+// Lowercase, hyphenate, drop non-alphanum/dash. Mirrors typical merchant-
+// slug shapes used by the admin (acme-apparel, otishi-wellness, etc.).
+function nameToSlug(name: string): string {
+  const cleaned = name.toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || "store";
+}
+
+// PATCH /api/r/stores/:id — edit a reviewer-owned store. Ownership-checked
+// before the update runs.
+async function handleReviewerStoreUpdate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
+  // Ownership gate: refuse to even read the body if this isn't the
+  // reviewer's store.
+  const existing = await getStoreForReviewer(storeId, reviewer.id);
+  if (!existing) return json(res, 404, { error: `store ${storeId} not found` });
+  const body = await readJsonBody(req);
+  const patch: Record<string, unknown> = {};
+  if (typeof body.name === "string") patch.name = body.name.trim();
+  if (typeof body.merchantSlug === "string") patch.merchantSlug = body.merchantSlug.trim();
+  if (typeof body.klaviyoKey === "string") patch.klaviyoKey = body.klaviyoKey.trim();
+  if (typeof body.storeId === "string") patch.storeId = body.storeId.trim();
+  if (typeof body.redoJwt === "string") patch.redoJwt = body.redoJwt.trim() || null;
+  if (typeof body.redoServerBase === "string") {
+    patch.redoServerBase = body.redoServerBase.trim() || null;
+  }
+  try {
+    const rec = await updateStore(storeId, patch as any);
+    if (!rec) return json(res, 404, { error: `store ${storeId} not found` });
+    return json(res, 200, { store: rec });
+  } catch (e: any) {
+    return json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// DELETE /api/r/stores/:id — scoped delete. Returns 404 (not 403) on
+// ownership mismatch so we don't leak existence of other reviewers' stores.
+async function handleReviewerStoreDelete(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  if (!isDbEnabled()) return json(res, 503, { error: "DB not enabled" });
+  const ok = await deleteStoreForReviewer(storeId, reviewer.id);
+  if (!ok) return json(res, 404, { error: `store ${storeId} not found` });
+  return json(res, 200, { ok: true });
+}
+
+// ─── Phase 3: flow listing + import + job streaming ──────────────────────
+
+// POST /api/r/stores/:id/flows — list Klaviyo flows for a reviewer-owned
+// store. Reviewer never sees/sends the raw klaviyoKey; the server reads it
+// from the store record. Mirrors handleFlowsList for the admin surface.
+async function handleReviewerStoreFlowsList(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const store = await getStoreForReviewer(storeId, reviewer.id);
+  if (!store) return json(res, 404, { error: `store ${storeId} not found` });
+  try {
+    const flows = await paginate<FlowMeta>(
+      "/flows/?fields[flow]=name,status,trigger_type&sort=-updated",
+      store.klaviyoKey,
+    );
+    return json(res, 200, {
+      flows: flows.map((f) => ({
+        id: f.id,
+        name: f.attributes.name,
+        status: f.attributes.status,
+        triggerType: f.attributes.trigger_type,
+      })),
+    });
+  } catch (e: any) {
+    return json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// POST /api/r/stores/:id/templates — list Klaviyo templates for a
+// reviewer-owned store. Mirrors handleTemplates' shape: paginates,
+// filters out editor_type=KLAVIYO (legacy/visual builder we don't
+// support), returns a slim metadata array.
+async function handleReviewerStoreTemplatesList(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const store = await getStoreForReviewer(storeId, reviewer.id);
+  if (!store) return json(res, 404, { error: `store ${storeId} not found` });
+  try {
+    type T = {
+      id: string;
+      attributes: { name: string; editor_type: string; updated: string };
+    };
+    const all = await paginate<T>(
+      "/templates/?fields[template]=name,editor_type,updated&sort=-updated",
+      store.klaviyoKey,
+    );
+    const templates = all
+      .filter((t) => t.attributes.editor_type !== "KLAVIYO")
+      .map((t) => ({
+        id: t.id,
+        name: t.attributes.name,
+        editorType: t.attributes.editor_type,
+        updated: t.attributes.updated,
+      }));
+    return json(res, 200, { templates });
+  } catch (e: any) {
+    return json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// POST /api/r/stores/:id/campaigns — list recent campaigns. Slim version
+// of handleCampaigns: just returns campaign metadata for the picker; the
+// import pipeline walks per-campaign messages internally when it imports.
+// Cap at 20 most-recent (same rationale as admin: walking older campaigns
+// blows past the proxy timeout).
+async function handleReviewerStoreCampaignsList(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const store = await getStoreForReviewer(storeId, reviewer.id);
+  if (!store) return json(res, 404, { error: `store ${storeId} not found` });
+  try {
+    const filter = encodeURIComponent(`equals(messages.channel,"email")`);
+    const body: any = await klaviyo(
+      `/campaigns/?filter=${filter}&fields[campaign]=name,status,send_time,created_at&sort=-created_at&page[size]=20`,
+      store.klaviyoKey,
+    );
+    const campaigns = ((body?.data ?? []) as any[]).map((c) => ({
+      id: c.id,
+      name: c.attributes?.name ?? c.id,
+      status: c.attributes?.status ?? "unknown",
+      sendTime: c.attributes?.send_time ?? null,
+      createdAt: c.attributes?.created_at ?? null,
+    }));
+    return json(res, 200, { campaigns });
+  } catch (e: any) {
+    return json(res, 500, { error: e.message ?? String(e) });
+  }
+}
+
+// POST /api/r/stores/:id/import — kick off an import job for one of the
+// reviewer's stores. Body: { flowIds?, templateIds?, campaignIds? } — at
+// least one non-empty. The server reuses the store's stored credentials
+// so the reviewer can't import against keys they don't own. Mirrors
+// handleJobCreate on the admin side.
+async function handleReviewerImport(
+  req: IncomingMessage,
+  res: ServerResponse,
+  storeId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const store = await getStoreForReviewer(storeId, reviewer.id);
+  if (!store) return json(res, 404, { error: `store ${storeId} not found` });
+  if (!store.redoJwt) {
+    return json(res, 400, {
+      error: "store has no Redo JWT — edit the store and add one before importing",
+    });
+  }
+  const body = await readJsonBody(req);
+  const flowIds = Array.isArray(body.flowIds) ? (body.flowIds as string[]) : [];
+  const templateIds = Array.isArray(body.templateIds) ? (body.templateIds as string[]) : [];
+  const campaignIds = Array.isArray(body.campaignIds) ? (body.campaignIds as string[]) : [];
+  if (flowIds.length + templateIds.length + campaignIds.length === 0) {
+    return json(res, 400, {
+      error: "pick at least one flow, template, or campaign to import",
+    });
+  }
+  // Construct the run body from the store record. The reviewer can't
+  // supply klaviyoKey/redoJwt/storeId — those come from the ownership-
+  // checked store.
+  const runBody = {
+    klaviyoKey: store.klaviyoKey,
+    storeId: store.storeId,
+    merchantSlug: store.merchantSlug,
+    flowIds,
+    templateIds,
+    campaignIds,
+    redoJwt: store.redoJwt,
+    redoServerBase: store.redoServerBase ?? undefined,
+    runImport: true,
+  };
+  const params = parseRunBody(runBody);
+  if ("error" in params) return json(res, 400, { error: params.error });
+
+  const job = createJob({
+    storeId: store.id,
+    storeName: store.name,
+    merchantSlug: store.merchantSlug,
+    templateIds,
+    flowIds,
+  });
+  const ctrl = jobController(job.id);
+
+  json(res, 202, { jobId: job.id, status: job.status });
+
+  setStatus(job.id, "running");
+  void runImport(params, ctrl)
+    .then((summary) => {
+      setStatus(job.id, "completed", { summary });
+    })
+    .catch((e: any) => {
+      ctrl.emit({
+        kind: "error",
+        severity: "error",
+        text: e?.message ?? String(e),
+      });
+      setStatus(job.id, "failed", { error: e?.message ?? String(e) });
+    });
+}
+
+// Ownership check for jobs. A job is owned by a reviewer iff the job's
+// storeId (the Redo Mongo ObjectId in this codebase's terminology) matches
+// a store the reviewer created. Cross-references job → store row.
+async function getJobForReviewer(
+  jobId: string,
+  reviewerId: string,
+): Promise<ReturnType<typeof getJob> | null> {
+  const job = getJob(jobId);
+  if (!job) return null;
+  // job.storeId is the Redo store_id (mongo ObjectId), not the stores.id
+  // primary key. The stores table has BOTH — id (primary) and store_id
+  // (Redo's Mongo id). Reviewer ownership is by stores.id from the
+  // reviewer's row. We need a way to find the local stores row whose
+  // store_id matches job.storeId AND created_by_reviewer = reviewerId.
+  // Simplest: list all the reviewer's stores and check membership.
+  const myStores = await listStoresForReviewer(reviewerId);
+  const ownsStore = myStores.some(
+    (s) => s.storeId === job.storeId || s.id === job.storeId,
+  );
+  return ownsStore ? job : null;
+}
+
+// GET /api/r/jobs — list jobs across all the reviewer's stores. Each
+// summary mirrors handleJobList's shape but trimmed to fields the
+// reviewer dashboard needs.
+async function handleReviewerJobsList(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const myStores = await listStoresForReviewer(reviewer.id);
+  const myStoreIds = new Set(myStores.flatMap((s) => [s.id, s.storeId]));
+  const all = listJobs();
+  const myJobs = all.filter((j) => myStoreIds.has(j.storeId));
+  // Cross-process freshness: pull each owned job's notes column from DB so
+  // any notes admin (or this reviewer on another tab) wrote land in the
+  // sidebar's per-item textareas without a process restart.
+  await Promise.all(myJobs.map((j) => refreshJobNotesFromDb(j.id)));
+  const jobs = myJobs
+    .map((j) => {
+      // Derive per-item display info from the job events so the sidebar
+      // can list "Flow X — imported" / "Template Y — failed" with the
+      // reviewer's note. The admin's bundle.ts does the same walk.
+      const items = collectItemsFromEvents(j);
+      return {
+        id: j.id,
+        storeId: j.storeId,
+        storeName: j.storeName,
+        status: j.status,
+        createdAt: j.createdAt,
+        completedAt: j.completedAt,
+        flowIds: j.flowIds,
+        templateIds: j.templateIds,
+        items, // [{ id, type, name, state, note }]
+        eventCount: j.events.length,
+        summary: j.summary,
+        error: j.error,
+        lastEvent: j.events[j.events.length - 1] ?? null,
+        pendingInput: j.pendingInput ?? null,
+      };
+    });
+  return json(res, 200, { jobs });
+}
+
+// Walk the event log to assemble per-item state. Each item is identified
+// by its Klaviyo id; events name it via `id` + `name`. We pick the most
+// recent state-transition event per id (exported/flow_imported/fail/etc.)
+// to produce a final state for display.
+function collectItemsFromEvents(j: ReturnType<typeof getJob>): Array<{
+  id: string;
+  type: "template" | "flow" | "campaign";
+  name: string;
+  state: "queued" | "imported" | "failed";
+  note: string | null;
+  noteAuthor: string | null;
+}> {
+  if (!j) return [];
+  const byId = new Map<string, { id: string; type: "template" | "flow" | "campaign"; name: string; state: "queued" | "imported" | "failed" }>();
+  for (const ev of j.events) {
+    const p = ev.payload as any;
+    if (!p || typeof p.id !== "string") continue;
+    if (ev.kind === "exported") {
+      byId.set(p.id, { id: p.id, type: "template", name: p.name ?? p.id, state: "imported" });
+    } else if (ev.kind === "flow_imported") {
+      byId.set(p.id, { id: p.id, type: "flow", name: p.name ?? p.id, state: "imported" });
+    } else if (ev.kind === "imported") {
+      // campaign-imported event uses kind="imported" per existing code
+      const existing = byId.get(p.id);
+      byId.set(p.id, {
+        id: p.id,
+        type: existing?.type ?? "campaign",
+        name: p.name ?? existing?.name ?? p.id,
+        state: "imported",
+      });
+    } else if (ev.kind === "fail") {
+      // Preserve whatever type we'd already seen; fall back to flow.
+      const existing = byId.get(p.id);
+      byId.set(p.id, {
+        id: p.id,
+        type: existing?.type ?? "flow",
+        name: p.name ?? existing?.name ?? p.id,
+        state: "failed",
+      });
+    }
+  }
+  return Array.from(byId.values()).map((it) => {
+    const raw = j.notes?.[it.id];
+    let noteText: string | null = null;
+    let noteAuthor: string | null = null;
+    if (typeof raw === "string") {
+      noteText = raw || null;
+    } else if (raw && typeof raw === "object") {
+      const r = raw as any;
+      noteText = r.text ?? null;
+      noteAuthor = r.author ?? null;
+    }
+    return { ...it, note: noteText, noteAuthor };
+  });
+}
+
+// GET /api/r/jobs/:id — full job detail (ownership-checked).
+async function handleReviewerJobGet(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const job = await getJobForReviewer(jobId, reviewer.id);
+  if (!job) return json(res, 404, { error: `job ${jobId} not found` });
+  return json(res, 200, job);
+}
+
+// POST /api/r/jobs/:id/notes — upsert a per-item note for a reviewer-owned
+// job. Body: { itemId: string, note: string }. Empty note clears the entry.
+// Author is the reviewer's display name so admin's bundle download
+// attributes correctly.
+async function handleReviewerJobNotes(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const job = await getJobForReviewer(jobId, reviewer.id);
+  if (!job) return json(res, 404, { error: `job ${jobId} not found` });
+  const body = await readJsonBody(req);
+  const itemId = body.itemId;
+  const note = body.note;
+  if (typeof itemId !== "string" || typeof note !== "string") {
+    return json(res, 400, { error: "itemId and note (string) required" });
+  }
+  const ok = setNote(jobId, itemId, note, reviewer.name);
+  if (!ok) return json(res, 404, { error: `job ${jobId} not found` });
+  return json(res, 200, { ok: true });
+}
+
+// POST /api/r/jobs/:id/inputs — deliver an answer to a needs_input prompt.
+// Same shape as admin handleJobInput, but ownership-checked. Body must
+// include { inputId, answer }.
+async function handleReviewerJobInput(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const job = await getJobForReviewer(jobId, reviewer.id);
+  if (!job) return json(res, 404, { error: `job ${jobId} not found` });
+  const body = await readJsonBody(req);
+  const inputId = body.inputId as string | undefined;
+  const answer = body.answer;
+  if (!inputId || answer === undefined) {
+    return json(res, 400, { error: "inputId and answer required" });
+  }
+  const result = resolveInput(jobId, inputId, String(answer));
+  if (!result.ok) return json(res, 400, result);
+  return json(res, 200, { ok: true });
+}
+
+// GET /api/r/jobs/:id/stream — NDJSON live stream (ownership-checked).
+// Same logic as handleJobStream — replays history past ?since, subscribes
+// for new events, heartbeats every 10s, ends on terminal status.
+async function handleReviewerJobStream(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+): Promise<void> {
+  const reviewer = await requireReviewer(req, res);
+  if (!reviewer) return;
+  const job = await getJobForReviewer(jobId, reviewer.id);
+  if (!job) return json(res, 404, { error: `job ${jobId} not found` });
+
+  const url = new URL(req.url ?? "", `http://${req.headers.host ?? "localhost"}`);
+  const since = Number(url.searchParams.get("since") ?? "0");
+
+  ndjsonStart(res);
+
+  for (const e of job.events) {
+    if (e.seq > since) res.write(JSON.stringify(e) + "\n");
+  }
+
+  const terminal = (status: string) =>
+    status === "completed" || status === "failed" || status === "cancelled";
+  if (terminal(job.status)) {
+    res.end();
+    return;
+  }
+
+  const unsubscribe = subscribe(jobId, (event) => {
+    res.write(JSON.stringify(event) + "\n");
+  });
+
+  const interval = setInterval(() => {
+    const current = getJob(jobId);
+    if (!current || terminal(current.status)) {
+      clearInterval(interval);
+      clearInterval(heartbeat);
+      unsubscribe();
+      res.end();
+    }
+  }, 500);
+
+  const heartbeat = setInterval(() => {
+    res.write(JSON.stringify({ kind: "heartbeat", t: Date.now() }) + "\n");
+  }, 10_000);
+
+  req.on("close", () => {
+    clearInterval(interval);
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
+}
+
+// Reviewer dashboard — Phase 2.
+//
+// Design matches the admin "Toby 2.0" shell (src/migrate/ui/index.html):
+// same Instrument Serif headers, Inter body, color palette
+// (#0d1117 / #010409 / #21262d / #30363d / #FF4405). Branding swap
+// only: "Toby 2.0" → "mime / review" with the orange italic accent on
+// "review". Fonts loaded from Google Fonts CDN so this surface has no
+// dependency on local /fonts/ static assets.
+//
+// Vanilla JS (no Babel/React build) — the reviewer surface is small
+// enough that a single inline script is simpler than wiring component
+// files like the admin does.
+const REVIEWER_DASHBOARD_HTML = /* html */ `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>mime · review</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; background: #0d1117; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      font-feature-settings: "ss01", "cv11";
+      color: #e6edf3;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    .font-serif { font-family: 'Instrument Serif', 'Times New Roman', serif; letter-spacing: -0.005em; }
+    *::-webkit-scrollbar { width: 10px; height: 10px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-thumb { background: #21262d; border-radius: 5px; border: 2px solid #0d1117; }
+    *::-webkit-scrollbar-thumb:hover { background: #30363d; }
+    input:-webkit-autofill {
+      -webkit-text-fill-color: #e6edf3 !important;
+      -webkit-box-shadow: 0 0 0 1000px #010409 inset !important;
+    }
+
+    /* Layout shell — mirrors admin's h-screen / flex-col */
+    .shell { height: 100vh; display: flex; flex-direction: column; }
+    .body { display: flex; flex: 1; overflow: hidden; }
+    main { flex: 1; overflow-y: auto; min-width: 0; }
+
+    /* Right-side jobs panel — 1/4 of the viewport, mirrors admin's
+       w-[400px] bg-[#010409] border-l rail. */
+    .jobs-panel {
+      width: 25%; min-width: 280px; max-width: 420px;
+      border-left: 1px solid #21262d;
+      background: #010409;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .jobs-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px; border-bottom: 1px solid #21262d;
+    }
+    .jobs-header .label {
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+      color: #e6edf3;
+    }
+    .jobs-header .total {
+      margin-left: auto; font-size: 11px; color: #6e7681;
+      font-variant-numeric: tabular-nums;
+    }
+    .jobs-list { flex: 1; overflow-y: auto; }
+    .jobs-empty {
+      padding: 32px 16px; text-align: center;
+      color: #484f58; font-size: 11px; line-height: 1.6;
+    }
+    .job-card {
+      border-bottom: 1px solid #161b22; padding: 10px 14px;
+      cursor: pointer;
+    }
+    .job-card:hover { background: #0d1117; }
+    .job-card .row1 { display: flex; align-items: center; gap: 6px; }
+    .job-card .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .job-card .dot.running { background: #58a6ff; animation: pulse 1.5s ease-in-out infinite; }
+    .job-card .dot.completed { background: #3fb950; }
+    .job-card .dot.failed { background: #f85149; }
+    .job-card .dot.awaiting_input { background: #d29922; animation: pulse 1.5s ease-in-out infinite; }
+    .job-card .dot.partial { background: #d29922; }
+    /* Use a job-card-specific name; the .store class is already used by
+       the main grid store cards (display:flex, min-height:110) and
+       would otherwise apply those rules to the inline span here. */
+    .job-card .store-name { font-family: 'Instrument Serif', serif; font-size: 15px; color: #e6edf3; line-height: 1.1; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .job-card .when { margin-left: auto; font-size: 10px; color: #6e7681; flex-shrink: 0; }
+    .job-card .stats { font-size: 11px; color: #8b949e; margin-top: 4px; }
+    .job-items {
+      background: #0d1117; padding: 8px 14px 12px;
+      border-bottom: 1px solid #161b22;
+    }
+    .job-item {
+      padding: 8px 0; border-bottom: 1px dashed #21262d;
+    }
+    .job-item:last-child { border-bottom: 0; }
+    .job-item .head { display: flex; align-items: center; gap: 6px; }
+    .job-item .kind {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em;
+      padding: 1px 5px; border-radius: 3px; flex-shrink: 0;
+    }
+    .job-item .kind.flow { background: #1c2b4a; color: #79c0ff; }
+    .job-item .kind.template { background: #2d2418; color: #d29922; }
+    .job-item .kind.campaign { background: #1b4721; color: #3fb950; }
+    .job-item .name {
+      font-size: 12px; color: #e6edf3; flex: 1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+    }
+    .job-item .state {
+      font-size: 9px; color: #6e7681; text-transform: uppercase; letter-spacing: 0.05em;
+      flex-shrink: 0;
+    }
+    .job-item .state.failed { color: #f85149; }
+    .job-item .state.imported { color: #3fb950; }
+    .job-item textarea {
+      width: 100%; background: #010409; border: 1px solid #21262d;
+      color: #e6edf3; padding: 6px 8px; border-radius: 4px;
+      font: inherit; font-size: 11px; line-height: 1.4;
+      margin-top: 6px; resize: vertical; min-height: 32px;
+    }
+    .job-item textarea:focus { outline: none; border-color: #58a6ff; }
+    .job-item textarea::placeholder { color: #484f58; }
+    .job-item .note-status {
+      font-size: 10px; color: #6e7681; margin-top: 3px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .job-item .note-status .saved { color: #3fb950; }
+    .job-item .note-status .saving { color: #58a6ff; }
+
+    /* Top bar — mirrors admin's bg-[#010409] border-b border-[#21262d] */
+    .topbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 16px;
+      border-bottom: 1px solid #21262d;
+      background: #010409;
+    }
+    .brand { display: flex; align-items: baseline; gap: 8px; }
+    .brand .mime { font-family: 'Instrument Serif', serif; font-size: 22px; line-height: 1; color: #e6edf3; }
+    .brand .review { font-family: 'Instrument Serif', serif; font-style: italic; font-size: 16px; line-height: 1; color: #FF4405; }
+    .brand .subbrand { font-size: 11px; color: #6e7681; margin-left: 4px; }
+    .badge {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+      color: #6e7681; padding: 2px 8px; border: 1px solid #30363d;
+      border-radius: 3px; margin-left: 8px;
+    }
+    .topbar .who { font-size: 12px; color: #6e7681; margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .topbar .who-name { color: #e6edf3; }
+    .signout {
+      font-size: 11px; color: #6e7681; background: transparent;
+      border: 1px solid #30363d; padding: 3px 10px; border-radius: 4px;
+      cursor: pointer; transition: color 0.15s, border-color 0.15s;
+    }
+    .signout:hover { color: #e6edf3; border-color: #388bfd; }
+
+    /* Main content */
+    main { flex: 1; overflow-y: auto; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 32px; }
+    .heading-row { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 24px; }
+    h1 { font-family: 'Instrument Serif', serif; font-size: 40px; line-height: 1; letter-spacing: -0.025em; font-weight: 400; }
+    .subtitle { font-size: 12px; color: #8b949e; margin-top: 8px; }
+
+    /* Store cards */
+    .stores-grid {
+      display: grid; grid-template-columns: repeat(1, minmax(0, 1fr)); gap: 12px;
+    }
+    @media (min-width: 768px)  { .stores-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (min-width: 1024px) { .stores-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    .store {
+      text-align: left; border: 1px solid #21262d; border-radius: 6px;
+      padding: 16px; background: #0d1117; cursor: pointer;
+      transition: border-color 0.15s; min-height: 110px;
+      display: flex; flex-direction: column;
+    }
+    .store:hover { border-color: #30363d; }
+    .store .row { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+    .store .col { min-width: 0; }
+    .store .name { font-family: 'Instrument Serif', serif; font-size: 22px; line-height: 1.1; color: #e6edf3;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .store .slug { font-size: 11px; color: #6e7681; margin-top: 4px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .store .chevron { color: #6e7681; flex-shrink: 0; }
+    .store .meta { font-size: 11px; color: #8b949e; }
+    .store .meta.warn { color: #d29922; }
+
+    .add-store {
+      border: 1px dashed #30363d; border-radius: 6px; padding: 16px;
+      background: transparent; color: #8b949e; cursor: pointer;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 4px; min-height: 110px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .add-store:hover { border-color: #388bfd; color: #e6edf3; }
+    .add-store .plus { font-size: 18px; line-height: 1; }
+    .add-store .label { font-size: 12px; }
+
+    /* Empty state — when reviewer has no stores yet */
+    .empty {
+      text-align: center; padding: 80px 24px; max-width: 480px; margin: 0 auto;
+    }
+    .empty .icon { font-family: 'Instrument Serif', serif; font-size: 48px; color: #6e7681; margin-bottom: 16px; }
+    .empty h2 { font-family: 'Instrument Serif', serif; font-size: 28px; line-height: 1; margin-bottom: 12px; font-weight: 400; }
+    .empty p { font-size: 13px; color: #8b949e; line-height: 1.6; margin-bottom: 24px; }
+    .empty .cta {
+      background: #238636; color: white; border: 1px solid #238636;
+      padding: 8px 18px; border-radius: 4px; font-size: 13px;
+      font-family: inherit; cursor: pointer; transition: background 0.15s;
+    }
+    .empty .cta:hover { background: #2ea043; }
+
+    /* Modal */
+    .scrim {
+      position: fixed; inset: 0;
+      background: #010409cc; backdrop-filter: blur(4px);
+      display: none; align-items: flex-start; justify-content: center;
+      padding-top: 80px; z-index: 50;
+    }
+    .scrim.open { display: flex; }
+    .modal {
+      background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+      width: 480px; max-width: calc(100vw - 32px); padding: 24px;
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+    }
+    .modal h2 {
+      font-family: 'Instrument Serif', serif; font-size: 24px; line-height: 1;
+      margin-bottom: 6px; font-weight: 400;
+    }
+    .modal .modal-subtitle { font-size: 12px; color: #8b949e; margin-bottom: 20px; }
+    .modal label { display: block; font-size: 11px; color: #8b949e; margin: 12px 0 4px;
+      text-transform: uppercase; letter-spacing: 0.05em; font-weight: 500; }
+    .modal input {
+      width: 100%; background: #010409; border: 1px solid #30363d;
+      color: #e6edf3; padding: 8px 10px; border-radius: 4px;
+      font: inherit; font-size: 13px;
+      transition: border-color 0.15s;
+    }
+    .modal input:focus { outline: none; border-color: #388bfd; }
+    .modal input::placeholder { color: #484f58; }
+    .hint { color: #6e7681; font-size: 11px; margin-top: 4px; }
+    .modal-row {
+      display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end;
+      padding-top: 16px; border-top: 1px solid #21262d;
+    }
+    .btn {
+      padding: 7px 14px; border-radius: 4px; font-size: 13px;
+      font-family: inherit; cursor: pointer;
+      border: 1px solid #30363d; background: transparent; color: #e6edf3;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .btn:hover { background: #161b22; }
+    .btn.primary {
+      background: #238636; border-color: #238636; color: white;
+    }
+    .btn.primary:hover { background: #2ea043; border-color: #2ea043; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .err { color: #f78166; font-size: 12px; margin-top: 12px; }
+
+    /* Store-detail view */
+    .breadcrumb {
+      display: flex; align-items: center; gap: 6px; font-size: 12px; color: #6e7681;
+      margin-bottom: 16px;
+    }
+    .breadcrumb a { color: #58a6ff; cursor: pointer; }
+    .breadcrumb a:hover { color: #79c0ff; }
+    .breadcrumb .sep { color: #30363d; }
+
+    .flows-toolbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 16px; background: #010409; border: 1px solid #21262d;
+      border-radius: 6px; margin-bottom: 12px; position: sticky; top: 0; z-index: 1;
+    }
+    .flows-toolbar .count { font-size: 12px; color: #8b949e; }
+    .flows-toolbar .count strong { color: #e6edf3; }
+    .flows-toolbar .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+    .flows-toolbar input[type=search] {
+      background: #0d1117; border: 1px solid #30363d; color: #e6edf3;
+      padding: 5px 10px; border-radius: 4px; font: inherit; font-size: 12px;
+      width: 200px;
+    }
+    .flows-toolbar input[type=search]:focus { outline: none; border-color: #388bfd; }
+    .link-btn {
+      background: transparent; border: 0; color: #58a6ff; cursor: pointer;
+      font: inherit; font-size: 12px; padding: 0;
+    }
+    .link-btn:hover { color: #79c0ff; }
+
+    .flow-list {
+      border: 1px solid #21262d; border-radius: 6px; overflow: hidden;
+      background: #0d1117;
+    }
+    .flow-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px; border-bottom: 1px solid #161b22;
+      cursor: pointer; transition: background 0.1s;
+    }
+    .flow-row:last-child { border-bottom: 0; }
+    .flow-row:hover { background: #161b22; }
+    .flow-row input[type=checkbox] {
+      accent-color: #238636; width: 14px; height: 14px; cursor: pointer;
+    }
+    .flow-row .name { flex: 1; font-size: 13px; color: #e6edf3; }
+    .flow-row .meta { font-size: 11px; color: #6e7681; display: flex; gap: 8px; align-items: center; }
+    .flow-row .status { padding: 1px 6px; border-radius: 3px; font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.05em; }
+    .flow-row .status.live { background: #1b4721; color: #3fb950; }
+    .flow-row .status.draft { background: #2d2418; color: #d29922; }
+    .flow-row .status.archived { background: #21262d; color: #8b949e; }
+    .flow-row .status.sent { background: #1b4721; color: #3fb950; }
+    .flow-row .status.scheduled { background: #1c2b4a; color: #79c0ff; }
+    .flow-row .status.cancelled { background: #21262d; color: #8b949e; }
+
+    /* Tab bar — Flows | Templates | Campaigns */
+    .tabs {
+      display: flex; gap: 0; border-bottom: 1px solid #21262d;
+      margin-bottom: 16px;
+    }
+    .tab {
+      background: transparent; border: 0; padding: 10px 16px;
+      font: inherit; font-size: 13px; color: #8b949e; cursor: pointer;
+      border-bottom: 2px solid transparent; margin-bottom: -1px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .tab:hover { color: #e6edf3; }
+    .tab.active { color: #e6edf3; border-bottom-color: #FF4405; }
+    .tab .count {
+      background: #21262d; color: #8b949e; font-size: 10px;
+      padding: 1px 6px; border-radius: 8px;
+    }
+    .tab.active .count { background: #2d1810; color: #FF8557; }
+
+    /* Job progress view */
+    .progress-card {
+      border: 1px solid #21262d; border-radius: 6px; background: #0d1117;
+      padding: 20px; margin-bottom: 16px;
+    }
+    .progress-status {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+    }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .status-dot.running { background: #58a6ff; animation: pulse 1.5s ease-in-out infinite; }
+    .status-dot.completed { background: #3fb950; }
+    .status-dot.failed { background: #f85149; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .progress-status .label {
+      font-family: 'Instrument Serif', serif; font-size: 20px; line-height: 1;
+    }
+    .progress-meta { font-size: 12px; color: #8b949e; }
+    .log {
+      background: #010409; border: 1px solid #21262d; border-radius: 6px;
+      padding: 12px 14px; font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 11px; line-height: 1.5; color: #8b949e;
+      max-height: 400px; overflow-y: auto;
+    }
+    .log .line { white-space: pre-wrap; word-break: break-word; }
+    .log .line.step { color: #79c0ff; }
+    .log .line.info { color: #8b949e; }
+    .log .line.warn { color: #d29922; }
+    .log .line.err  { color: #f78166; }
+    .log .line.success { color: #3fb950; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div class="brand">
+        <span class="mime">mime</span>
+        <span class="review">review</span>
+        <span class="subbrand">· Klaviyo → Redo</span>
+      </div>
+      <span class="badge">open access</span>
+      <div class="who">
+        <span id="who-name" class="who-name">…</span>
+      </div>
+    </div>
+
+    <div class="body">
+      <main>
+        <div class="container" id="container">
+          <!-- Rendered by JS based on state.view: "stores" | "store" | "job" -->
+        </div>
+      </main>
+
+      <!-- Right-side jobs panel: always visible. Lists all reviewer
+           jobs; expand a job to see its imported items with note inputs.
+           Notes are written to the same jobs.notes column the admin's
+           bundle download reads from. -->
+      <aside class="jobs-panel">
+        <div class="jobs-header">
+          <span class="label">Jobs</span>
+          <span class="total" id="jobs-total">…</span>
+        </div>
+        <div class="jobs-list" id="jobs-list">
+          <div class="jobs-empty">Loading…</div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Needs-input modal — copies the admin's needs-input.jsx UX:
+       header with "job paused" tag, item context, prominent question,
+       italic clarifying context, type-specific input (boolean buttons /
+       choice list / text input), "Apply to other items" checkbox, and
+       a Skip option. JS builds the body dynamically per event. -->
+  <div class="scrim" id="ni-scrim">
+    <div class="modal" id="ni-modal" style="border-color:#58a6ff80;padding:0;width:520px">
+      <div style="display:flex;align-items:center;gap:8px;border-bottom:1px solid #21262d;padding:14px 20px">
+        <span style="width:6px;height:6px;border-radius:50%;background:#58a6ff;flex-shrink:0"></span>
+        <h2 style="font-family:'Instrument Serif',serif;font-size:20px;line-height:1;color:#e6edf3;font-weight:400;margin:0">Needs your input</h2>
+        <span style="font-size:11px;color:#6e7681;margin-left:auto">job paused</span>
+      </div>
+      <div style="padding:16px 20px 8px">
+        <div style="font-size:11px;color:#6e7681;margin-bottom:6px" id="ni-meta"></div>
+        <div style="font-size:14px;color:#e6edf3;margin-bottom:10px;line-height:1.5" id="ni-question"></div>
+        <div style="font-size:11px;color:#8b949e;line-height:1.5;font-style:italic;border-left:2px solid #30363d;padding-left:8px;margin-bottom:16px;display:none" id="ni-context"></div>
+        <div id="ni-input-wrap"></div>
+        <label style="display:none;align-items:center;gap:6px;margin-top:14px;font-size:11px;color:#8b949e;cursor:pointer" id="ni-apply-all-wrap">
+          <input type="checkbox" id="ni-apply-all" checked style="width:12px;height:12px;accent-color:#58a6ff;cursor:pointer" />
+          Apply to other items with the same question
+        </label>
+        <div class="err" id="ni-err"></div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:10px 20px;border-top:1px solid #21262d;background:#010409">
+        <button id="ni-skip" style="font-size:11px;color:#8b949e;background:transparent;border:0;padding:6px 12px;cursor:pointer">Skip this item</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="scrim" id="scrim">
+    <div class="modal">
+      <h2>Add store</h2>
+      <div class="modal-subtitle">Three things — the rest is auto-detected.</div>
+
+      <label>Store name</label>
+      <input id="f-name" placeholder="Acme Apparel" autocomplete="off" />
+
+      <label>Klaviyo API key</label>
+      <input id="f-klav" type="password" placeholder="pk_..." autocomplete="off" />
+
+      <label>Redo session JWT</label>
+      <input id="f-jwt" type="password" placeholder="eyJ..." autocomplete="off" />
+      <div class="hint">Your store ID is read from the JWT — no need to enter it separately.</div>
+
+      <div class="err" id="err"></div>
+      <div class="modal-row">
+        <button class="btn" id="cancel">Cancel</button>
+        <button class="btn primary" id="save">Add store</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    // ─── Top-level app state ────────────────────────────────────────────
+    // view: "stores" | "store" | "job"
+    // store: cached current store record on the store/job views
+    // flows: cached flow list per store id
+    // selected: Set<flowId> for the picker
+    // jobId/jobStatus/jobEvents: when view==="job"
+    const state = {
+      view: "stores",
+      stores: null,
+      store: null,
+      // tab is which picker is currently shown
+      tab: "flows", // "flows" | "templates" | "campaigns"
+      // Loaded item lists per kind. null = not loaded yet, [] = empty list.
+      items: { flows: null, templates: null, campaigns: null },
+      // Per-kind selection sets. Persist across tab switches so the user
+      // can pick a mix and import them all at once.
+      selected: { flows: new Set(), templates: new Set(), campaigns: new Set() },
+      filter: "",
+      jobId: null,
+      jobStatus: null,
+      jobEvents: [],
+      activeStream: null,
+    };
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      })[c]);
+    }
+
+    function jwtRelative(iso) {
+      const ms = new Date(iso).getTime() - Date.now();
+      if (ms <= 0) return "expired";
+      const mins = Math.floor(ms / 60000);
+      if (mins < 60) return "expires in " + mins + "m";
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 48) return "expires in " + hrs + "h";
+      const days = Math.floor(hrs / 24);
+      return "expires in " + days + "d";
+    }
+
+    // ─── Auth ───────────────────────────────────────────────────────────
+    async function loadMe() {
+      const r = await fetch("/api/r/me", { credentials: "same-origin" });
+      if (!r.ok) {
+        $("who-name").textContent = "Not signed in";
+        return null;
+      }
+      const me = await r.json();
+      $("who-name").textContent = me.reviewerName;
+      return me;
+    }
+
+    // ─── Router / view dispatcher ──────────────────────────────────────
+    // URL hash drives the view so refresh / bookmark works.
+    //   #stores               → stores list (default)
+    //   #store=<id>           → store detail (flow picker)
+    //   #job=<jobId>          → job progress
+    function parseHash() {
+      const h = (location.hash || "").replace(/^#/, "");
+      if (!h) return { view: "stores" };
+      const [key, val] = h.split("=");
+      if (key === "store" && val) return { view: "store", storeId: val };
+      if (key === "job" && val)   return { view: "job", jobId: val };
+      return { view: "stores" };
+    }
+    function setHash(view, id) {
+      if (view === "stores") history.replaceState(null, "", "#stores");
+      else if (view === "store") history.replaceState(null, "", "#store=" + id);
+      else if (view === "job") history.replaceState(null, "", "#job=" + id);
+    }
+    async function routeFromHash() {
+      const r = parseHash();
+      if (r.view === "stores") return renderStoresView();
+      if (r.view === "store") return openStore(r.storeId);
+      if (r.view === "job") return openJob(r.jobId);
+    }
+
+    // ─── Stores view ────────────────────────────────────────────────────
+    async function renderStoresView() {
+      state.view = "stores";
+      setHash("stores");
+      // Abort any active stream from a previous view.
+      if (state.activeStream) { state.activeStream.abort(); state.activeStream = null; }
+
+      $("container").innerHTML =
+        '<div class="heading-row">' +
+          '<div>' +
+            '<h1>Your stores</h1>' +
+            '<div class="subtitle" id="subtitle">Loading…</div>' +
+          '</div>' +
+        '</div>' +
+        '<div id="stores-wrap"></div>';
+
+      const r = await fetch("/api/r/stores", { credentials: "same-origin" });
+      if (!r.ok) {
+        $("stores-wrap").innerHTML = '<p style="color:#f78166;font-size:13px">Failed to load stores (' + r.status + ').</p>';
+        return;
+      }
+      const { stores } = await r.json();
+      state.stores = stores;
+      renderStoresGrid(stores);
+    }
+
+    function renderStoresGrid(stores) {
+      $("subtitle").textContent =
+        stores.length === 0
+          ? "no stores yet"
+          : stores.length + " store" + (stores.length === 1 ? "" : "s") + " · click one to pick flows to import";
+
+      if (stores.length === 0) {
+        $("stores-wrap").innerHTML =
+          '<div class="empty">' +
+            '<div class="icon">+</div>' +
+            '<h2>Add your first store</h2>' +
+            '<p>Connect a Klaviyo account and a Redo store, then pick which flows you want to migrate.</p>' +
+            '<button class="cta" onclick="openModal()">Add store</button>' +
+          '</div>';
+        return;
+      }
+
+      const cards = stores.map((s) => {
+        const jwtBadge = s.hasRedoJwt
+          ? ('<div class="meta">JWT ' + (s.jwtExpiresAt ? escapeHtml(jwtRelative(s.jwtExpiresAt)) : "set") + '</div>')
+          : '<div class="meta warn">No Redo JWT — add to import</div>';
+        return (
+          '<button class="store" data-id="' + escapeHtml(s.id) + '" onclick="openStore(\\'' + escapeHtml(s.id) + '\\')">' +
+            '<div class="row">' +
+              '<div class="col">' +
+                '<div class="name">' + escapeHtml(s.name) + '</div>' +
+                '<div class="slug">' + escapeHtml(s.merchantSlug) + '</div>' +
+              '</div>' +
+              '<svg class="chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14">' +
+                '<path d="M6 4L10 8L6 12" stroke-linecap="round" stroke-linejoin="round"></path>' +
+              '</svg>' +
+            '</div>' +
+            jwtBadge +
+          '</button>'
+        );
+      }).join("");
+      const addCard =
+        '<button class="add-store" onclick="openModal()">' +
+          '<span class="plus">+</span>' +
+          '<span class="label">Add store</span>' +
+        '</button>';
+      $("stores-wrap").innerHTML = '<div class="stores-grid">' + cards + addCard + '</div>';
+    }
+
+    // ─── Store-detail view (multi-tab picker) ──────────────────────────
+    // Renders 3 tabs (Flows | Templates | Campaigns). Each tab loads its
+    // list on first click; selections persist across tab switches. The
+    // single Import button submits the union across all three.
+    async function openStore(storeId) {
+      state.view = "store";
+      state.tab = "flows";
+      state.filter = "";
+      state.items = { flows: null, templates: null, campaigns: null };
+      state.selected = { flows: new Set(), templates: new Set(), campaigns: new Set() };
+      setHash("store", storeId);
+      if (state.activeStream) { state.activeStream.abort(); state.activeStream = null; }
+
+      $("container").innerHTML =
+        '<div class="breadcrumb">' +
+          '<a onclick="renderStoresView()">← Your stores</a>' +
+          '<span class="sep">/</span>' +
+          '<span id="bc-name">…</span>' +
+        '</div>' +
+        '<div class="heading-row">' +
+          '<div>' +
+            '<h1 id="store-name">…</h1>' +
+            '<div class="subtitle" id="store-subtitle">Loading…</div>' +
+          '</div>' +
+        '</div>' +
+        '<div id="tabs"></div>' +
+        '<div id="picker-toolbar"></div>' +
+        '<div id="picker-wrap"></div>';
+
+      const storeRes = await fetch(
+        "/api/r/stores/" + encodeURIComponent(storeId),
+        { credentials: "same-origin" },
+      );
+      if (!storeRes.ok) {
+        $("picker-wrap").innerHTML = '<p style="color:#f78166;font-size:13px">Store not found.</p>';
+        return;
+      }
+      const { store } = await storeRes.json();
+      state.store = store;
+      $("bc-name").textContent = store.name;
+      $("store-name").textContent = store.name;
+      $("store-subtitle").textContent = "Pick flows, templates, or campaigns to import";
+
+      renderTabs();
+      switchTab("flows");
+    }
+
+    function renderTabs() {
+      const counts = {
+        flows: state.items.flows ? state.items.flows.length : "…",
+        templates: state.items.templates ? state.items.templates.length : "…",
+        campaigns: state.items.campaigns ? state.items.campaigns.length : "…",
+      };
+      const tab = (key, label) => {
+        const active = state.tab === key ? "active" : "";
+        const sel = state.selected[key].size;
+        const countLabel = sel > 0 ? sel + "/" + counts[key] : String(counts[key]);
+        return '<button class="tab ' + active + '" onclick="switchTab(\\'' + key + '\\')">' +
+          escapeHtml(label) +
+          '<span class="count">' + countLabel + '</span>' +
+          '</button>';
+      };
+      $("tabs").innerHTML =
+        '<div class="tabs">' +
+          tab("flows", "Flows") +
+          tab("templates", "Templates") +
+          tab("campaigns", "Campaigns") +
+        '</div>';
+    }
+
+    async function switchTab(kind) {
+      state.tab = kind;
+      state.filter = "";
+      renderTabs();
+      if (state.items[kind] === null) {
+        $("picker-toolbar").innerHTML = "";
+        $("picker-wrap").innerHTML = '<div style="padding:24px;text-align:center;color:#6e7681;font-size:12px">Loading ' + kind + '…</div>';
+        const r = await fetch(
+          "/api/r/stores/" + encodeURIComponent(state.store.id) + "/" + kind,
+          { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: "{}" },
+        );
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          $("picker-wrap").innerHTML = '<p style="color:#f78166;font-size:13px">' +
+            escapeHtml(err.error || ("Failed to load " + kind + " (" + r.status + ")")) +
+            '</p>';
+          state.items[kind] = [];
+          renderTabs();
+          return;
+        }
+        const data = await r.json();
+        state.items[kind] = data[kind] || [];
+        renderTabs();
+      }
+      renderPicker();
+    }
+
+    function renderPicker() {
+      const kind = state.tab;
+      const items = state.items[kind] || [];
+      const filter = state.filter.toLowerCase().trim();
+      const visible = filter
+        ? items.filter((i) => (i.name || "").toLowerCase().includes(filter))
+        : items;
+      const sel = state.selected[kind];
+      const totalSelected = state.selected.flows.size + state.selected.templates.size + state.selected.campaigns.size;
+      const allVisibleSelected = visible.length > 0 && visible.every((i) => sel.has(i.id));
+      const canImport = totalSelected > 0 && state.store && state.store.redoJwt;
+
+      $("picker-toolbar").innerHTML =
+        '<div class="flows-toolbar">' +
+          '<div class="count"><strong>' + sel.size + '</strong> in this tab · <strong>' + totalSelected + '</strong> total · <strong>' + items.length + '</strong> available</div>' +
+          '<button class="link-btn" onclick="selectAllVisible(' + (!allVisibleSelected) + ')">' +
+            (allVisibleSelected ? 'Deselect all' : 'Select all visible') +
+          '</button>' +
+          '<div class="right">' +
+            '<input type="search" placeholder="Filter by name…" id="picker-filter" value="' + escapeHtml(state.filter) + '" />' +
+            '<button class="btn primary" id="import-btn" ' + (canImport ? '' : 'disabled') + ' onclick="runImport()">' +
+              'Import ' + totalSelected + ' item' + (totalSelected === 1 ? '' : 's') +
+            '</button>' +
+          '</div>' +
+        '</div>';
+
+      const banner = !state.store.redoJwt
+        ? '<div style="padding:14px;background:#2d2418;border:1px solid #6e5a23;border-radius:6px;color:#d29922;font-size:12px;margin-bottom:12px">This store has no Redo JWT yet. Browse here, but add a JWT before importing.</div>'
+        : '';
+      $("picker-wrap").innerHTML = banner + renderPickerRows(kind, visible);
+
+      const fi = $("picker-filter");
+      if (fi) {
+        fi.oninput = (e) => {
+          state.filter = e.target.value;
+          renderPicker();
+          $("picker-filter").focus();
+          const len = $("picker-filter").value.length;
+          $("picker-filter").setSelectionRange(len, len);
+        };
+      }
+    }
+
+    function renderPickerRows(kind, items) {
+      if (items.length === 0) {
+        return '<div style="padding:24px;text-align:center;color:#6e7681;font-size:12px;border:1px solid #21262d;border-radius:6px">' +
+          (state.filter ? 'No items match the filter.' : 'No ' + kind + ' found.') +
+          '</div>';
+      }
+      const sel = state.selected[kind];
+      return '<div class="flow-list">' + items.map((i) => {
+        const checked = sel.has(i.id) ? "checked" : "";
+        const metaHtml = renderItemMeta(kind, i);
+        return (
+          '<label class="flow-row">' +
+            '<input type="checkbox" ' + checked + ' onchange="toggleItem(\\'' + escapeHtml(i.id) + '\\', this.checked)" />' +
+            '<div class="name">' + escapeHtml(i.name || i.id) + '</div>' +
+            '<div class="meta">' + metaHtml + '</div>' +
+          '</label>'
+        );
+      }).join("") + '</div>';
+    }
+
+    function renderItemMeta(kind, item) {
+      if (kind === "flows") {
+        const statusClass = item.status === "live" ? "live"
+          : item.status === "draft" ? "draft"
+          : "archived";
+        return (
+          '<span>' + escapeHtml(item.triggerType || "?") + '</span>' +
+          '<span class="status ' + statusClass + '">' + escapeHtml(item.status || "") + '</span>'
+        );
+      }
+      if (kind === "templates") {
+        const ago = item.updated ? niceDate(item.updated) : "";
+        return (
+          '<span>' + escapeHtml(item.editorType || "") + '</span>' +
+          (ago ? '<span>' + escapeHtml(ago) + '</span>' : '')
+        );
+      }
+      if (kind === "campaigns") {
+        const date = item.sendTime || item.createdAt;
+        const status = String(item.status || "");
+        const statusClass = /sent/i.test(status) ? "sent"
+          : /scheduled/i.test(status) ? "scheduled"
+          : /cancel/i.test(status) ? "cancelled"
+          : "draft";
+        return (
+          (date ? '<span>' + escapeHtml(niceDate(date)) + '</span>' : '') +
+          '<span class="status ' + statusClass + '">' + escapeHtml(status) + '</span>'
+        );
+      }
+      return "";
+    }
+
+    function niceDate(iso) {
+      try {
+        return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+      } catch (_) { return iso; }
+    }
+
+    function toggleItem(id, checked) {
+      const sel = state.selected[state.tab];
+      if (checked) sel.add(id); else sel.delete(id);
+      const wasFocused = document.activeElement === $("picker-filter");
+      renderTabs();
+      renderPicker();
+      if (wasFocused && $("picker-filter")) $("picker-filter").focus();
+    }
+
+    function selectAllVisible(yes) {
+      const items = state.items[state.tab] || [];
+      const filter = state.filter.toLowerCase().trim();
+      const visible = filter ? items.filter((i) => (i.name || "").toLowerCase().includes(filter)) : items;
+      const sel = state.selected[state.tab];
+      if (yes) visible.forEach((i) => sel.add(i.id));
+      else visible.forEach((i) => sel.delete(i.id));
+      renderTabs();
+      renderPicker();
+    }
+
+    // ─── Import + job streaming ────────────────────────────────────────
+    async function runImport() {
+      const flowIds = Array.from(state.selected.flows);
+      const templateIds = Array.from(state.selected.templates);
+      const campaignIds = Array.from(state.selected.campaigns);
+      if (flowIds.length + templateIds.length + campaignIds.length === 0) return;
+      const r = await fetch("/api/r/stores/" + encodeURIComponent(state.store.id) + "/import", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ flowIds, templateIds, campaignIds }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        alert(data.error || ("Import failed: " + r.status));
+        return;
+      }
+      // Refresh the sidebar so the new job appears immediately.
+      if (typeof loadJobs === "function") loadJobs();
+      openJob(data.jobId);
+    }
+
+    async function openJob(jobId) {
+      state.view = "job";
+      state.jobId = jobId;
+      state.jobEvents = [];
+      state.jobStatus = "running";
+      setHash("job", jobId);
+
+      $("container").innerHTML =
+        '<div class="breadcrumb">' +
+          '<a onclick="renderStoresView()">← Your stores</a>' +
+          (state.store ? '<span class="sep">/</span><a onclick="openStore(\\'' + escapeHtml(state.store.id) + '\\')">' + escapeHtml(state.store.name) + '</a>' : '') +
+          '<span class="sep">/</span>' +
+          '<span>Import</span>' +
+        '</div>' +
+        '<div class="progress-card">' +
+          '<div class="progress-status">' +
+            '<span class="status-dot running" id="status-dot"></span>' +
+            '<span class="label" id="status-label">Importing…</span>' +
+          '</div>' +
+          '<div class="progress-meta" id="status-meta">Job ' + escapeHtml(jobId) + '</div>' +
+        '</div>' +
+        '<div class="log" id="log"></div>';
+
+      // Stream the NDJSON.
+      const ctrl = new AbortController();
+      state.activeStream = ctrl;
+      try {
+        const resp = await fetch("/api/r/jobs/" + encodeURIComponent(jobId) + "/stream", {
+          credentials: "same-origin",
+          signal: ctrl.signal,
+        });
+        if (!resp.ok || !resp.body) {
+          appendLog({ kind: "error", text: "Stream failed: " + resp.status }, "err");
+          return;
+        }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split("\\n");
+          buf = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try { handleStreamEvent(JSON.parse(line)); }
+            catch (_) { /* ignore parse errors */ }
+          }
+        }
+        // Server ended the stream — job is terminal.
+        finishJob();
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+        appendLog({ kind: "error", text: String(e?.message || e) }, "err");
+      }
+    }
+
+    function handleStreamEvent(ev) {
+      if (ev.kind === "heartbeat") return;
+      // Backend appendEvent destructures { kind, severity, ...payload } —
+      // so over the wire we get { seq, at, kind, severity, payload: { ... } }.
+      // Unwrap so the rest of this function can read flat fields the way
+      // admin/mock-stream.js does it.
+      const p = ev.payload || {};
+      const flat = { ...ev, ...p };
+
+      // Pause: import is waiting on a user choice (trigger picker etc).
+      if (flat.kind === "needs_input") {
+        // payload.input is the PendingInput; spread it so openNeedsInput
+        // can read q.question / q.type / q.options directly.
+        const input = p.input || {};
+        openNeedsInput({ ...flat, ...input });
+        return;
+      }
+
+      state.jobEvents.push(flat);
+      // Best-effort classification for log coloring.
+      const text = flat.text || flat.label || flat.message || (flat.kind === "exported" ? "exported: " + (flat.name || flat.id)
+                  : flat.kind === "flow_imported" ? "flow imported: " + (flat.name || flat.id)
+                  : flat.kind === "fail" ? "failed: " + (flat.name || flat.id) + " — " + (flat.error || "")
+                  : flat.kind === "done" ? "done"
+                  : flat.kind === "summary" ? JSON.stringify(flat)
+                  : flat.kind);
+      const cls = flat.severity === "error" || flat.kind === "fail" || flat.kind === "error" ? "err"
+                : flat.severity === "warning" || flat.kind === "warn" ? "warn"
+                : flat.kind === "step" ? "step"
+                : flat.severity === "success" ? "success"
+                : "info";
+      appendLog({ text }, cls);
+
+      if (flat.kind === "done") {
+        state.jobStatus = "completed";
+        $("status-dot").className = "status-dot completed";
+        $("status-label").textContent = "Done";
+      }
+    }
+
+    function appendLog(ev, cls) {
+      const log = $("log");
+      if (!log) return;
+      const div = document.createElement("div");
+      div.className = "line " + (cls || "info");
+      div.textContent = ev.text || "";
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function finishJob() {
+      if (state.jobStatus !== "failed" && state.jobStatus !== "completed") {
+        state.jobStatus = "completed";
+      }
+      const dot = $("status-dot");
+      const label = $("status-label");
+      if (dot && label) {
+        dot.className = "status-dot " + (state.jobStatus === "failed" ? "failed" : "completed");
+        label.textContent = state.jobStatus === "failed" ? "Failed" : "Done";
+      }
+    }
+
+    // ─── Needs-input modal ─────────────────────────────────────────────
+    // Mirrors admin/components/needs-input.jsx UX: header, item context,
+    // prominent question, italic clarifying context, type-specific
+    // input. Reads the prompt from ev.input (the event nests the
+    // PendingInput object — common bug if you read fields off ev directly).
+    let currentInputId = null;
+    function openNeedsInput(ev) {
+      const q = ev.input || ev; // backwards-compat with flat shape too
+      currentInputId = q.id;
+      // Item context line: "While importing <itemLabel>"
+      const meta = q.itemLabel || q.itemName
+        ? 'While importing <span style="font-family:Instrument Serif,serif;font-size:14px;color:#e6edf3">' + escapeHtml(q.itemLabel || q.itemName) + '</span>'
+        : "";
+      $("ni-meta").innerHTML = meta;
+      $("ni-question").textContent = q.question || "Input needed";
+      if (q.context) {
+        $("ni-context").textContent = q.context;
+        $("ni-context").style.display = "block";
+      } else {
+        $("ni-context").style.display = "none";
+      }
+      $("ni-err").textContent = "";
+
+      // Determine input type. If no explicit type but options[] present,
+      // assume choice (mirrors admin behavior).
+      const type = q.type || ((q.options && q.options.length) ? "choice" : "text");
+      const wrap = $("ni-input-wrap");
+      wrap.innerHTML = "";
+
+      if (type === "boolean") {
+        // Side-by-side Yes/No buttons that immediately submit the answer.
+        const trueLabel = escapeHtml(q.trueLabel || "Yes");
+        const falseLabel = escapeHtml(q.falseLabel || "No");
+        wrap.innerHTML =
+          '<div style="display:flex;gap:8px">' +
+            '<button onclick="submitBoolNeedsInput(true)" style="flex:1;padding:10px;background:#1f6feb;color:white;border:0;border-radius:4px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer">' + trueLabel + '</button>' +
+            '<button onclick="submitBoolNeedsInput(false)" style="flex:1;padding:10px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:4px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer">' + falseLabel + '</button>' +
+          '</div>';
+        $("ni-apply-all-wrap").style.display = q.hideApplyAll ? "none" : "flex";
+      } else if (type === "choice" && Array.isArray(q.options) && q.options.length) {
+        // Vertical list of clickable buttons. Click submits immediately.
+        const overflow = q.options.length > 8 ? "max-height:360px;overflow-y:auto;padding-right:4px;" : "";
+        wrap.innerHTML =
+          '<div style="display:flex;flex-direction:column;gap:6px;' + overflow + '">' +
+            q.options.map((o, i) => {
+              const v = escapeHtml(String(o.value));
+              const label = escapeHtml(String(o.label));
+              return '<button onclick="submitChoiceNeedsInput(' + i + ')" style="text-align:left;padding:9px 12px;background:#010409;border:1px solid #30363d;border-radius:4px;font-size:12px;color:#e6edf3;cursor:pointer;display:flex;align-items:baseline;gap:12px;font-family:inherit" onmouseover="this.style.borderColor=\\'#58a6ff\\'" onmouseout="this.style.borderColor=\\'#30363d\\'">' +
+                '<span style="color:#58a6ff;font-family:SF Mono,Monaco,Consolas,monospace;font-size:11px">' + v + '</span>' +
+                '<span style="color:#8b949e">' + label + '</span>' +
+              '</button>';
+            }).join("") +
+          '</div>';
+        // Cache options for submitChoiceNeedsInput
+        currentInputOptions = q.options;
+        $("ni-apply-all-wrap").style.display = q.hideApplyAll ? "none" : "flex";
+      } else {
+        // Text input — multiline textarea if the default contains \\n.
+        const def = q.default || "";
+        const multiline = def.indexOf("\\n") >= 0;
+        const inputHtml = multiline
+          ? '<textarea id="ni-text" rows="4" style="flex:1;background:#010409;border:1px solid #30363d;color:#e6edf3;padding:8px 10px;border-radius:4px;font-size:13px;font-family:SF Mono,Monaco,Consolas,monospace;resize:vertical">' + escapeHtml(def) + '</textarea>'
+          : '<input type="text" id="ni-text" value="' + escapeHtml(def) + '" placeholder="' + escapeHtml(q.placeholder || "Type your answer…") + '" autocomplete="off" style="flex:1;background:#010409;border:1px solid #30363d;color:#e6edf3;padding:8px 10px;border-radius:4px;font-size:13px;font-family:inherit" />';
+        wrap.innerHTML =
+          '<div style="display:flex;gap:8px;align-items:flex-start">' +
+            inputHtml +
+            '<button onclick="submitTextNeedsInput()" style="padding:8px 14px;background:#1f6feb;color:white;border:0;border-radius:4px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer">Submit</button>' +
+          '</div>';
+        $("ni-apply-all-wrap").style.display = q.hideApplyAll ? "none" : "flex";
+      }
+
+      $("ni-scrim").classList.add("open");
+      const first = wrap.querySelector("input,textarea,button");
+      if (first) first.focus();
+    }
+
+    let currentInputOptions = [];
+
+    async function submitNeedsInputAnswer(answer) {
+      if (!currentInputId || !state.jobId) return;
+      $("ni-err").textContent = "";
+      try {
+        const r = await fetch("/api/r/jobs/" + encodeURIComponent(state.jobId) + "/inputs", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ inputId: currentInputId, answer }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          $("ni-err").textContent = data.error || ("Failed (" + r.status + ")");
+          return;
+        }
+        closeNeedsInput();
+      } catch (e) {
+        $("ni-err").textContent = String(e.message || e);
+      }
+    }
+
+    function submitBoolNeedsInput(val) {
+      submitNeedsInputAnswer(val ? "true" : "false");
+    }
+    function submitChoiceNeedsInput(idx) {
+      const opt = currentInputOptions[idx];
+      if (!opt) return;
+      submitNeedsInputAnswer(String(opt.value));
+    }
+    function submitTextNeedsInput() {
+      const el = $("ni-text");
+      if (!el) return;
+      const v = String(el.value || "").trim();
+      if (!v) return;
+      submitNeedsInputAnswer(v);
+    }
+    function skipNeedsInput() {
+      // Sentinel string the pipeline interprets as "drop this item and
+      // continue with the next." Same as admin's skipNeedsInput.
+      submitNeedsInputAnswer("__skip__");
+    }
+
+    function closeNeedsInput() {
+      $("ni-scrim").classList.remove("open");
+      currentInputId = null;
+      currentInputOptions = [];
+    }
+
+    // ─── Modal (Add Store) ──────────────────────────────────────────────
+    function openModal() {
+      $("scrim").classList.add("open");
+      $("err").textContent = "";
+      $("f-name").focus();
+    }
+    function closeModal() {
+      $("scrim").classList.remove("open");
+      ["f-name","f-klav","f-jwt"].forEach((id) => { $(id).value = ""; });
+    }
+
+    async function saveStore() {
+      const body = {
+        name: $("f-name").value,
+        klaviyoKey: $("f-klav").value,
+        redoJwt: $("f-jwt").value,
+      };
+      $("save").disabled = true;
+      $("err").textContent = "";
+      try {
+        const r = await fetch("/api/r/stores", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          $("err").textContent = data.error || ("Failed (" + r.status + ")");
+          return;
+        }
+        closeModal();
+        await renderStoresView();
+      } catch (e) {
+        $("err").textContent = String(e.message || e);
+      } finally {
+        $("save").disabled = false;
+      }
+    }
+
+    // ─── Wire up + boot ────────────────────────────────────────────────
+    $("cancel").onclick = closeModal;
+    $("save").onclick = saveStore;
+    $("scrim").onclick = (e) => { if (e.target === $("scrim")) closeModal(); };
+    $("ni-skip").onclick = skipNeedsInput;
+    // Enter inside the needs-input modal submits the text input (the only
+    // type that doesn't already submit-on-click). Boolean + choice both
+    // submit immediately on button click.
+    $("ni-scrim").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && $("ni-scrim").classList.contains("open")) {
+        if ($("ni-text")) {
+          e.preventDefault();
+          submitTextNeedsInput();
+        }
+      }
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && $("scrim").classList.contains("open")) closeModal();
+      // Intentionally NOT closing the needs-input modal on Escape —
+      // the import is paused waiting for an answer.
+    });
+    window.addEventListener("hashchange", () => { routeFromHash(); });
+
+    window.openModal = openModal;
+    window.openStore = openStore;
+    window.openJob = openJob;
+    window.renderStoresView = renderStoresView;
+    window.runImport = runImport;
+    window.switchTab = switchTab;
+    window.toggleItem = toggleItem;
+    window.selectAllVisible = selectAllVisible;
+    window.submitBoolNeedsInput = submitBoolNeedsInput;
+    window.submitChoiceNeedsInput = submitChoiceNeedsInput;
+    window.submitTextNeedsInput = submitTextNeedsInput;
+    window.skipNeedsInput = skipNeedsInput;
+
+    // ─── Jobs sidebar ──────────────────────────────────────────────────
+    // Always-visible right rail listing all reviewer jobs with their
+    // imported items + a note textarea per item. Notes write to the
+    // same jobs.notes column admin's bundle download reads from.
+    const jobsState = {
+      jobs: [],
+      expanded: new Set(), // job ids currently expanded
+      pollTimer: null,
+    };
+
+    async function loadJobs() {
+      try {
+        const r = await fetch("/api/r/jobs", { credentials: "same-origin" });
+        if (!r.ok) return;
+        const { jobs } = await r.json();
+        // Sort newest first.
+        jobsState.jobs = jobs.sort((a, b) =>
+          (b.createdAt || "").localeCompare(a.createdAt || ""),
+        );
+        renderJobsPanel();
+      } catch (_) { /* swallow */ }
+    }
+
+    function renderJobsPanel() {
+      const jobs = jobsState.jobs;
+      $("jobs-total").textContent = jobs.length + " total";
+      if (jobs.length === 0) {
+        $("jobs-list").innerHTML = '<div class="jobs-empty">No jobs yet.<br>Pick items from a store and hit Import.</div>';
+        return;
+      }
+      $("jobs-list").innerHTML = jobs.map(renderJobCard).join("");
+    }
+
+    function renderJobCard(j) {
+      const isExpanded = jobsState.expanded.has(j.id);
+      const dot = j.status === "running" ? "running"
+                : j.status === "awaiting_input" ? "awaiting_input"
+                : j.status === "completed" ? "completed"
+                : j.status === "partial" ? "partial"
+                : j.status === "failed" ? "failed"
+                : "completed";
+      const when = relativeTime(j.createdAt);
+      const itemCount = (j.items || []).length;
+      const noteCount = (j.items || []).filter((it) => it.note).length;
+      return (
+        '<div class="job-card" onclick="toggleJobExpand(\\'' + j.id + '\\')">' +
+          '<div class="row1">' +
+            '<span class="dot ' + dot + '"></span>' +
+            '<span class="store-name">' + escapeHtml(j.storeName || "—") + '</span>' +
+            '<span class="when">' + when + '</span>' +
+          '</div>' +
+          '<div class="stats">' +
+            escapeHtml(j.status) + ' · ' + itemCount + ' item' + (itemCount === 1 ? '' : 's') +
+            (noteCount > 0 ? ' · <span style="color:#3fb950">' + noteCount + ' noted</span>' : '') +
+          '</div>' +
+        '</div>' +
+        (isExpanded ? renderJobItems(j) : '')
+      );
+    }
+
+    function renderJobItems(j) {
+      const items = j.items || [];
+      if (items.length === 0) {
+        return '<div class="job-items"><div style="font-size:11px;color:#6e7681;padding:4px 0">No items imported yet.</div></div>';
+      }
+      return '<div class="job-items">' + items.map((it) => {
+        const stateLabel = escapeHtml(it.state);
+        const author = it.noteAuthor ? '<span style="color:#6e7681">by ' + escapeHtml(it.noteAuthor) + '</span>' : '';
+        return (
+          '<div class="job-item">' +
+            '<div class="head">' +
+              '<span class="kind ' + escapeHtml(it.type) + '">' + escapeHtml(it.type) + '</span>' +
+              '<span class="name">' + escapeHtml(it.name) + '</span>' +
+              '<span class="state ' + escapeHtml(it.state) + '">' + stateLabel + '</span>' +
+            '</div>' +
+            '<textarea placeholder="Notes (visible to admin)…" data-job="' + escapeHtml(j.id) + '" data-item="' + escapeHtml(it.id) + '">' + escapeHtml(it.note || "") + '</textarea>' +
+            '<div class="note-status" id="note-status-' + escapeHtml(j.id + '-' + it.id) + '">' + author + '</div>' +
+          '</div>'
+        );
+      }).join("") + '</div>';
+    }
+
+    function relativeTime(iso) {
+      if (!iso) return "";
+      const ms = Date.now() - new Date(iso).getTime();
+      if (ms < 60_000) return "just now";
+      const m = Math.floor(ms / 60_000);
+      if (m < 60) return m + "m";
+      const h = Math.floor(m / 60);
+      if (h < 24) return h + "h";
+      const d = Math.floor(h / 24);
+      return d + "d";
+    }
+
+    function toggleJobExpand(jobId) {
+      if (jobsState.expanded.has(jobId)) jobsState.expanded.delete(jobId);
+      else jobsState.expanded.add(jobId);
+      renderJobsPanel();
+    }
+
+    // Debounced note save — write to /api/r/jobs/:id/notes after 600ms
+    // of idle. Status indicator shows saving/saved transitions.
+    const noteSaveTimers = new Map();
+    function onJobNoteInput(textarea) {
+      const jobId = textarea.dataset.job;
+      const itemId = textarea.dataset.item;
+      const note = textarea.value;
+      const key = jobId + ":" + itemId;
+      const statusEl = $("note-status-" + jobId + "-" + itemId);
+      if (statusEl) statusEl.innerHTML = '<span class="saving">saving…</span>';
+
+      clearTimeout(noteSaveTimers.get(key));
+      noteSaveTimers.set(key, setTimeout(async () => {
+        try {
+          const r = await fetch(
+            "/api/r/jobs/" + encodeURIComponent(jobId) + "/notes",
+            {
+              method: "POST",
+              credentials: "same-origin",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ itemId, note }),
+            },
+          );
+          if (r.ok) {
+            if (statusEl) statusEl.innerHTML = '<span class="saved">✓ saved</span>';
+            // Refresh cached jobs so the count badge updates.
+            const job = jobsState.jobs.find((j) => j.id === jobId);
+            if (job) {
+              const it = (job.items || []).find((x) => x.id === itemId);
+              if (it) it.note = note || null;
+            }
+          } else {
+            if (statusEl) statusEl.innerHTML = '<span style="color:#f78166">save failed</span>';
+          }
+        } catch (e) {
+          if (statusEl) statusEl.innerHTML = '<span style="color:#f78166">save failed</span>';
+        }
+      }, 600));
+    }
+
+    // Delegate textarea input → save (one listener covers all current and
+    // future job-item textareas).
+    $("jobs-list").addEventListener("input", (e) => {
+      if (e.target?.tagName === "TEXTAREA" && e.target.dataset?.job) {
+        onJobNoteInput(e.target);
+      }
+    });
+
+    // Poll jobs list every 8s so new imports + status transitions show up
+    // without a manual refresh. Cheap query — reviewer typically has few jobs.
+    function startJobsPolling() {
+      if (jobsState.pollTimer) clearInterval(jobsState.pollTimer);
+      jobsState.pollTimer = setInterval(loadJobs, 8000);
+    }
+
+    window.toggleJobExpand = toggleJobExpand;
+
+    loadMe().then((me) => {
+      if (me) {
+        routeFromHash();
+        loadJobs();
+        startJobsPolling();
+      }
+    });
+  </script>
+</body>
+</html>`;
+
+// GET /dashboard — Phase 2 reviewer dashboard. Stores list + Add Store modal.
+function handleReviewerDashboard(res: ServerResponse): void {
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  res.end(REVIEWER_DASHBOARD_HTML);
+}
+
+// Surface dispatch. Returns true if the request was handled (response
+// already sent); false if it should fall through to the admin routes.
+// On the public_review surface, returns true for ANY request — admin
+// endpoints get a 404 instead of falling through. On admin surface,
+// returns false so existing routing runs unchanged.
+async function dispatchReviewerSurface(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<boolean> {
+  if (MIME_SURFACE !== "public_review") return false;
+
+  const rawUrl = req.url ?? "";
+  const path = rawUrl.split("?")[0];
+
+  // GET /r/<token>/ — handshake. Token is the URL segment after /r/.
+  const handshake = path.match(/^\/r\/([^/]+)\/?$/);
+  if (req.method === "GET" && handshake) {
+    await handleReviewerHandshake(req, res, decodeURIComponent(handshake[1]));
+    return true;
+  }
+  if (req.method === "GET" && (path === "/dashboard" || path === "/dashboard/")) {
+    handleReviewerDashboard(res);
+    return true;
+  }
+  if (req.method === "GET" && path === "/api/r/me") {
+    await handleReviewerMe(req, res);
+    return true;
+  }
+  // ─── Reviewer-scoped store CRUD ──────────────────────────────────────
+  if (req.method === "GET" && (path === "/api/r/stores" || rawUrl.startsWith("/api/r/stores?"))) {
+    await handleReviewerStoresList(req, res);
+    return true;
+  }
+  if (req.method === "POST" && path === "/api/r/stores") {
+    await handleReviewerStoreCreate(req, res);
+    return true;
+  }
+  const storePath = path.match(/^\/api\/r\/stores\/([^/?]+)$/);
+  if (storePath) {
+    const sid = decodeURIComponent(storePath[1]);
+    if (req.method === "GET") {
+      await handleReviewerStoreGet(req, res, sid);
+      return true;
+    }
+    if (req.method === "PATCH") {
+      await handleReviewerStoreUpdate(req, res, sid);
+      return true;
+    }
+    if (req.method === "DELETE") {
+      await handleReviewerStoreDelete(req, res, sid);
+      return true;
+    }
+  }
+  // ─── Phase 3: per-store flows/templates/campaigns list + import ─────
+  const storeFlowsPath = path.match(/^\/api\/r\/stores\/([^/?]+)\/flows$/);
+  if (storeFlowsPath && req.method === "POST") {
+    await handleReviewerStoreFlowsList(req, res, decodeURIComponent(storeFlowsPath[1]));
+    return true;
+  }
+  const storeTemplatesPath = path.match(/^\/api\/r\/stores\/([^/?]+)\/templates$/);
+  if (storeTemplatesPath && req.method === "POST") {
+    await handleReviewerStoreTemplatesList(req, res, decodeURIComponent(storeTemplatesPath[1]));
+    return true;
+  }
+  const storeCampaignsPath = path.match(/^\/api\/r\/stores\/([^/?]+)\/campaigns$/);
+  if (storeCampaignsPath && req.method === "POST") {
+    await handleReviewerStoreCampaignsList(req, res, decodeURIComponent(storeCampaignsPath[1]));
+    return true;
+  }
+  const storeImportPath = path.match(/^\/api\/r\/stores\/([^/?]+)\/import$/);
+  if (storeImportPath && req.method === "POST") {
+    await handleReviewerImport(req, res, decodeURIComponent(storeImportPath[1]));
+    return true;
+  }
+  // ─── Phase 3: jobs list + detail + NDJSON stream ────────────────────
+  if (req.method === "GET" && (path === "/api/r/jobs" || rawUrl.startsWith("/api/r/jobs?"))) {
+    await handleReviewerJobsList(req, res);
+    return true;
+  }
+  const jobPath = path.match(/^\/api\/r\/jobs\/([^/?]+)(\/stream|\/inputs|\/notes)?$/);
+  if (jobPath) {
+    const jid = decodeURIComponent(jobPath[1]);
+    const sub = jobPath[2];
+    if (req.method === "GET" && !sub) {
+      await handleReviewerJobGet(req, res, jid);
+      return true;
+    }
+    if (req.method === "GET" && sub === "/stream") {
+      await handleReviewerJobStream(req, res, jid);
+      return true;
+    }
+    if (req.method === "POST" && sub === "/inputs") {
+      await handleReviewerJobInput(req, res, jid);
+      return true;
+    }
+    if (req.method === "POST" && sub === "/notes") {
+      await handleReviewerJobNotes(req, res, jid);
+      return true;
+    }
+  }
+  if (req.method === "GET" && path === "/") {
+    // Public surface is open access — landing redirects straight to the
+    // dashboard. No personalized link needed.
+    res.writeHead(302, { location: "/dashboard" });
+    res.end();
+    return true;
+  }
+
+  // Anything else on the public surface 404s — admin/assist/import
+  // routes physically don't get evaluated here.
+  res.writeHead(404, { "content-type": "text/plain" });
+  res.end("not found");
+  return true;
 }
 
 // ─── HTML ──────────────────────────────────────────────────────────────────
@@ -3160,6 +5393,12 @@ function tryServeStatic(
 
 const server = createServer(async (req, res) => {
   try {
+    // Public-review surface short-circuits here — admin/assist/import
+    // routes physically don't get evaluated on that deploy. Runs BEFORE
+    // checkBasicAuth so the reviewer URL token can't be accidentally
+    // gated by admin-side basic-auth env vars. See
+    // plans/2026-05-26-reviewer-dashboard.md.
+    if (await dispatchReviewerSurface(req, res)) return;
     if (!checkBasicAuth(req, res)) return;
     // Strip query string for path-only matches below; handlers that care
     // about the query (like `/api/jobs?storeId=`) re-parse from req.url.
@@ -3373,6 +5612,7 @@ async function startup() {
   server.listen(PORT, HOST, () => {
     const displayHost = HOST === "0.0.0.0" ? "localhost" : HOST;
     console.log(`Migration UI: http://${displayHost}:${PORT}`);
+    console.log(`(surface: ${MIME_SURFACE})`);
     if (IS_HOSTED_DEPLOY) console.log("(hosted deploy — import disabled)");
     if (BASIC_AUTH_ENABLED) console.log("(basic auth enabled)");
     console.log(`(ctrl-c to stop)`);

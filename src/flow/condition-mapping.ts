@@ -30,6 +30,36 @@ const TIMEFRAME_UNITS: Record<string, string> = {
   month: "month", months: "month",
 };
 
+// Klaviyo numeric operator → Redo NumericCompareOperator (segment-where-
+// condition.ts: eq/gt/lt/gte/lte/neq). Used for the value-measurement
+// whereCondition (e.g. "cart subtotal greater-than 74.99 → gt").
+const KLAVIYO_NUMERIC_OP_TO_REDO: Record<string, string> = {
+  "equals": "eq",
+  "not-equals": "neq",
+  "greater-than": "gt",
+  "greater-than-or-equal": "gte",
+  "less-than": "lt",
+  "less-than-or-equal": "lte",
+};
+
+// Redo activity → the NUMERIC whereCondition dimension that carries the
+// event's monetary value, for translating Klaviyo "Value" (sum_value)
+// measurements. Confirmed against redoapp segment-data-structures.ts:
+//   - added-product-to-cart → "cart_subtotal" (ProductAddedToCartSegmentFields)
+//   - order-placed          → "order_total"   (OrderPlacedSegmentFields)
+// checkout-started / active-on-site / viewed-product expose no monetary
+// field, so a value split on those can't be mapped — caller warns.
+const ACTIVITY_VALUE_DIMENSION: Record<string, string> = {
+  "added-product-to-cart": "cart_subtotal",
+  "order-placed": "order_total",
+};
+
+// Klaviyo `measurement` selectors that mean "sum of the $value property"
+// rather than a count of events. Anything here routes through the value
+// path (count: at_least_once + a numeric whereCondition); `count` (or
+// absent) keeps the existing count-threshold behavior.
+const VALUE_MEASUREMENTS = new Set(["sum_value", "value", "sum"]);
+
 // Translate Klaviyo's {operator, value} into Redo's ActivityCount shape.
 // Enum values from segment-types.ts:198 (ActivityCountType).
 function translateCount(
@@ -124,11 +154,66 @@ function translateProfileMetricCondition(
   }
   const operator = c.measurement_filter?.operator ?? "greater-than";
   const value = Number(c.measurement_filter?.value ?? 0);
+  const measurement = String(c.measurement ?? "count").toLowerCase();
+  const timeframe = translateTimeframe(c.timeframe_filter, warnings, actionId);
+
+  // Value-measurement path: Klaviyo "Added to Cart VALUE > 74.99" is a
+  // dollar threshold on the event's value property — NOT an event count.
+  // Routing it through translateCount would emit "added to cart > 74
+  // TIMES" (Math.floor(74.99)). Instead emit count: at_least_once + a
+  // numeric whereCondition on the activity's monetary dimension.
+  if (VALUE_MEASUREMENTS.has(measurement)) {
+    const dimension = ACTIVITY_VALUE_DIMENSION[activityType];
+    const redoOp = KLAVIYO_NUMERIC_OP_TO_REDO[operator];
+    if (!dimension || !redoOp) {
+      warnings.push({
+        kind: "requires-review",
+        actionId,
+        message: `condition on "${metric.name}" value (${operator} ${value}) — no Redo value dimension for activity "${activityType}"; manual config required`,
+      });
+      return null;
+    }
+    // Semantic note: Klaviyo's "Value" measurement is a SUM of the value
+    // property across the window; Redo's whereCondition is per-event
+    // (∃ an event whose value crosses the threshold). They coincide for
+    // the common single-event intent ("a cart/order worth > $X") and this
+    // matches the hand-built Redo equivalent — flagged for verification.
+    warnings.push({
+      kind: "degraded-mapping",
+      actionId,
+      message: `"${metric.name}" value measurement (${operator} ${value}) mapped to Redo activity where ${dimension} ${redoOp} ${value}. Klaviyo sums the value over the window; Redo matches per-event — verify the split in the Redo flow builder.`,
+    });
+    return {
+      type: "customer_activity",
+      activityType,
+      count: { type: "at_least_once" },
+      timeframe,
+      whereConditions: [
+        {
+          type: "numeric",
+          dimension,
+          comparison: { type: "numeric", operator: redoOp, value },
+        },
+      ],
+    };
+  }
+
+  // Unrecognized non-count measurement (e.g. "unique") — don't silently
+  // route a non-count value through the count path. Warn + skip.
+  if (measurement !== "count") {
+    warnings.push({
+      kind: "requires-review",
+      actionId,
+      message: `condition on "${metric.name}" uses measurement "${measurement}" which mime doesn't translate yet — manual config required`,
+    });
+    return null;
+  }
+
   return {
     type: "customer_activity",
     activityType,
     count: translateCount(operator, value),
-    timeframe: translateTimeframe(c.timeframe_filter, warnings, actionId),
+    timeframe,
     whereConditions: [],
   };
 }
@@ -148,7 +233,11 @@ function resolveTriggerField(
 ): string | null {
   const f = klaviyoField.toLowerCase();
   // "Name" = product name on Added to Cart / Viewed Product events.
-  if (f === "name") {
+  // "Items" = the cart's line items; an "added specific product" split keys
+  // on it. Redo's cart-abandonment trigger exposes the cart product name as
+  // `productInCartName` (a string), so both map there — the list-`contains`
+  // filter becomes a text_match `includes` on the product name.
+  if (f === "name" || f === "items") {
     if (
       schemaType === SchemaType.MARKETING_CART_ABANDONMENT ||
       schemaType === SchemaType.MARKETING_COMMENTSOLD_CART_ABANDONMENT
@@ -283,12 +372,167 @@ export function translateTriggerSplitExpression(
     };
   }
 
+  // List filter — Klaviyo "cart Items contains X" (added specific product).
+  // The redoField is a string (productInCartName), so a list-`contains`
+  // collapses to a text_match `includes` on the product name. Collect all
+  // values sharing field + operator (mirrors the string path).
+  if (filterType === "list") {
+    const LIST_OP_TO_TEXT_MATCH: Record<string, string> = {
+      "contains": "includes",
+      "not-contains": "notIncludes",
+    };
+    const op = LIST_OP_TO_TEXT_MATCH[opKey];
+    if (!op) {
+      warnings.push({
+        kind: "requires-review",
+        actionId: action.id,
+        message: `trigger-split list operator "${opKey}" not translatable`,
+      });
+      return null;
+    }
+    const matchValues: string[] = [];
+    for (const c of conditions) {
+      if (
+        c.type === "metric-property" &&
+        c.field === first.field &&
+        c.filter?.operator === opKey
+      ) {
+        matchValues.push(String(c.filter.value));
+      }
+    }
+    return {
+      dataSource: "trigger-data",
+      schemaBooleanExpression: {
+        type: "text_match",
+        field: redoField,
+        operator: op,
+        matchValues,
+      },
+    };
+  }
+
   warnings.push({
     kind: "requires-review",
     actionId: action.id,
     message: `trigger-split filter type "${filterType}" not supported`,
   });
   return null;
+}
+
+// ---------- Klaviyo profile-property: phone-country-code → Redo country ----------
+//
+// Klaviyo's `phone-country-code-in` / `-not-in` operator on the
+// `phone_number` profile property filters by the phone number's country.
+// Redo has a native `country` customer-attribute dimension (confirmed in
+// redoapp `segment-types.ts` CustomerCharacteristicType.COUNTRY = "country",
+// SQL path `location_country_code`, token comparison with ISO-code values).
+// Shape (from redoapp's own segment test):
+//   { type: "customer_attribute",
+//     whereCondition: { type: "token", dimension: "country",
+//       comparison: { type: "token", operator: "ANY"|"NONE", values: ["US","CA"] } } }
+//
+// SEMANTIC NOTE: Klaviyo keys on the PHONE NUMBER's country code; Redo's
+// `country` dimension is the customer's PROFILE/location country. They
+// align for nearly all SMS audiences, and it's exactly what merchants
+// build by hand in Redo (Yes Homo's operator did this manually). It's a
+// profile-country approximation of a phone-country filter — flagged via
+// warning so the operator can verify. Redo has no phone-country-code
+// dimension (only `phone-number-area-code`, which is US area codes).
+const PHONE_COUNTRY_CODE_OPERATORS: Record<string, "ANY" | "NONE"> = {
+  "phone-country-code-in": "ANY",
+  "phone-country-code-not-in": "NONE",
+};
+
+function normalizeCountryCodes(raw: unknown): string[] {
+  // Klaviyo emits the value as an array (["US","CA"]) or a comma-joined
+  // string ("US,CA"). Normalize to uppercased ISO-2 codes.
+  const parts = Array.isArray(raw)
+    ? raw
+    : String(raw ?? "").split(",");
+  return parts
+    .map((p) => String(p).trim().toUpperCase())
+    .filter((p) => /^[A-Z]{2}$/.test(p));
+}
+
+function translatePhoneCountryCodeCondition(
+  c: any,
+  warnings: ParseWarning[],
+  actionId: string,
+): unknown | null {
+  const op = c.filter?.operator;
+  const redoOperator = op ? PHONE_COUNTRY_CODE_OPERATORS[op] : undefined;
+  if (!redoOperator) return null;
+
+  const values = normalizeCountryCodes(c.filter?.value);
+  if (values.length === 0) return null;
+
+  warnings.push({
+    kind: "degraded-mapping",
+    actionId,
+    message: `phone-country-code condition (${op} ${values.join(",")}) mapped to Redo's profile "country" dimension. Klaviyo keys on the phone number's country code; Redo's country is the customer's profile/location country — verify the split in the Redo flow builder.`,
+  });
+
+  return {
+    type: "customer_attribute",
+    whereCondition: {
+      type: "token",
+      dimension: "country",
+      comparison: {
+        type: "token",
+        operator: redoOperator,
+        values,
+      },
+    },
+  };
+}
+
+// ---------- Klaviyo profile-property: $viewed_items → Redo viewed-product ----------
+//
+// Klaviyo's `properties['$viewed_items']` is a profile list of recently
+// viewed products/collections. A `contains "X"` branch ("recently viewed
+// the X collection") has no profile-attribute equivalent in Redo, but it
+// maps cleanly to a customer-ACTIVITY condition: "viewed a product whose
+// collection_name includes X". Confirmed against redoapp
+// segment-data-structures.ts (ProductViewedSegmentFields.COLLECTION_NAME =
+// "collection_name", dataType TOKEN_LIST) + segment-where-condition.ts
+// (ListCompareOperators any/none, ComparisonType.LIST).
+//
+// SEMANTIC NOTE: Klaviyo's $viewed_items is a profile property snapshot;
+// Redo's viewed-product is event history (all-time here). They align for
+// the common "has viewed X" intent — flagged for review.
+const VIEWED_ITEMS_RE = /\$viewed_items/i;
+
+function translateViewedItemsCondition(
+  c: any,
+  warnings: ParseWarning[],
+  actionId: string,
+): unknown | null {
+  if (!VIEWED_ITEMS_RE.test(String(c.property ?? ""))) return null;
+  const op = c.filter?.operator;
+  const listOp = op === "contains" ? "any" : op === "not-contains" ? "none" : null;
+  if (!listOp) return null;
+  const value = String(c.filter?.value ?? "").trim();
+  if (!value) return null;
+
+  warnings.push({
+    kind: "degraded-mapping",
+    actionId,
+    message: `$viewed_items ${op} "${value}" mapped to Redo activity "viewed a product in collection ${value}" (collection_name ${listOp}). Klaviyo's $viewed_items is a profile snapshot; Redo matches viewed-product event history — verify the branch in the Redo flow builder.`,
+  });
+
+  return {
+    type: "customer_activity",
+    activityType: "viewed-product",
+    count: { type: "at_least_once" },
+    timeframe: { type: "all-time" },
+    whereConditions: [
+      {
+        type: "token_list",
+        dimension: "collection_name",
+        comparison: { type: "list", operator: listOp, values: [value] },
+      },
+    ],
+  };
 }
 
 // ---------- Klaviyo profile-property → Redo CustomerAttributeCondition ----------
@@ -422,9 +666,22 @@ export function translateConditionalSplitExpression(
         if (rc) redoConditions.push(rc);
         break;
       }
-      case "profile-property":
-        profilePropertyPlaceholder(kc, warnings, action.id);
+      case "profile-property": {
+        // Cleanly-mappable profile properties first; anything else falls
+        // back to the manual-config placeholder (still a precise warning).
+        const viewedItems = translateViewedItemsCondition(kc, warnings, action.id);
+        const phoneCountry = viewedItems
+          ? null
+          : translatePhoneCountryCodeCondition(kc, warnings, action.id);
+        if (viewedItems) {
+          redoConditions.push(viewedItems);
+        } else if (phoneCountry) {
+          redoConditions.push(phoneCountry);
+        } else {
+          profilePropertyPlaceholder(kc, warnings, action.id);
+        }
         break;
+      }
       case "profile-group-membership":
         profileGroupMembershipPlaceholder(kc, warnings, action.id);
         break;
@@ -444,5 +701,171 @@ export function translateConditionalSplitExpression(
   return {
     dataSource: "inline-segment",
     inlineSegment: { mode: "AND", conditions: redoConditions },
+  };
+}
+
+// ---------- Klaviyo flow-level `definition.profile_filter` → Redo skip ----------
+//
+// Klaviyo flows can carry a top-level `profile_filter` that says "ONLY run
+// this flow for profiles matching these conditions" (e.g. customers who
+// have placed 0 orders). The flow-action graph parser doesn't touch this
+// — it lives at `definition.profile_filter`, not on any action.
+//
+// Redo's equivalent: a SKIP condition on the trigger step
+// (`trigger.skipConditions[]`). Skip semantics are the LOGICAL INVERSE of
+// Klaviyo's include filter:
+//
+//   Klaviyo: "run if (g1) OR (g2)"      where each group is c1 AND c2 ...
+//   Redo:    "skip if NOT((g1) OR (g2))"
+//            = "skip if NOT(g1) AND NOT(g2)"     De Morgan
+//            = "skip if (NOT c1 OR NOT c2 OR ...) AND (NOT c1' OR ...)"
+//
+// V1 handles single-group profile-metric conditions fully (invert each
+// operator, mode flips from AND→OR). Other condition types
+// (profile-marketing-consent, profile-property, profile-group-membership)
+// warn-only because their inversion requires per-type logic the per-
+// action translator hasn't generalized to negation. Multi-group (OR'd
+// groups) warns and processes only the first group. Per memory
+// `feedback_flow_status_mapping`, imported flows land inactive regardless,
+// so an imperfect translation can't accidentally fire.
+
+const INVERT_KLAVIYO_OPERATOR: Record<string, string> = {
+  "equals": "not-equals",
+  "not-equals": "equals",
+  "greater-than": "less-than-or-equal",
+  "greater-than-or-equal": "less-than",
+  "less-than": "greater-than-or-equal",
+  "less-than-or-equal": "greater-than",
+};
+
+function invertKlaviyoCondition(c: any): any {
+  const op = c.measurement_filter?.operator;
+  if (!op || !(op in INVERT_KLAVIYO_OPERATOR)) return c;
+  return {
+    ...c,
+    measurement_filter: {
+      ...c.measurement_filter,
+      operator: INVERT_KLAVIYO_OPERATOR[op],
+    },
+  };
+}
+
+function translateKlaviyoCondition(
+  kc: any,
+  metrics: MetricLookup,
+  warnings: ParseWarning[],
+): unknown | null {
+  const inverted = invertKlaviyoCondition(kc);
+  switch (inverted.type) {
+    case "profile-metric":
+      return translateProfileMetricCondition(
+        inverted,
+        metrics,
+        warnings,
+        "flow-profile-filter",
+      );
+    case "profile-marketing-consent":
+    case "profile-property":
+    case "profile-group-membership":
+    case "profile-not-in-flow":
+      warnings.push({
+        kind: "requires-review",
+        message: `flow profile_filter condition type "${inverted.type}" not yet translated — manual config required in the Redo flow builder`,
+      });
+      return null;
+    default:
+      warnings.push({
+        kind: "requires-review",
+        message: `flow profile_filter condition type "${inverted.type}" not recognized — manual config required`,
+      });
+      return null;
+  }
+}
+
+export function translateFlowProfileFilter(
+  profileFilter: unknown,
+  metrics: MetricLookup,
+  warnings: ParseWarning[],
+): unknown | null {
+  const pf = profileFilter as any;
+  const groups = pf?.condition_groups ?? [];
+  if (groups.length === 0) return null;
+
+  // De Morgan from Klaviyo "include" to Redo "skip":
+  //
+  //   Klaviyo: include if G1 OR G2 OR ...   where each Gn is c1 AND c2 ...
+  //   Redo:    skip    if NOT(G1) AND NOT(G2) AND ...
+  //                    where NOT(Gn) = NOT c1 OR NOT c2 OR ...
+  //
+  // Redo's inline-segment supports a flat `mode: "AND"|"OR"` — not nested
+  // groups. So:
+  //
+  //  - Single group → emit one inline-segment with mode "OR" containing
+  //    each condition inverted (NOT of an AND-group).
+  //  - Multi-group where every group has exactly 1 condition → flatten
+  //    to one inline-segment with mode "AND" and each inverted condition.
+  //  - Multi-group with any multi-condition group → would need nested
+  //    AND-of-ORs which inline-segment can't express. Warn + process the
+  //    first group only.
+  //
+  // Per memory `feedback_flow_status_mapping`, imported flows land
+  // inactive — an imperfect filter still gets reviewed before going live.
+
+  const everyGroupHasOneCondition = groups.every(
+    (g: any) => (g.conditions ?? []).length === 1,
+  );
+
+  if (groups.length === 1) {
+    const klaviyoConditions = groups[0].conditions ?? [];
+    if (klaviyoConditions.length === 0) return null;
+    const redoConditions: unknown[] = [];
+    for (const kc of klaviyoConditions) {
+      const rc = translateKlaviyoCondition(kc, metrics, warnings);
+      if (rc) redoConditions.push(rc);
+    }
+    if (redoConditions.length === 0) return null;
+    return {
+      dataSource: "inline-segment",
+      inlineSegment: {
+        // De Morgan: AND inside Klaviyo include → OR for the inverted skip.
+        mode: "OR",
+        conditions: redoConditions,
+      },
+    };
+  }
+
+  if (everyGroupHasOneCondition) {
+    const redoConditions: unknown[] = [];
+    for (const g of groups) {
+      const kc = g.conditions[0];
+      const rc = translateKlaviyoCondition(kc, metrics, warnings);
+      if (rc) redoConditions.push(rc);
+    }
+    if (redoConditions.length === 0) return null;
+    return {
+      dataSource: "inline-segment",
+      inlineSegment: {
+        // De Morgan: OR across Klaviyo groups → AND for the inverted skip.
+        mode: "AND",
+        conditions: redoConditions,
+      },
+    };
+  }
+
+  // Multi-group with at least one multi-condition group — can't flatten.
+  warnings.push({
+    kind: "requires-review",
+    message: `flow profile_filter has ${groups.length} OR'd groups where at least one group has multiple AND'd conditions — V1 migrates only the first group; the rest need manual config in the Redo flow builder`,
+  });
+  const klaviyoConditions = groups[0].conditions ?? [];
+  const redoConditions: unknown[] = [];
+  for (const kc of klaviyoConditions) {
+    const rc = translateKlaviyoCondition(kc, metrics, warnings);
+    if (rc) redoConditions.push(rc);
+  }
+  if (redoConditions.length === 0) return null;
+  return {
+    dataSource: "inline-segment",
+    inlineSegment: { mode: "OR", conditions: redoConditions },
   };
 }

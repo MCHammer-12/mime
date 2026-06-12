@@ -393,6 +393,35 @@ export function setNote(
 }
 
 /**
+ * Refresh a single job's notes column from Postgres into the in-memory
+ * cache. Mime runs as multiple processes (admin Repl + public-review
+ * Repl) sharing one Postgres; notes written by one process aren't
+ * visible to the other until that process re-reads. Called from the
+ * admin's job-detail + bundle endpoints so reviewer-side notes show
+ * up without a full restart.
+ *
+ * Best-effort: swallows DB errors (caller still serves the stale
+ * in-memory notes) and is a no-op when DB is disabled.
+ */
+export async function refreshJobNotesFromDb(jobId: string): Promise<void> {
+  if (!isDbEnabled()) return;
+  const job = jobs.get(jobId);
+  if (!job) return;
+  try {
+    const r = await getPool().query(
+      `SELECT notes FROM jobs WHERE id = $1`,
+      [jobId],
+    );
+    const fresh = r.rows[0]?.notes;
+    if (fresh && typeof fresh === "object") {
+      job.notes = fresh as Record<string, string>;
+    }
+  } catch (err) {
+    console.warn("[jobs] refreshJobNotesFromDb failed:", err);
+  }
+}
+
+/**
  * Flip a note's resolved state without touching its text. Sets resolvedAt
  * to now (with the resolver's name) when `resolved` is true; drops both
  * fields when false. No-op if the item has no note.

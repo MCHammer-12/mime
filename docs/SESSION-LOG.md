@@ -1,5 +1,105 @@
 # Session Log
 
+## 2026-06-08 — Reviewer dashboard (Phases 1-4) + 5 production parser/RPC fixes
+
+**Context**
+Multi-day session building the public-facing reviewer dashboard end-to-end (deployed at `mime-redo-general.replit.app` on Michael's personal Replit plan, since the Redo workspace can't publish public deploys) plus diagnosing live bundles from SHOC and a Test reviewer. Twenty-one merged PRs. Phase 1 spec lived at `plans/2026-05-26-reviewer-dashboard.md`. The architecture is a separate process — same repo, same Postgres, `MIME_SURFACE=public_review` env var that strips admin/assist/import endpoints at boot.
+
+**Done — reviewer dashboard skeleton (Phases 1-4 + style + scope tweaks)**
+- **#88 Phase 1** — `MIME_SURFACE` env var + `dispatchReviewerSurface` runs before `checkBasicAuth`; admin routes physically don't get evaluated on public process. Migrations 010 (`reviewers`) + 011 (`stores.created_by_reviewer FK partial-indexed`). `/r/<token>/` handshake → HttpOnly cookie + redirect to `/dashboard`. Stub HTML.
+- **#94 Phase 2** — Reviewer-scoped store CRUD: `GET/POST/PATCH/DELETE /api/r/stores/:id?`. `listStoresForReviewer` / `getStoreForReviewer` / `deleteStoreForReviewer` all ownership-checked via `created_by_reviewer`. 404 (not 403) on mismatch so we don't leak existence. Dashboard: stores grid + Add Store modal.
+- **#95** — Restyle to admin design tokens. Instrument Serif headers, Inter body, `#0d1117 / #010409 / #21262d / #30363d / #FF4405` palette. "mime · *review* · Klaviyo → Redo" branding mirroring "Toby 2.0". Fonts via Google Fonts CDN (no `/fonts/` static dependency).
+- **#96 Phase 3** — Per-store flow picker + import pipeline. `POST /api/r/stores/:id/flows`, `POST /api/r/stores/:id/import`, `GET /api/r/jobs[/:id[/stream]]`. Hash-routed SPA (`#stores`, `#store=<id>`, `#job=<id>`). NDJSON stream consumption via `fetch` + `ReadableStream`. Reviewer never sees / sends raw Klaviyo key; server reads from store record.
+- **#97** — Add-store form down to 3 fields. Auto-derive `merchantSlug` (kebab from name, random suffix on collision), `storeId` (`decodeJwtAud` exported from import-rpc), `redoServerBase` (null → default).
+- **#98** — Crash fix: missing `</style>` close tag made browser parse entire `<body>` as inside CSS. Dashboard rendered as zero children. Found via 0-children DOM probe — single line insertion.
+- **#99** — Drop reviewer auth wall entirely. `requireReviewer` returns synthetic `PUBLIC_REVIEWER` ({id:"public", name:"Reviewer"}) when no cookie. `/` redirects to `/dashboard`. Sign-out button removed. Migration 012 seeds the "public" reviewers row so the FK is satisfiable. Cookie token still honored if present — kept the machinery for any future per-reviewer scoping.
+- **#100** — `needs_input` modal so paused jobs (font preflight, trigger picker, transactional routing) can be answered. New `POST /api/r/jobs/:id/inputs` mirror of admin `handleJobInput`.
+- **#101 Phase 3.5** — Templates + Campaigns tabs alongside Flows in store-detail. Per-kind list endpoints (`/templates`, `/campaigns`), per-kind `Set<string>` selection state, single Import button submits union across all three. Per-type meta + status badges. Campaigns capped 20 most-recent (proxy timeout rationale matches admin handler).
+- **#102** — Needs-input modal was reading `ev.question` / `ev.options` directly but events nest under `ev.input`. Rebuilt to mirror admin `needs-input.jsx` UX exactly: header with "job paused" tag, "While importing X" item context line, prominent question, italic context block, type-specific input (boolean side-by-side buttons / choice click-to-submit list / text input with Enter), "Apply to other items" checkbox, "Skip this item" footer button (`__skip__` sentinel).
+- **#103** — `appendEvent` destructures `{ kind, severity, ...payload }` so the wire shape is `{ seq, at, kind, severity, payload: {...} }`. Reviewer's `handleStreamEvent` was reading top-level — `ev.text` / `ev.input` all undefined. Modal rendered "Input needed" + empty text input even when the prompt was a boolean with explicit Yes/No labels. Fix: spread `ev.payload` into the event before reading, mirroring admin `mock-stream.js`'s `unwrapEvent`.
+- **#104 Phase 4** — Jobs sidebar (right 1/4, always visible) listing every reviewer-owned job. Per-job card: dot (running/awaiting_input/completed/failed/partial) + store name in Instrument Serif + relative timestamp + status + note count. Click expands → per-item rows with type pill + state badge + debounced-save note textarea. `POST /api/r/jobs/:id/notes` → `setNote(jobId, itemId, note, reviewer.name)` writes to the same `jobs.notes` JSONB column the admin's bundle download reads from. Polls every 8s.
+- **#105** — Job-card `.store` class collided with the store-grid `.store` rule (`display:flex; min-height:110`). Each card name rendered as a tall vertical box with text wrapping letter-by-letter. Renamed to `.store-name` + ellipsis truncation.
+- **#106** — Crash loop: PR #105's CSS comment contained literal backticks inside the backtick template literal. Terminated the template early, dumped the rest as JS, `TypeError` on startup. Replaced backticks with prose.
+
+**Done — production bundle fixes**
+
+- **#65** (Browse Abandonment skip) — Klaviyo Viewed Product + Active on Site both collapse to `MARKETING_BROWSE_ABANDONMENT`. Without an extra gate, a browse-abandoned customer fires both flows. Added `klaviyoSource` to `TriggerResolution` and layered a `customer_activity[viewed-product]` skip condition: `zero_times` for Viewed Product / `at_least_once` for Active on Site, window read from the flow's first time-delay action (24h default + warning). Survives CommentSold variant upgrade. Smoke covers 4 scenarios.
+- **#68** (SHOC `tf.quantity`) — `translateTimeframe` reads `tf.value` on Klaviyo `in-the-last` filters. The actual shape uses `tf.quantity`. Every migrated conditional-split timeframe had been emitting "in last 1 day" instead of merchant's actual window for the entire corpus. SHOC bundle 2026-05-21 surfaced it: "added to cart > 74 in last 30 days" landed as "in last 1 day". Smoke covers the SHOC scenario verbatim.
+- **#69** + **#71** (bundle source survival) — `bundle.ts` reads Klaviyo source from `migrations/<slug>/{templates,flows}/` on disk. Replit's stateless FS means that dir is empty across process restarts → successful imports got bundles with no source. Mirrored the `flow_failed` pattern: `exported` event payload gains `klaviyoHtml` + `klaviyoMeta`; `flow_imported` gains `klaviyoFlow`. Bundle falls back to event payload when disk count is zero. **#71** then prunes `klaviyoHtml` + `klaviyoMeta` from event payloads after first bundle export (canonical-zip policy) so DB doesn't accumulate forever. Flow source + `parsedAutomation` kept (smaller; more plausible re-bundle).
+- **#107** (CODE template `imageSourceType`) — Parser emitted `imageSourceType: "url"` on every image block. Redo's `ImageType` enum is `{ upload, product }` now — "url" is a 400 validation error. The field is optional; absence means "URL-sourced image" (the default). Dropped the emit line. Same PR also added `refreshJobNotesFromDb(jobId)` for **cross-process notes sync** — admin (Repl A) and reviewer (Repl B) share Postgres, but in-memory `job.notes` was stale on whichever process didn't write the note. Refresh on `handleJobGet` + `handleJobBundle` + reviewer jobs list.
+- **#108** (SHOC `sectionColor` shorthand) — `findAncestorBackgroundColor` returned the FULL CSS `background` shorthand when an element used `background: #222222 url(...) center center / auto repeat`. Whole shorthand landed on `sectionColor`. Zod's `z.string()` accepted it; Redo's downstream pipeline threw an uncaught exception → generic 500 with no body. Every saved-template import from SHOC failed identically with "Internal server error." `extractCssColor()` strips `url(...)` tokens then matches hex / `rgb()` / `rgba()` / `hsl()` / `hsla()` / named colors in order of specificity. 9/10 inline tests pass; linear-gradient near-miss is vanishingly rare in Klaviyo's output.
+- **#109** (split 401/403) — `import-rpc.ts` threw `RedoAuthExpiredError` on both 401 and 403. 403 means "Lacking required permissions" — refreshing the JWT won't fix it. Yet `withFreshJwt` prompted the reviewer for a new token every flow, for every retry — and David (the external Redo user the reviewer was importing under) didn't have admin role so every RPC came back 403. Split: 401 still throws `RedoAuthExpiredError` (prompts for fresh JWT); 403 throws a regular `Error` with the body included. Diagnosed live via Chrome MCP probing `/marketing-rpc/createEmailTemplate` from the dashboard — returned `{"error":"Lacking required permissions"}` 403. Michael added David as admin on Redo → re-probe returned 400 (validation failure on the empty test payload), confirming permission propagation.
+
+**Deployment infrastructure (operational, no PR)**
+- Imported `MCHammer-12/mime` into Michael's personal Replit workspace ("Redo Public Workspace") — the Redo workspace can't publish public deploys (org policy), the personal plan can.
+- Set `MIME_SURFACE=public_review` + `DATABASE_URL` pointing at the existing Redo-workspace Postgres (Neon-backed via Replit's built-in DB — connection string works from anywhere). Anthropic key fell back to the Replit-injected one.
+- Published as Autoscale **Public** visibility → `https://mime-redo-general.replit.app/`. Confirmed live via WebFetch (no Replit login wall).
+- Created `test-reviewer` row via SQL; `/r/<TOKEN>/` handshake verified end-to-end.
+- After Phase 4 ships: workflow is "Michael adds the merchant Klaviyo + Redo JWT via Add Store on the reviewer surface → reviewer picks flows / templates / campaigns + clicks Import → live progress with sidebar showing per-flow imported state → reviewer leaves notes per item → notes flow back to admin's bundle download via `refreshJobNotesFromDb`".
+
+**Files changed (cross-PR, mime)**
+- `src/migrate/server.ts` — bulk of the work: `dispatchReviewerSurface`, store CRUD, flow/template/campaign list endpoints, import + jobs + notes + inputs endpoints, `REVIEWER_DASHBOARD_HTML` (one large template literal)
+- `src/migrate/db.ts` — migrations 010 / 011 / 012
+- `src/migrate/reviewers.ts` (NEW) — reviewers repo + `getReviewerByToken`
+- `src/migrate/stores.ts` — `createdByReviewer` field; reviewer-scoped queries
+- `src/migrate/jobs.ts` — `refreshJobNotesFromDb()` helper
+- `src/migrate/import-rpc.ts` — split 401/403; export `decodeJwtAud`
+- `src/migrate/bundle.ts` — event-payload fallback for missing disk; post-export prune for template source
+- `src/parser/style-utils.ts` — `extractCssColor()` + `findAncestorBackgroundColor` uses it
+- `src/parser/code-template.ts` — drop `imageSourceType: ImageType.URL`
+- `src/flow/trigger-mapping.ts`, `src/flow/parser.ts`, `src/flow/browse-trigger-mapping.smoke.ts` (NEW), `src/flow/condition-mapping.ts`, `src/flow/condition-mapping.smoke.ts` — viewed-product skip + `tf.quantity`
+- `plans/2026-05-26-reviewer-dashboard.md` (NEW)
+
+**Decisions (see DECISIONS.md)**
+- Reviewer dashboard is **open access**, not per-reviewer-authenticated. The synthetic `PUBLIC_REVIEWER` lets anyone hit `/dashboard` and share the store list; cookie token machinery stays in code for future scoping but is unused.
+- Reviewer surface is a separate process (`MIME_SURFACE=public_review`) on a separate public Replit deploy. Sharing one Postgres requires `refreshJobNotesFromDb` for cross-process note visibility; events stay in-memory per process (acceptable for the workflow).
+- `redoJwt` retrieved server-side at import time; reviewer never sees or sends raw Klaviyo / Redo creds after Add Store.
+- 403 from Redo is a permissions problem, not a JWT refresh problem. Future Redo error-class additions need similarly explicit splitting.
+- CSS `background` shorthand must be parsed for the color token — Zod accepts any string, but downstream renderers reject malformed colors.
+
+**Open / next steps**
+1. The 6 `createSavedEmailTemplate` 500s from June 4 (Camo Release / Halloween Preorder etc.) likely benefit from the `sectionColor` fix (#108) — worth a re-import to confirm.
+2. Reviewer surface has no edit-store affordance yet. When a stored JWT expires the reviewer needs admin to update it via Toby 2.0. Worth surfacing per the conversation thread that led to #109.
+3. Cross-process event sync still stale (only notes refresh). If the admin starts viewing a reviewer-created job in real time, the event tail won't update without a process restart or an explicit refresh path. Defer until pain.
+4. `extractCssColor` linear-gradient edge case is imperfect; add real handling if a merchant template ever uses one.
+5. Reviewer dashboard's "Sign out" button removed in #99; if Michael ever wants per-reviewer separation again, restore the per-cookie identity flow.
+
+---
+
+## 2026-05-28 — Saved-template import fix (Saved Templates tab) + Redo internal-tools skills
+
+**Context**
+Started from a Jackson Hold Fly Company troubleshoot bundle: a campaign imported "successfully" but didn't show, and re-importing as a saved template errored. Diagnosis became a 3-PR fix to the saved-template import path. Session then pivoted to packaging the marketing-ops work as runnable skills in the `redotech-internal-tools` repo, plus live prod trigger/template ops via those skills.
+
+**Done — saved-template import path fixed end-to-end (mime: [#62](https://github.com/MCHammer-12/mime/pull/62), [#63](https://github.com/MCHammer-12/mime/pull/63), [#64](https://github.com/MCHammer-12/mime/pull/64))**
+- Root cause: PR #38 routed standalone-template + campaign imports through `createSavedEmailTemplate`, whose input is the FULL `emailTemplateSchema` (`_id` required as ObjectId). `createEmailTemplate` uses `emailTemplateSchema.omit({_id})`. `preparePayload` stripped `_id` defensively → `template._id Invalid input` 400.
+- **#62** — stop stripping `_id` in `preparePayload`; also capture `template_failed` events into `error.txt` in the troubleshoot bundle (mirrors the `flow_failed` capture from #36) so a failed import's RPC error lands in the zip instead of requiring a DB lookup.
+- **#63** — after #62, the call started 500-ing (no client detail). Temp-reverted both call sites to `createEmailTemplate` (Previous Emails) to unblock the merchant.
+- **#64** — real fix: the Mongoose `emailTemplateSchemaDefinition.team` is `required`, and the `createSavedEmailTemplate` handler injects `team` only on the outer wrapper, NOT the embedded template (unlike `createEmailTemplate`, which injects from JWT). Added `decodeJwtAud()` and inject `team` (from the JWT `aud` claim) onto the embedded template; re-enabled `asSavedTemplate: true`. Saved templates + campaigns now land in the Saved Templates tab again.
+- (#64 was completed after the live ops below; landed on main via parallel session.)
+
+**Done — Redo internal-tools skills (NOT mime — `redotech-internal-tools`, branch `marketing-skills`)**
+- `change-marketing-automation-trigger` (commit `8c7c2e047`) — swap a flow's trigger via `updateAutomation`, AND as one mandatory atomic step realign every `send_email`/`send_sms` template's `schemaType`+`category` to the new trigger (`updateEmailTemplate` partial `$set`; `updateSmsTemplate` full read-modify-write via `getSmsTemplateByIdPopulated`), rename abandonment skip-condition fields, audit other schema-field refs. Bundles `marketing-triggers.md` + `schema-types.md`.
+- `change-email-template-schema` (commit `691dc7372`) — email-only schemaType/category realignment; description steers trigger changes to the combined skill so the cascade stays atomic.
+- Both in `.agents/skills/`, catalog README updated, `oxfmt`-formatted, JWT as runtime input. Auto-live for that repo once `marketing-skills` merges to main.
+
+**Done — live prod ops via the trigger skill (operational, no code)**
+- Jackson Hole "Welcome Series 2.0 (Shopify)": `email_signup` → `email_signup_shopify` (same schemaType, clean).
+- Fairechild "Review Request Klaviyo (Email & SMS)": `order_delivered` → `order_created`; then realigned its 4 review-request templates `marketing_email`/Marketing → `order_tracking`/Order tracking to match. (The "test"/Track-your-package email and the 10/15-day wait timing were flagged to Michael, left as-is.)
+- A Jackson Hold abandoned-checkout swap (`cart_abandoned` → `checkout_abandoned`, with `isCartAbandoned`→`isCheckoutAbandoned` rename) was previewed but NOT executed — user pivoted before confirming.
+
+**Files changed (mime, across #62/#63/#64)**
+- `src/migrate/import-rpc.ts` — keep `_id`; `decodeJwtAud()` + inject `team` for saved path
+- `src/migrate/server.ts` — `template_failed` emits; `asSavedTemplate` toggled off (#63) then on (#64)
+- `src/migrate/bundle.ts` — `template_failed` → `error.txt`
+
+**Decisions (see DECISIONS.md)**
+- `createSavedEmailTemplate` needs `_id` AND `team` on the embedded template; mime supplies both. Template `schemaType` is builder/library metadata — runtime field resolution is governed by the flow's schema instance, so realigning a template's schemaType to its trigger is a consistency fix, not a rendering change.
+
+**Next steps**
+1. Saved-template path: shipped (#64). Re-import a merchant to confirm Saved Templates tab populates and flow-attached emails (still `createEmailTemplate`) keep sending.
+2. Skills: merging `marketing-skills` → main in `redotech-internal-tools` makes both skills team-wide (deferred — large shared branch).
+
 ## 2026-05-26 — Font preflight gate, parser duplicate-`<p>`-style fix, feedback resolve workflow
 
 **Context**

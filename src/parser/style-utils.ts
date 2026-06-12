@@ -141,11 +141,58 @@ export function findAncestorBackgroundColor(
   let guard = 0;
   while (current.length > 0 && guard++ < 50) {
     const style = parseInlineStyles(current.attr("style"));
-    const bg = style["background-color"] || style["background"];
-    if (bg && bg !== "transparent") return bg;
+    const bgColor = style["background-color"];
+    const bgShorthand = style["background"];
+    const raw = bgColor || bgShorthand;
+    if (raw) {
+      // When the value is the `background` shorthand (e.g.
+      // "#222222 url(...) center center / auto repeat"), keep just
+      // the color token. Redo's email-template Mongoose schema stores
+      // sectionColor as a plain String and downstream renderers
+      // expect a CSS color — passing the full shorthand silently
+      // corrupts the saved template and tripped 500s on
+      // createSavedEmailTemplate (SHOC bundle 2026-06-08).
+      const color = extractCssColor(raw);
+      if (color && color !== "transparent") return color;
+    }
     const parent = current.parent();
     if (parent.length === 0 || parent[0] === current[0]) break;
     current = parent;
+  }
+  return null;
+}
+
+/** Extract just the color token from a CSS value that might be a full
+ *  `background` shorthand. Matches hex (#fff / #ffffff / #ffffffaa),
+ *  rgb/rgba/hsl/hsla functional values, and named colors. Returns null
+ *  when no color is present (e.g. value is `linear-gradient(...)` or a
+ *  pure `url(...)` reference with no color fallback). */
+function extractCssColor(raw: string): string | null {
+  const v = raw.trim();
+  if (!v) return null;
+  // Hex first — most specific.
+  const hex = v.match(/#[0-9a-fA-F]{3,8}\b/);
+  if (hex) return hex[0];
+  // Functional color values: rgb(...), rgba(...), hsl(...), hsla(...).
+  const fn = v.match(/\b(?:rgba?|hsla?)\s*\([^)]+\)/i);
+  if (fn) return fn[0];
+  // Strip url(...) tokens before scanning for named colors — they'd
+  // otherwise match as "plausible identifiers" since their parens
+  // get stripped during normalization.
+  const withoutUrls = v.replace(/url\s*\([^)]*\)/gi, "");
+  // Named colors. Match the first word that isn't a known non-color
+  // CSS keyword (so "repeat", "center", "auto", "no-repeat", etc.
+  // don't get picked).
+  const NON_COLOR = new Set([
+    "center", "left", "right", "top", "bottom", "auto", "cover",
+    "contain", "repeat", "no-repeat", "repeat-x", "repeat-y", "round",
+    "space", "fixed", "scroll", "local", "border-box", "padding-box",
+    "content-box", "inherit", "initial", "unset", "revert",
+  ]);
+  for (const tok of withoutUrls.split(/\s+/)) {
+    const lower = tok.toLowerCase().replace(/[(),]/g, "");
+    if (!lower || NON_COLOR.has(lower) || /^\d/.test(lower) || lower === "/") continue;
+    return tok;
   }
   return null;
 }

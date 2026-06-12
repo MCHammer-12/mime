@@ -1,5 +1,5 @@
 ---
-status: unclaimed
+status: blocked
 branch: fix/image-clickthrough-links
 pr: null
 ---
@@ -44,6 +44,62 @@ The parser likely handles one but not all. Charlie may use the variant that's mi
 
 - Coordinate with Task 3 (inline anchor URL rewrite). Both tasks need `mapKlaviyoLink` to be called from new places. They can land independently; just both call into the same existing helper.
 - WgXbn6 mentions "Product image does not give room for individual cart selection" — that's Task 2 (dynamic cart-items), separate from the missing-link issue here. The AC email may have BOTH issues on the same image block.
+
+## Notes — executor investigation 2026-05-26
+
+**Task premise doesn't match the parse output.** Surveyed every `<img>` in
+every Charlie 1 Horse template against the current parser (PRs #75/#76/#77
+merged). Comparison of source HTML ↔ parse output:
+
+| Template | imgs in source w/ `<a href>` | clickthroughUrl set in parse output |
+|----------|------------------------------|-------------------------------------|
+| RYhKut   | 4 (logo + 3 product cards)   | 4 ✓                                  |
+| WeieJr   | 2 (logo ×2)                  | 2 ✓                                  |
+| SxWYeY   | 2 (logo ×2)                  | 2 ✓                                  |
+| WgXbn6   | 1 (logo)                     | 1 ✓                                  |
+| U3cE5u   | 1 (logo)                     | 1 ✓                                  |
+| VRDxJu   | 2 (logo ×2)                  | 2 ✓                                  |
+
+**Every image that has a wrapping `<a href>` in the source HTML gets its
+`clickthroughUrl` correctly set in the parse output.** The image-parser
+path (`$td.find(".kl-img-link")` →
+[`image.ts:25`](../../../src/parser/blocks/image.ts#L25)) already handles
+Charlie's HTML shape — `<a class="kl-img-link" href="…"><img/></a>`
+nested inside `td.kl-image`.
+
+**Images the merchant might be complaining about that DON'T have links:**
+
+- `00b4ec2b-…gif` — decorative gif, appears once per template (between
+  body text and footer). Has no `<a>` wrapper in the Klaviyo source —
+  the merchant authored it without a link.
+- `cec8a835-…jpeg` (SxWYeY only) — same shape; no `<a>` in source.
+- `53db5161-…gif` (WeieJr only) — same.
+
+The parser cannot invent links the source doesn't have.
+
+**What might be the actual issue (downstream of mime):**
+
+- The pre-#75 bundle had every image duplicated (desktop + mobile-only
+  variant). The mobile variant's wrapper STILL has the same `kl-img-link`
+  anchor in source HTML, so both variants would have emitted with
+  clickthrough — the duplication itself doesn't explain "no link".
+- Possible Redo-side issues:
+  - Importer may not be persisting `clickthroughUrl` on `ImageBlock` when
+    `clickthroughLinkType` is omitted (parser leaves it undefined per
+    the schema comment "Omit to inherit the legacy 'web-page' behavior"
+    at [`types.ts:210`](../../../src/renderer/types.ts#L210)).
+  - Redo's editor preview may not render image hyperlinks as clickable,
+    leading the merchant to assume they're missing.
+
+**Recommended next step:**
+
+Re-import Charlie 1 Horse post-#75 merge and inspect the imported
+template's image blocks via Redo's API or editor — does the
+`clickthroughUrl` field actually round-trip? If yes, the merchant
+complaint is a UI-perception issue. If no, the importer needs an audit.
+
+Marking `blocked` — the parser fix the planner anticipated isn't needed;
+the right move depends on what the post-merge re-import shows.
 
 ## Done
 
