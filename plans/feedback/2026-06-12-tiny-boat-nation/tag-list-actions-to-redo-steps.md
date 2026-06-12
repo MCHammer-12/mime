@@ -4,6 +4,8 @@ branch: fix/tag-list-actions-to-redo-steps
 pr: null
 ---
 
+**Decision note (2026-06-12):** the `list-update → manage_static_segment` half of this task needs a Redo `segmentId`, which requires segment creation at import. Michael ruled: **auto-create the segment; for static lists, copy the members** (memory `feedback_segment_import_decision`). That capability is now its own foundational task — [ad-hoc Task 4 `segment-auto-creation-at-import`](../2026-05-26-ad-hoc/segment-auto-creation-at-import.md), gated on a merchant-facing create-segment RPC that doesn't yet exist in redoapp. **This task's list→segment half is blocked on Task 4.** The **tag half** (`add/remove tag → manage_customer_tags`) is independent and can ship now — split it out and proceed with tags; leave the segment half for after Task 4.
+
 # Klaviyo tag/list actions dropped — map to manage_customer_tags / manage_static_segment
 
 ## Feedback (verbatim)
