@@ -23,7 +23,7 @@ import { parseMenuFromHeader } from "./blocks/menu.js";
 import { parseLineBlock } from "./blocks/line.js";
 import { parseSpacerBlock } from "./blocks/spacer.js";
 import { parseSocialsBlock } from "./blocks/socials.js";
-import { parseColumnRow, parseSplitBlock } from "./blocks/column.js";
+import { parseColumnRow, parseSplitBlock, parseTableImageRow } from "./blocks/column.js";
 import {
   parseProductBlock,
   parseLineItemsUcbBlock,
@@ -339,6 +339,14 @@ function parseColumnContent(
     const baCardBlock = parseBrowseAbandonmentCardBlock($, $wrapper, ctx);
     if (baCardBlock) {
       blocks.push(baCardBlock);
+      return;
+    }
+
+    // Trust-bar / badge row: a kl-table whose cells are images. Without this
+    // it falls through to "Unknown block" below and every badge is dropped.
+    const tableImageRow = parseTableImageRow($, $wrapper, ctx);
+    if (tableImageRow) {
+      blocks.push(tableImageRow);
       return;
     }
 
