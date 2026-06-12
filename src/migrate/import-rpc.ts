@@ -704,6 +704,56 @@ export interface FlowImportResult {
   name: string;
   createdTemplateCount: number;
   blankTemplateCount: number;
+  /** Non-fatal notes from segment resolution (e.g. a list whose segment
+   *  couldn't be created, whose step was converted to a pass-through WAIT). */
+  segmentWarnings?: string[];
+}
+
+/**
+ * Resolve `manage_static_segment` step markers (`_klaviyoListId`) to real Redo
+ * segment ids. `resolveListId` returns the Redo segmentId for a Klaviyo list
+ * id, or null if resolution failed.
+ *
+ * - Resolved: set `segmentId`, strip the `_klaviyoListId` marker.
+ * - Failed: replace the step with a 0-duration WAIT that keeps the chain
+ *   intact (DO_NOTHING is terminal-only, and an unresolved segmentId would
+ *   400 createAdvancedFlow) and collect a warning. The flow still imports.
+ *
+ * Pure over its `resolveListId` arg, so unit-testable without a Redo
+ * connection.
+ */
+export async function resolveSegmentSteps(
+  steps: any[],
+  resolveListId: (listId: string) => Promise<string | null>,
+): Promise<{ steps: any[]; warnings: string[] }> {
+  const warnings: string[] = [];
+  const out: any[] = [];
+  for (const step of steps) {
+    if (step?.type !== "manage_static_segment" || !step._klaviyoListId) {
+      out.push(step);
+      continue;
+    }
+    const listId = String(step._klaviyoListId);
+    const segmentId = await resolveListId(listId);
+    if (segmentId) {
+      const { _klaviyoListId: _drop, ...rest } = step;
+      out.push({ ...rest, segmentId });
+    } else {
+      warnings.push(
+        `Could not create/resolve a Redo segment for Klaviyo list ${listId}; the add-to-list step was converted to a no-op (flow chain preserved). Add the segment + step manually in the Redo flow builder.`,
+      );
+      out.push({
+        type: "wait",
+        id: step.id,
+        customTitle: `TODO: add-to-list (Klaviyo list ${listId}) — segment unresolved`,
+        numDays: 0,
+        numSeconds: 0,
+        timeUnit: "Minutes",
+        nextId: step.nextId,
+      });
+    }
+  }
+  return { steps: out, warnings };
 }
 
 /**
@@ -836,9 +886,50 @@ export async function importFlowRpc(
     }
   }
 
+  // 1c. Resolve manage_static_segment markers (from Klaviyo list-update
+  //     actions) → real Redo segment ids. One segment per unique Klaviyo
+  //     list (dedup cache); match an existing same-named Redo segment first,
+  //     else create a static segment. The step adds members at flow runtime,
+  //     so the segment only needs to exist (no member-copy). On failure the
+  //     step becomes a pass-through WAIT and the flow still imports.
+  const segmentCache = new Map<string, string | null>();
+  const resolveListId = async (listId: string): Promise<string | null> => {
+    if (segmentCache.has(listId)) return segmentCache.get(listId)!;
+    const name = `Klaviyo list ${listId}`;
+    try {
+      const found: any = await postMarketingRpc(
+        "fetchTeamSegments",
+        { searchText: name, pageSize: 100 },
+        options,
+      );
+      const match = (found?.segments ?? []).find(
+        (s: any) => String(s?.name ?? "").toLowerCase() === name.toLowerCase(),
+      );
+      let segId = match?._id ? String(match._id) : "";
+      if (!segId) {
+        const created: any = await postMarketingRpc("createStaticSegment", { name }, options);
+        segId = String(created?._id ?? created?.id ?? "");
+      }
+      if (!segId) throw new Error("createStaticSegment/fetchTeamSegments returned no id");
+      segmentCache.set(listId, segId);
+      return segId;
+    } catch (e: any) {
+      if (e instanceof RedoAuthExpiredError) throw e;
+      segmentCache.set(listId, null);
+      return null;
+    }
+  };
+  const hasSegmentSteps = bundle.automation.steps.some(
+    (s: any) => s?.type === "manage_static_segment" && s._klaviyoListId,
+  );
+  const segResolved = hasSegmentSteps
+    ? await resolveSegmentSteps(bundle.automation.steps, resolveListId)
+    : { steps: bundle.automation.steps as any[], warnings: [] as string[] };
+  for (const w of segResolved.warnings) console.warn(`importFlowRpc: ${w}`);
+
   // 2. Swap sentinel templateIds in the automation. Both send_email and
   //    send_sms steps use the same sentinel→real map.
-  const steps = bundle.automation.steps.map((step) => {
+  const steps = segResolved.steps.map((step) => {
     if (step.type !== "send_email" && step.type !== "send_sms") return step;
     const real = sentinelToRealId.get(String(step.templateId ?? ""));
     if (!real) return step; // leave as-is; server will reject, caller sees the error
@@ -904,6 +995,7 @@ export async function importFlowRpc(
     name: bundle.automation.name,
     createdTemplateCount,
     blankTemplateCount,
+    ...(segResolved.warnings.length > 0 ? { segmentWarnings: segResolved.warnings } : {}),
   };
 }
 
