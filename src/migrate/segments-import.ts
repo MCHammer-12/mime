@@ -207,10 +207,12 @@ export async function runSegmentImport(
     }
 
     // ── substitution approvals (one boolean per substitution) ──
-    for (let i = 0; i < t.substitutions.length; i++) {
-      const sub = t.substitutions[i];
+    // Iterate a snapshot with content-stable questionKeys (NOT array index):
+    // dropping one substitution must not let the cached answer leak onto the
+    // next via a reused index key.
+    for (const sub of [...t.substitutions]) {
       const ans = await ctrl.prompt({
-        questionKey: `sub:${segmentId}:${i}`,
+        questionKey: `sub:${segmentId}:${sub.klaviyoType}:${sub.klaviyoSummary}`,
         question: `Substitute "${sub.klaviyoSummary}"?`,
         context: `Redo has no native equivalent. Proposed logic: ${sub.redoLogic}. The audience size will be checked against Klaviyo (±${tolPct}%) before import.`,
         type: "boolean",
@@ -223,8 +225,8 @@ export async function runSegmentImport(
       });
       if (ans !== "true") {
         dropCondition(t.query, sub.conditionRef);
-        t.substitutions.splice(i, 1);
-        i--;
+        const idx = t.substitutions.indexOf(sub);
+        if (idx >= 0) t.substitutions.splice(idx, 1);
         ctrl.emit({ kind: "info", itemId: segmentId, text: `Dropped substituted condition: ${sub.klaviyoSummary}` });
       }
     }
