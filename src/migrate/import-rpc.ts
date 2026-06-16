@@ -201,8 +201,13 @@ export async function importTemplateRpc(
       // does NOT inject team from the JWT context onto the embedded doc
       // (only on the outer wrapper). Without this, Mongoose throws a
       // validation error → 500.
-      const teamFromJwt = decodeJwtAud(options.jwt);
-      const embedded = teamFromJwt ? { ...prepared, team: teamFromJwt } : prepared;
+      //
+      // Resolve the team via /team (same robust path the flow import uses),
+      // not by decoding the JWT — `decodeJwtAud` returns null for `redo_pat_`
+      // PATs and JWTs that don't carry the team in aud/teamId/team_id/sub,
+      // which shipped the embedded doc with no `team` → the 500.
+      const teamId = await resolveTeamId(options);
+      const embedded = { ...prepared, team: teamId };
       created = await postMarketingRpc(
         "createSavedEmailTemplate",
         {
