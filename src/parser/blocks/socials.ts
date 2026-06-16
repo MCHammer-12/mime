@@ -71,12 +71,18 @@ export function parseSocialsBlock(
   const socialLinks: SocialItem[] = [];
   let detectedColor: string | null = null;
   let iconPadding: number | null = null;
+  // Klaviyo emits TWO anchors per platform — the icon (<a><img></a>) and a
+  // text label (<a>Facebook</a>), same URL. The icon anchor comes first, so
+  // dedup by platform with first-wins to keep one item (and its icon color).
+  const seenPlatforms = new Set<string>();
 
   $wrapper.find("a").each((i, link) => {
     const $link = $(link);
     const href = $link.attr("href") || "";
     const platform = detectSocialPlatform(href);
     if (!platform) return;
+    if (seenPlatforms.has(platform)) return;
+    seenPlatforms.add(platform);
     if (href) classifyKlaviyoUrl(href, EmailBlockType.SOCIALS, ctx);
 
     const $img = $link.find("img").first();
