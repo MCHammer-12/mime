@@ -266,16 +266,50 @@ export function substituteRegion(c: ProfileRegionCondition): CondResult {
   };
 }
 
+// Klaviyo 3-letter country code → Redo ISO-2 (proximity prerequisite).
+const COUNTRY3_TO_ISO2: Record<string, string> = {
+  USA: "US", CAN: "CA", GBR: "GB", AUS: "AU", NZL: "NZ", DEU: "DE",
+  FRA: "FR", ESP: "ES", ITA: "IT", NLD: "NL", IRL: "IE", MEX: "MX",
+};
+
 export function substitutePostalCodeDistance(
   c: ProfilePostalCodeDistanceCondition,
 ): CondResult {
-  // Redo has proximity-to-CITY, not proximity-to-postal-code, and no geocoder
-  // here to turn a ZIP into a city/state. Drop with an explanation.
+  // Resolved 2026-06-17: map to Redo proximity-to-city (the closest real thing).
+  // Redo proximity is CITY-based; a bare ZIP carries no city/state, so we emit
+  // the radius + country and leave the postal code as the city value — the
+  // operator sets the real city/state in Redo. zod allows a 1-element prereq.
+  const op = String(c.filter?.operator ?? "");
+  const within = op === "less-than" || op === "less-than-or-equal" || op === "";
+  const radius = Number(c.filter?.value ?? 0);
+  const units = c.unit === "kilometers" ? "kilometers" : "miles";
+  const cc = String(c.country_code ?? "").toUpperCase();
+  const country = COUNTRY3_TO_ISO2[cc] ?? (cc.length === 2 ? cc : "US");
+  const postal = String(c.postal_code ?? "");
+  const condition: QueryCondition = {
+    type: "customer_attribute",
+    whereCondition: {
+      type: "city-proximity",
+      dimension: "proximity-to-city",
+      comparison: {
+        type: "proximity",
+        operator: within ? "WITHIN" : "OUTSIDE",
+        prerequisiteValues: [country],
+        value: postal,
+        options: { radius, units },
+      },
+    },
+  };
   return {
-    kind: "unsupported",
-    dropped: {
+    kind: "substituted",
+    condition,
+    sub: {
       klaviyoType: "profile-postal-code-distance",
-      reason: `Redo supports distance-to-city, not distance-to-postal-code (${c.postal_code ?? "?"} ${c.country_code ?? ""}). Recreate manually as a city-proximity condition.`,
+      klaviyoSummary: `within ${radius} ${units} of ${postal} (${cc})`,
+      redoLogic: `proximity-to-city ${within ? "WITHIN" : "OUTSIDE"} ${radius} ${units} — Redo is city-based; set the city/state in Redo (we only had postal code ${postal})`,
+      assumptions: {},
+      tunable: null,
+      conditionRef: condition,
     },
   };
 }

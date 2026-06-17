@@ -110,7 +110,8 @@ export type WhereCondition =
   | TokenListWhere
   | StringWhere
   | FullDateWhere
-  | AnnualDateWhere;
+  | AnnualDateWhere
+  | CityProximityWhere;
 
 export type NumericOperator = "eq" | "gt" | "lt" | "gte" | "lte" | "neq";
 export type TokenOperator = "ANY" | "NONE";
@@ -174,6 +175,20 @@ export interface AnnualDateWhere {
   type: "date-annual";
   dimension: string;
   comparison: Timeframe;
+}
+
+// Distance to a city (proximity-to-city). prerequisiteValues is [country] or
+// [country, state]; Redo's zod doesn't enforce length.
+export interface CityProximityWhere {
+  type: "city-proximity";
+  dimension: string;
+  comparison: {
+    type: "proximity";
+    operator: "WITHIN" | "OUTSIDE";
+    prerequisiteValues: string[];
+    value: string;
+    options: { radius: number; units: "miles" | "kilometers" };
+  };
 }
 
 // ---- timeframe -------------------------------------------------------------

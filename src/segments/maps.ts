@@ -65,20 +65,36 @@ export const METRIC_TO_ACTIVITY: Record<string, string> = {
   // Resolved 2026-06-16: refund ≈ Redo return; back-in-stock has a direct activity.
   "refunded order": "return-processed",
   "subscribed to back in stock": "subscribed-to-back-in-stock",
+  // Current main (2026-06-17) added a bounced-email activity.
+  "bounced email": "bounced-email",
 };
 
-// Klaviyo metrics with NO Redo segment activity, with a precise drop reason.
-// (Fulfillment/shipment exist in Redo only as flow triggers, not segment
-// characteristics; bounce/spam/search aren't tracked as Redo activities.)
+// Klaviyo metrics we deliberately drop (Michael 2026-06-16: cancelled has no
+// Redo equivalent). Everything else unmapped falls back to a count-gated
+// custom_event (see translate.ts) per the "map more, verify by count" approach.
 export const METRIC_EXPLICIT_DROP: Record<string, string> = {
-  "fulfilled order": "no fulfillment activity in Redo segments (only a flow trigger)",
-  "fulfilled partial order": "no fulfillment activity in Redo segments (only a flow trigger)",
-  "cancelled order": "no cancellation activity in Redo segments",
-  "canceled order": "no cancellation activity in Redo segments",
-  "bounced email": "Redo has no bounced-email activity",
-  "marked email as spam": "Redo has no spam-complaint activity",
-  "submitted search": "Redo has no site-search activity",
+  "cancelled order": "no cancellation activity in Redo (per 2026-06-16 decision)",
+  "canceled order": "no cancellation activity in Redo (per 2026-06-16 decision)",
 };
+
+/** Klaviyo `metric_filters` entry → a Redo custom_event property filter (free
+ *  dimension = the event property key; numeric vs token by filter type). */
+export function customEventPropertyFilter(
+  property: string,
+  filter: { type?: string; operator?: string; value?: unknown } | undefined,
+): WhereCondition | null {
+  if (!property || !filter) return null;
+  const isNumeric = filter.type === "numeric" || typeof filter.value === "number";
+  if (isNumeric) {
+    const redoOp = filter.operator ? KLAVIYO_NUMERIC_OP_TO_REDO[filter.operator] : undefined;
+    if (!redoOp) return null;
+    return { type: "numeric", dimension: property, comparison: { type: "numeric", operator: redoOp, value: Number(filter.value ?? 0) } };
+  }
+  const negate = filter.operator === "not-equals" || filter.operator === "does-not-contain";
+  const values = (Array.isArray(filter.value) ? filter.value : [filter.value]).map((v) => String(v ?? "")).filter(Boolean);
+  if (values.length === 0) return null;
+  return { type: "token", dimension: property, comparison: { type: "token", operator: negate ? "NONE" : "ANY", values } };
+}
 
 // Klaviyo `measurement` selectors meaning "sum of the $value property" rather
 // than an event count.

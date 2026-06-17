@@ -17,6 +17,8 @@ const metrics: MetricLookup = {
   m_refund: { id: "m_refund", name: "Refunded Order", integration_name: null, integration_category: null, integration_key: null, created: null },
   m_fulfill: { id: "m_fulfill", name: "Fulfilled Order", integration_name: null, integration_category: null, integration_key: null, created: null },
   m_unsub: { id: "m_unsub", name: "Unsubscribed Email", integration_name: null, integration_category: null, integration_key: null, created: null },
+  m_cancel: { id: "m_cancel", name: "Cancelled Order", integration_name: null, integration_category: null, integration_key: null, created: null },
+  m_bounce: { id: "m_bounce", name: "Bounced Email", integration_name: null, integration_category: null, integration_key: null, created: null },
 };
 
 let passed = 0;
@@ -175,11 +177,15 @@ function seg(conditions: KlaviyoCondition[][], extra?: Partial<TranslateContext>
   console.log("✓ region mapping");
 }
 
-// ── postal-code-distance unsupported ────────────────────────────────────────
+// ── postal-code-distance → proximity-to-city (substituted) ──────────────────
 {
   const r = seg([[{ type: "profile-postal-code-distance", country_code: "USA", postal_code: "02141", unit: "miles", filter: { operator: "less-than", value: 10 } }]]);
-  ok(!r.importable && r.dropped.length === 1, "postal distance dropped");
-  console.log("✓ postal-code-distance unsupported");
+  ok(r.importable && r.substitutions.length === 1, "postal distance → substituted");
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.whereCondition.type === "city-proximity" && c.whereCondition.dimension === "proximity-to-city", "→ proximity-to-city");
+  ok(c.whereCondition.comparison.operator === "WITHIN" && c.whereCondition.comparison.options.radius === 10, "WITHIN 10 miles");
+  ok(c.whereCondition.comparison.prerequisiteValues[0] === "US", "country US from USA");
+  console.log("✓ postal-code-distance → proximity-to-city");
 }
 
 // ── partial flag: one good + one dropped condition in same group ─────────────
@@ -230,12 +236,29 @@ function seg(conditions: KlaviyoCondition[][], extra?: Partial<TranslateContext>
   console.log("✓ refunded → return-processed");
 }
 
-// ── Fulfilled Order → unsupported (precise reason) ──────────────────────────
+// ── Fulfilled Order → custom_event (count-gated) ────────────────────────────
 {
-  const r = seg([[{ type: "profile-metric", metric_id: "m_fulfill", measurement: "count", measurement_filter: { operator: "greater-than", value: 0 } }]]);
-  ok(!r.importable && r.dropped.length === 1, "Fulfilled Order dropped");
-  ok(/fulfillment/i.test(r.dropped[0].reason), "fulfilled drop reason mentions fulfillment");
-  console.log("✓ fulfilled → unsupported");
+  const r = seg([[{ type: "profile-metric", metric_id: "m_fulfill", measurement: "count", measurement_filter: { operator: "greater-than", value: 0 }, metric_filters: [{ property: "Status", filter: { operator: "equals", value: "fulfilled" } }] }]]);
+  ok(r.importable && r.substitutions.length === 1, "fulfilled → substituted custom_event");
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.type === "custom_event" && c.eventName === "Fulfilled Order", "custom_event eventName = metric name");
+  ok(c.property_filters[0]?.dimension === "Status", "metric_filters → custom_event property_filters");
+  console.log("✓ fulfilled → custom_event");
+}
+
+// ── Cancelled Order stays dropped (explicit 2026-06-16 decision) ────────────
+{
+  const r = seg([[{ type: "profile-metric", metric_id: "m_cancel", measurement: "count", measurement_filter: { operator: "greater-than", value: 0 } }]]);
+  ok(!r.importable && r.dropped.length === 1, "cancelled order dropped");
+  console.log("✓ cancelled → unsupported (explicit drop)");
+}
+
+// ── Bounced Email → bounced-email activity ──────────────────────────────────
+{
+  const r = seg([[{ type: "profile-metric", metric_id: "m_bounce", measurement: "count", measurement_filter: { operator: "at-least", value: 1 } }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.type === "customer_activity" && c.event === "bounced-email", "Bounced Email → bounced-email");
+  console.log("✓ bounced email → bounced-email");
 }
 
 // ── Unsubscribed Email event → subscribed-to-email = false ──────────────────

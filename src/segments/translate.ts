@@ -21,6 +21,7 @@ import type {
 import {
   ACTIVITY_VALUE_DIMENSION,
   countFrom,
+  customEventPropertyFilter,
   KLAVIYO_NUMERIC_OP_TO_REDO,
   KLAVIYO_STRING_OP_TO_REDO,
   mapMetricFilter,
@@ -315,8 +316,36 @@ function translateProfileMetric(
 
   const activity = METRIC_TO_ACTIVITY[name] as CustomerActivityType | undefined;
   if (!activity) {
-    const reason = METRIC_EXPLICIT_DROP[name] ?? `metric "${metric.name}" has no Redo activity equivalent`;
-    return unsupported({ klaviyoType: "profile-metric", dimension: metric.name, reason });
+    if (METRIC_EXPLICIT_DROP[name]) {
+      return unsupported({ klaviyoType: "profile-metric", dimension: metric.name, reason: METRIC_EXPLICIT_DROP[name] });
+    }
+    // Fallback: count-gated custom_event by metric name. Only matches if Redo
+    // ingests an event with this name (e.g. Fulfilled Order); the ±10% count
+    // check flags it otherwise. Resolved 2026-06-17.
+    const propertyFilters: WhereCondition[] = [];
+    for (const mf of c.metric_filters ?? []) {
+      const wc = customEventPropertyFilter(mf.property, mf.filter);
+      if (wc) propertyFilters.push(wc);
+    }
+    const condition: QueryCondition = {
+      type: "custom_event",
+      eventName: metric.name,
+      count: countFrom(c.measurement_filter?.operator, Number(c.measurement_filter?.value ?? 0)),
+      timeframe: timeframeFrom(c.timeframe_filter),
+      property_filters: propertyFilters,
+    };
+    return {
+      kind: "substituted",
+      condition,
+      sub: {
+        klaviyoType: "profile-metric",
+        klaviyoSummary: `${metric.name} (event)`,
+        redoLogic: `Redo custom_event "${metric.name}" — only matches if that event is ingested into Redo; verify the count`,
+        assumptions: {},
+        tunable: null,
+        conditionRef: condition,
+      },
+    };
   }
 
   const measurement = String(c.measurement ?? "count").toLowerCase();
