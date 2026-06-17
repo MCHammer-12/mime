@@ -15,6 +15,7 @@ import type {
   StringOperator,
   Timeframe,
   TimeframeUnit,
+  WhereCondition,
 } from "./redo-types.js";
 
 export const KLAVIYO_NUMERIC_OP_TO_REDO: Record<string, NumericOperator> = {
@@ -61,6 +62,22 @@ export const METRIC_TO_ACTIVITY: Record<string, string> = {
   "checkout started": "checkout-started",
   "active on site": "active-on-site",
   "viewed collection": "collection-viewed",
+  // Resolved 2026-06-16: refund ≈ Redo return; back-in-stock has a direct activity.
+  "refunded order": "return-processed",
+  "subscribed to back in stock": "subscribed-to-back-in-stock",
+};
+
+// Klaviyo metrics with NO Redo segment activity, with a precise drop reason.
+// (Fulfillment/shipment exist in Redo only as flow triggers, not segment
+// characteristics; bounce/spam/search aren't tracked as Redo activities.)
+export const METRIC_EXPLICIT_DROP: Record<string, string> = {
+  "fulfilled order": "no fulfillment activity in Redo segments (only a flow trigger)",
+  "fulfilled partial order": "no fulfillment activity in Redo segments (only a flow trigger)",
+  "cancelled order": "no cancellation activity in Redo segments",
+  "canceled order": "no cancellation activity in Redo segments",
+  "bounced email": "Redo has no bounced-email activity",
+  "marked email as spam": "Redo has no spam-complaint activity",
+  "submitted search": "Redo has no site-search activity",
 };
 
 // Klaviyo `measurement` selectors meaning "sum of the $value property" rather
@@ -120,6 +137,22 @@ export function timeframeFrom(tf: any): Timeframe {
         ? { type: "on", options: { date } }
         : { type: "all-time", options: null };
     }
+    case "between":
+    case "between-static":
+    case "between-dates": {
+      // Absolute date range: value is [from, to]. Relative range (e.g. 30–90
+      // days ago) carries start/end + unit instead.
+      if (tf.start != null && tf.end != null) {
+        const units = TIMEFRAME_UNITS[String(tf.unit ?? "day")] ?? "day";
+        return { type: "between-relative", options: { start: Number(tf.start), end: Number(tf.end), units } };
+      }
+      const arr = Array.isArray(tf.value) ? tf.value : [];
+      const from = toDateString(arr[0]);
+      const to = toDateString(arr[1]);
+      return from && to
+        ? { type: "between-dates", options: { range: [from, to] } }
+        : { type: "all-time", options: null };
+    }
     case "alltime":
     case "all-time":
     case "":
@@ -127,4 +160,110 @@ export function timeframeFrom(tf: any): Timeframe {
     default:
       return { type: "all-time", options: null };
   }
+}
+
+// Klaviyo event-property → Redo event_filter field, per activity. The token vs
+// token_list distinction matters (order-placed product_name is a token_list;
+// viewed/cart product_name is a single token) — wrong type = a Zod 400. Mirrors
+// redoapp segment-data-structures.ts. Klaviyo prop keys are normalized
+// (lowercased, `$` and spaces stripped) before lookup.
+type EventFieldType = "numeric" | "token" | "token_list";
+interface EventFieldSpec {
+  field: string;
+  type: EventFieldType;
+}
+
+const EVENT_FIELDS: Record<string, Record<string, EventFieldSpec>> = {
+  "order-placed": {
+    value: { field: "order_total", type: "numeric" },
+    itemcount: { field: "item_count", type: "numeric" },
+    items: { field: "product_name", type: "token_list" },
+    name: { field: "product_name", type: "token_list" },
+    productname: { field: "product_name", type: "token_list" },
+    productid: { field: "product_id", type: "token_list" },
+    collections: { field: "collection_name", type: "token_list" },
+    collection: { field: "collection_name", type: "token_list" },
+    categories: { field: "collection_name", type: "token_list" },
+    vendor: { field: "vendor", type: "token_list" },
+    brand: { field: "vendor", type: "token_list" },
+    sku: { field: "product_variant_sku", type: "token_list" },
+    variantname: { field: "product_variant_name", type: "token_list" },
+    variantid: { field: "product_variant_id", type: "token_list" },
+  },
+  "added-product-to-cart": {
+    value: { field: "cart_subtotal", type: "numeric" },
+    quantity: { field: "quantity", type: "numeric" },
+    name: { field: "product_name", type: "token" },
+    productname: { field: "product_name", type: "token" },
+    productid: { field: "product_id", type: "token" },
+    collections: { field: "product_collection", type: "token_list" },
+    collection: { field: "product_collection", type: "token_list" },
+    categories: { field: "product_collection", type: "token_list" },
+    sku: { field: "product_variant_sku", type: "token" },
+    variantname: { field: "product_variant_name", type: "token" },
+    variantid: { field: "product_variant_id", type: "token" },
+  },
+  "viewed-product": {
+    name: { field: "product_name", type: "token" },
+    productname: { field: "product_name", type: "token" },
+    product: { field: "product_name", type: "token" },
+    productid: { field: "product_id", type: "token" },
+    categories: { field: "collection_name", type: "token_list" },
+    collections: { field: "collection_name", type: "token_list" },
+    collection: { field: "collection_name", type: "token_list" },
+    sku: { field: "product_variant_sku", type: "token" },
+    tags: { field: "product_tags", type: "token_list" },
+  },
+  "collection-viewed": {
+    collectionname: { field: "collection_name", type: "token" },
+    collection: { field: "collection_name", type: "token" },
+    name: { field: "collection_name", type: "token" },
+    collectionid: { field: "collection_id", type: "token" },
+  },
+};
+
+function normalizeProp(prop: string): string {
+  return prop.toLowerCase().replace(/[$\s_]/g, "");
+}
+
+/** Klaviyo `metric_filters[]` entry → a Redo event_filter WhereCondition, or
+ *  null when the property/operator has no Redo field (caller warns + skips). */
+export function mapMetricFilter(
+  activity: string,
+  property: string,
+  filter: { type?: string; operator?: string; value?: unknown } | undefined,
+): WhereCondition | null {
+  const spec = EVENT_FIELDS[activity]?.[normalizeProp(property)];
+  if (!spec || !filter) return null;
+  const op = filter.operator;
+
+  if (spec.type === "numeric") {
+    const redoOp = op ? KLAVIYO_NUMERIC_OP_TO_REDO[op] : undefined;
+    if (!redoOp) return null;
+    return {
+      type: "numeric",
+      dimension: spec.field,
+      comparison: { type: "numeric", operator: redoOp, value: Number(filter.value ?? 0) },
+    };
+  }
+
+  // token / token_list: Klaviyo equals/contains → membership; negations → none.
+  const negate = op === "not-equals" || op === "does-not-contain" || op === "not-contains";
+  const values = (Array.isArray(filter.value) ? filter.value : [filter.value])
+    .map((v) => String(v ?? ""))
+    .filter(Boolean);
+  if (values.length === 0) return null;
+
+  if (spec.type === "token") {
+    return {
+      type: "token",
+      dimension: spec.field,
+      comparison: { type: "token", operator: negate ? "NONE" : "ANY", values },
+    };
+  }
+  return {
+    type: "token_list",
+    dimension: spec.field,
+    comparison: { type: "list", operator: negate ? "none" : "any", values },
+  };
 }

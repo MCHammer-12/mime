@@ -108,7 +108,9 @@ export type WhereCondition =
   | BooleanWhere
   | TokenHierarchyWhere
   | TokenListWhere
-  | StringWhere;
+  | StringWhere
+  | FullDateWhere
+  | AnnualDateWhere;
 
 export type NumericOperator = "eq" | "gt" | "lt" | "gte" | "lte" | "neq";
 export type TokenOperator = "ANY" | "NONE";
@@ -158,6 +160,20 @@ export interface StringWhere {
   type: "string";
   dimension: string;
   comparison: { type: "string"; operator: StringOperator; value: string };
+}
+
+// Date characteristics (created-time = full date, birthday = annual date). The
+// comparison is the same `{type, options}` timeframe shape used by activities.
+export interface FullDateWhere {
+  type: "date";
+  dimension: string;
+  comparison: Timeframe;
+}
+
+export interface AnnualDateWhere {
+  type: "date-annual";
+  dimension: string;
+  comparison: Timeframe;
 }
 
 // ---- timeframe -------------------------------------------------------------

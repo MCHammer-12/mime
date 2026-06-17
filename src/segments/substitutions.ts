@@ -57,9 +57,14 @@ const ORDER_COUNT_DIMENSIONS = new Set([
   "predicted_number_of_orders",
   "historic_number_of_orders",
 ]);
+// Resolved 2026-06-16: lapsed-buyer proxy (no order in N days), N auto-tuned.
+const LAPSED_DIMENSIONS = new Set([
+  "expected_date_of_next_order",
+  "expected_date_of_next_purchase",
+]);
 const UNSUPPORTED_DIMENSIONS = new Set([
   "predicted_gender",
-  "expected_date_of_next_order",
+  "channel_affinity",
   "average_days_between_orders",
   "average_time_between_orders",
 ]);
@@ -173,23 +178,12 @@ export function substitutePredictiveAnalytics(
 
   // Churn risk ≈ no order in the last N days (default 90, auto-tuned).
   if (CHURN_DIMENSIONS.has(dim)) {
-    const days = 90;
-    const condition = orderPlaced(
-      { operator: "eq", value: 0 },
-      { type: "before-now-relative", options: { value: days, units: "day" } },
-    );
-    return {
-      kind: "substituted",
-      condition,
-      sub: {
-        klaviyoType: "profile-predictive-analytics",
-        klaviyoSummary: `${dim} ${klOp ?? ""} ${value}`.trim(),
-        redoLogic: `customers with no orders in the last ${days} days`,
-        assumptions: {},
-        tunable: "churn-days",
-        conditionRef: condition,
-      },
-    };
+    return substituteLapsed("profile-predictive-analytics", `${dim} ${klOp ?? ""} ${value}`.trim());
+  }
+
+  // Lapsed-buyer (expected next-order date) ≈ no order in the last N days.
+  if (LAPSED_DIMENSIONS.has(dim)) {
+    return substituteLapsed("profile-predictive-analytics", `${dim} ${klOp ?? ""} ${value}`.trim());
   }
 
   return {
@@ -198,6 +192,29 @@ export function substitutePredictiveAnalytics(
       klaviyoType: "profile-predictive-analytics",
       dimension: dim,
       reason: `Unrecognized predictive dimension "${dim}" — no proxy available.`,
+    },
+  };
+}
+
+// "Lapsed buyer" proxy: no order placed in the last N days (default 90), with
+// N auto-tuned to the Klaviyo population. Used for predictive churn /
+// expected-next-order dimensions AND the `last_active` profile property.
+export function substituteLapsed(klaviyoType: string, klaviyoSummary: string): CondResult {
+  const days = 90;
+  const condition = orderPlaced(
+    { operator: "eq", value: 0 },
+    { type: "before-now-relative", options: { value: days, units: "day" } },
+  );
+  return {
+    kind: "substituted",
+    condition,
+    sub: {
+      klaviyoType,
+      klaviyoSummary,
+      redoLogic: `customers with no orders in the last ${days} days`,
+      assumptions: {},
+      tunable: "churn-days",
+      conditionRef: condition,
     },
   };
 }

@@ -13,6 +13,10 @@ import type { KlaviyoCondition } from "./klaviyo-types.js";
 const metrics: MetricLookup = {
   m_order: { id: "m_order", name: "Placed Order", integration_name: null, integration_category: null, integration_key: null, created: null },
   m_open: { id: "m_open", name: "Opened Email", integration_name: null, integration_category: null, integration_key: null, created: null },
+  m_cart: { id: "m_cart", name: "Added to Cart", integration_name: null, integration_category: null, integration_key: null, created: null },
+  m_refund: { id: "m_refund", name: "Refunded Order", integration_name: null, integration_category: null, integration_key: null, created: null },
+  m_fulfill: { id: "m_fulfill", name: "Fulfilled Order", integration_name: null, integration_category: null, integration_key: null, created: null },
+  m_unsub: { id: "m_unsub", name: "Unsubscribed Email", integration_name: null, integration_category: null, integration_key: null, created: null },
 };
 
 let passed = 0;
@@ -188,6 +192,122 @@ function seg(conditions: KlaviyoCondition[][], extra?: Partial<TranslateContext>
   ok(r.partial, "partial flagged when a sibling condition dropped");
   ok(r.query.conditionBlocks[0].conditions.length === 1, "only the good condition kept");
   console.log("✓ partial-drop handling");
+}
+
+// ── metric_filters → event_filters (count, token_list) ──────────────────────
+{
+  const r = seg([[{ type: "profile-metric", metric_id: "m_order", measurement: "count", measurement_filter: { operator: "greater-than-or-equal", value: 1 }, timeframe_filter: { operator: "in-the-last", quantity: 60, unit: "day" }, metric_filters: [{ property: "Items", filter: { type: "string", operator: "equals", value: "Hat" } }] }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.event === "order-placed", "metric_filters: order-placed");
+  ok(c.event_filters[0].type === "token_list" && c.event_filters[0].dimension === "product_name", "Items → product_name token_list");
+  ok(c.event_filters[0].comparison.operator === "any" && c.event_filters[0].comparison.values[0] === "Hat", "token_list any [Hat]");
+  console.log("✓ metric_filters → event_filters (order product_name)");
+}
+
+// ── metric_filters: value + numeric event property ──────────────────────────
+{
+  const r = seg([[{ type: "profile-metric", metric_id: "m_cart", measurement: "count", measurement_filter: { operator: "greater-than", value: 0 }, metric_filters: [{ property: "Quantity", filter: { type: "numeric", operator: "greater-than", value: 2 } }] }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.event === "added-product-to-cart", "cart metric");
+  ok(c.event_filters[0].type === "numeric" && c.event_filters[0].dimension === "quantity" && c.event_filters[0].comparison.value === 2, "Quantity → numeric quantity > 2");
+  console.log("✓ metric_filters numeric (cart quantity)");
+}
+
+// ── dropped filter → substituted + warning ──────────────────────────────────
+{
+  const r = seg([[{ type: "profile-metric", metric_id: "m_order", measurement: "count", measurement_filter: { operator: "greater-than", value: 0 }, metric_filters: [{ property: "Discount Code", filter: { operator: "equals", value: "X" } }] }]]);
+  ok(r.substitutions.length === 1, "unmapped metric filter → substituted");
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.event_filters.length === 0, "unmapped filter dropped from event_filters");
+  console.log("✓ unmapped metric_filter dropped + flagged");
+}
+
+// ── Refunded Order → return-processed ───────────────────────────────────────
+{
+  const r = seg([[{ type: "profile-metric", metric_id: "m_refund", measurement: "count", measurement_filter: { operator: "greater-than", value: 0 } }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.event === "return-processed", "Refunded Order → return-processed");
+  console.log("✓ refunded → return-processed");
+}
+
+// ── Fulfilled Order → unsupported (precise reason) ──────────────────────────
+{
+  const r = seg([[{ type: "profile-metric", metric_id: "m_fulfill", measurement: "count", measurement_filter: { operator: "greater-than", value: 0 } }]]);
+  ok(!r.importable && r.dropped.length === 1, "Fulfilled Order dropped");
+  ok(/fulfillment/i.test(r.dropped[0].reason), "fulfilled drop reason mentions fulfillment");
+  console.log("✓ fulfilled → unsupported");
+}
+
+// ── Unsubscribed Email event → subscribed-to-email = false ──────────────────
+{
+  const r = seg([[{ type: "profile-metric", metric_id: "m_unsub", measurement: "count", measurement_filter: { operator: "greater-than", value: 0 } }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.type === "customer_attribute" && c.whereCondition.dimension === "subscribed-to-email" && c.whereCondition.comparison.value === false, "unsub → subscribed-to-email=false");
+  console.log("✓ unsubscribed event → subscribed-to-email=false");
+}
+
+// ── can-receive-email-marketing ─────────────────────────────────────────────
+{
+  const r = seg([[{ type: "profile-marketing-consent", consent: { channel: "email", can_receive_marketing: true, consent_status: { subscription: "any" } } }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.whereCondition.dimension === "can-receive-email-marketing" && c.whereCondition.comparison.value === true, "can_receive_marketing → can-receive-email-marketing");
+  console.log("✓ can-receive-email-marketing");
+}
+
+// ── created → created-time (date) ───────────────────────────────────────────
+{
+  const r = seg([[{ type: "profile-property", property: "created", filter: { type: "date", operator: "in-the-last", quantity: 30, unit: "day" } }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.whereCondition.type === "date" && c.whereCondition.dimension === "created-time", "created → date created-time");
+  ok(c.whereCondition.comparison.type === "before-now-relative" && c.whereCondition.comparison.options.value === 30, "created timeframe before-now-relative 30d");
+  console.log("✓ created → created-time");
+}
+
+// ── first_name → customer-name (substituted) ────────────────────────────────
+{
+  const r = seg([[{ type: "profile-property", property: "first_name", filter: { operator: "equals", value: "Sam" } }]]);
+  ok(r.substitutions.length === 1, "first_name substituted");
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.whereCondition.dimension === "customer-name" && c.whereCondition.comparison.operator === "contains", "first_name → customer-name contains");
+  console.log("✓ first_name → customer-name");
+}
+
+// ── city → assume-US hierarchy ──────────────────────────────────────────────
+{
+  const r = seg([[{ type: "profile-property", property: "$city", filter: { operator: "equals", value: "Austin" } }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.whereCondition.type === "token-hierarchy" && c.whereCondition.dimension === "city", "city → token-hierarchy");
+  ok(c.whereCondition.comparison.prerequisiteValues[0] === "US", "city assumes US");
+  ok(r.substitutions.length === 1, "city is a substitution");
+  console.log("✓ city → assume-US");
+}
+
+// ── birthday → date-annual ──────────────────────────────────────────────────
+{
+  const r = seg([[{ type: "profile-property", property: "birthday", filter: { operator: "in-the-last", quantity: 7, unit: "day" } }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.whereCondition.type === "date-annual" && c.whereCondition.dimension === "birthday", "birthday → date-annual");
+  console.log("✓ birthday → date-annual");
+}
+
+// ── last_active → lapsed; expected_date_of_next_purchase → lapsed ────────────
+{
+  const r = seg([[{ type: "profile-property", property: "last_active", filter: { operator: "before", value: "2026-01-01" } }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.event === "order-placed" && c.count.operator === "eq" && c.count.value === 0, "last_active → no orders");
+  ok(r.substitutions[0].tunable === "churn-days", "last_active lapsed tunable churn-days");
+
+  const r2 = seg([[{ type: "profile-predictive-analytics", dimension: "expected_date_of_next_purchase", filter: { operator: "before", value: "2026-01-01" } }]]);
+  ok(r2.substitutions[0]?.tunable === "churn-days", "expected_date_of_next_purchase → lapsed");
+  console.log("✓ lapsed (last_active + expected-next-order)");
+}
+
+// ── timeframe between-dates ─────────────────────────────────────────────────
+{
+  const r = seg([[{ type: "profile-metric", metric_id: "m_order", measurement: "count", measurement_filter: { operator: "greater-than", value: 0 }, timeframe_filter: { operator: "between", value: ["2026-01-01", "2026-03-01"] } }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.timeframe.type === "between-dates" && c.timeframe.options.range[0] === "2026-01-01", "between → between-dates range");
+  console.log("✓ timeframe between-dates");
 }
 
 console.log(`\n${passed} assertions passed.`);

@@ -23,6 +23,8 @@ import {
   countFrom,
   KLAVIYO_NUMERIC_OP_TO_REDO,
   KLAVIYO_STRING_OP_TO_REDO,
+  mapMetricFilter,
+  METRIC_EXPLICIT_DROP,
   METRIC_TO_ACTIVITY,
   timeframeFrom,
   VALUE_MEASUREMENTS,
@@ -33,9 +35,12 @@ import type {
   CustomerActivityType,
   QueryCondition,
   SegmentQuery,
+  Timeframe,
   TokenOperator,
+  WhereCondition,
 } from "./redo-types.js";
 import {
+  substituteLapsed,
   substitutePostalCodeDistance,
   substitutePredictiveAnalytics,
   substituteRegion,
@@ -185,14 +190,97 @@ function translateProfileProperty(c: ProfilePropertyCondition): CondResult {
     };
   }
 
-  // Anything else (custom profile properties, names, zip, …) needs team-level
-  // custom-field setup we can't infer.
+  if (prop === "created") {
+    // Profile created date → created-time (full date).
+    return { kind: "exact", condition: dateAttr("created-time", timeframeFrom(c.filter)) };
+  }
+
+  if (prop === "first_name" || prop === "last_name") {
+    // Redo has only a full `customer-name` string field.
+    const value = String(rawVal ?? "");
+    const condition = stringAttr("customer-name", "contains", value);
+    return {
+      kind: "substituted",
+      condition,
+      sub: {
+        klaviyoType: "profile-property",
+        klaviyoSummary: `${prop} ${op} ${value}`,
+        redoLogic: `customer name contains "${value}" (Redo has only a full-name field)`,
+        assumptions: {},
+        tunable: null,
+        conditionRef: condition,
+      },
+    };
+  }
+
+  if (prop === "birthday") {
+    return { kind: "exact", condition: dateAttr("birthday", timeframeFrom(c.filter), true) };
+  }
+
+  if (prop === "last_active") {
+    // No Redo last-activity dim → lapsed-buyer proxy (resolved 2026-06-16).
+    return substituteLapsed("profile-property", `last_active ${op ?? ""}`.trim());
+  }
+
+  if (prop === "city") {
+    // Redo city is a hierarchy under country+state; we only have the city.
+    // Assume US (resolved 2026-06-16) — operator sets the state in Redo if needed.
+    const tok = op === "not-equals" ? "NONE" : "ANY";
+    const cityVal = String(rawVal ?? "").trim();
+    if (!cityVal)
+      return unsupported({ klaviyoType: "profile-property", dimension: "city", reason: "empty city value" });
+    const condition: QueryCondition = {
+      type: "customer_attribute",
+      whereCondition: {
+        type: "token-hierarchy",
+        dimension: "city",
+        comparison: { type: "token", operator: tok, prerequisiteValues: ["US"], values: [cityVal] },
+      },
+    };
+    return {
+      kind: "substituted",
+      condition,
+      sub: {
+        klaviyoType: "profile-property",
+        klaviyoSummary: `city ${op} ${cityVal}`,
+        redoLogic: `city ${tok === "NONE" ? "is not" : "is"} "${cityVal}" (assumed US; set the state in Redo if ambiguous)`,
+        assumptions: {},
+        tunable: null,
+        conditionRef: condition,
+      },
+    };
+  }
+
+  // Properties with no Redo target (and not a definable custom field) — give a
+  // precise reason rather than the generic custom-field fallback.
+  const reason = EXPLICIT_UNSUPPORTED[prop];
+  if (reason) return unsupported({ klaviyoType: "profile-property", dimension: prop, reason });
+
+  // Anything else (custom profile properties, etc.) needs team-level custom-field
+  // setup we can't infer.
   return unsupported({
     klaviyoType: "profile-property",
     dimension: prop,
     reason: `profile property "${c.property}" maps to a Redo custom field that must be defined on the team first.`,
   });
 }
+
+const EXPLICIT_UNSUPPORTED: Record<string, string> = {
+  zip: "Redo has no postal-code characteristic",
+  postal_code: "Redo has no postal-code characteristic",
+  timezone: "Redo has no timezone characteristic",
+  locale: "Redo has no locale characteristic",
+  organization: "Redo has no organization characteristic",
+  title: "Redo has no title characteristic",
+  updated: "Redo tracks only created-time, not last-updated",
+  source: "Redo has no acquisition-source characteristic",
+  image: "not a segmentation field",
+  address1: "Redo has no street-address characteristic",
+  address2: "Redo has no street-address characteristic",
+  latitude: "Redo has no latitude/longitude characteristic",
+  longitude: "Redo has no latitude/longitude characteristic",
+  phone_number: "Redo can match phone area code only, not full phone numbers",
+};
 
 // ---- profile-metric --------------------------------------------------------
 
@@ -203,14 +291,48 @@ function translateProfileMetric(
   const metric = ctx.metrics[c.metric_id];
   if (!metric)
     return unsupported({ klaviyoType: "profile-metric", reason: `unknown metric id ${c.metric_id}` });
-  const activity = METRIC_TO_ACTIVITY[metric.name.toLowerCase()] as CustomerActivityType | undefined;
-  if (!activity)
-    return unsupported({ klaviyoType: "profile-metric", dimension: metric.name, reason: `metric "${metric.name}" has no Redo activity equivalent` });
+  const name = metric.name.toLowerCase();
+
+  // Unsubscribed-email event → current unsubscribed state (resolved 2026-06-16).
+  if (name === "unsubscribed" || name === "unsubscribed email" || name === "unsubscribed from email") {
+    const condition: QueryCondition = {
+      type: "customer_attribute",
+      whereCondition: { type: "boolean", dimension: "subscribed-to-email", comparison: { type: "boolean", value: false } },
+    };
+    return {
+      kind: "substituted",
+      condition,
+      sub: {
+        klaviyoType: "profile-metric",
+        klaviyoSummary: `${metric.name} event`,
+        redoLogic: "subscribed-to-email = false (current state; the event timeframe is dropped)",
+        assumptions: {},
+        tunable: null,
+        conditionRef: condition,
+      },
+    };
+  }
+
+  const activity = METRIC_TO_ACTIVITY[name] as CustomerActivityType | undefined;
+  if (!activity) {
+    const reason = METRIC_EXPLICIT_DROP[name] ?? `metric "${metric.name}" has no Redo activity equivalent`;
+    return unsupported({ klaviyoType: "profile-metric", dimension: metric.name, reason });
+  }
 
   const measurement = String(c.measurement ?? "count").toLowerCase();
   const op = c.measurement_filter?.operator;
   const value = Number(c.measurement_filter?.value ?? 0);
   const timeframe = timeframeFrom(c.timeframe_filter);
+
+  // Translate Klaviyo event-property filters → Redo event_filters.
+  const eventFilters: WhereCondition[] = [];
+  let droppedFilters = 0;
+  for (const mf of c.metric_filters ?? []) {
+    const wc = mapMetricFilter(activity, mf.property, mf.filter);
+    if (wc) eventFilters.push(wc);
+    else droppedFilters++;
+  }
+  const dropNote = droppedFilters > 0 ? ` (${droppedFilters} property filter(s) had no Redo field — segment will be broader)` : "";
 
   // Value measurement (sum of $value) → at-least-once + numeric event_filter.
   if (VALUE_MEASUREMENTS.has(measurement)) {
@@ -218,14 +340,13 @@ function translateProfileMetric(
     const redoOp = op ? KLAVIYO_NUMERIC_OP_TO_REDO[op] : undefined;
     if (!dimension || !redoOp)
       return unsupported({ klaviyoType: "profile-metric", dimension: metric.name, reason: `value measurement on "${metric.name}" has no Redo value dimension` });
+    eventFilters.unshift({ type: "numeric", dimension, comparison: { type: "numeric", operator: redoOp, value } });
     const condition: QueryCondition = {
       type: "customer_activity",
       event: activity,
       count: { operator: "gt", value: 0 },
       timeframe,
-      event_filters: [
-        { type: "numeric", dimension, comparison: { type: "numeric", operator: redoOp, value } },
-      ],
+      event_filters: eventFilters,
     };
     return {
       kind: "substituted",
@@ -233,7 +354,7 @@ function translateProfileMetric(
       sub: {
         klaviyoType: "profile-metric",
         klaviyoSummary: `${metric.name} value ${op} ${value}`,
-        redoLogic: `${activity} with ${dimension} ${redoOp} ${value} (Klaviyo sums over the window; Redo matches per-event)`,
+        redoLogic: `${activity} with ${dimension} ${redoOp} ${value} (Klaviyo sums over the window; Redo matches per-event)${dropNote}`,
         assumptions: {},
         tunable: null,
         conditionRef: condition,
@@ -249,8 +370,23 @@ function translateProfileMetric(
     event: activity,
     count: countFrom(op, value),
     timeframe,
-    event_filters: [],
+    event_filters: eventFilters,
   };
+  // Clean count, all filters mapped → exact. Dropped filters → broader → flag.
+  if (droppedFilters > 0) {
+    return {
+      kind: "substituted",
+      condition,
+      sub: {
+        klaviyoType: "profile-metric",
+        klaviyoSummary: `${metric.name} count`,
+        redoLogic: `${activity} count with ${eventFilters.length} filter(s)${dropNote}`,
+        assumptions: {},
+        tunable: null,
+        conditionRef: condition,
+      },
+    };
+  }
   return { kind: "exact", condition };
 }
 
@@ -287,6 +423,25 @@ function translateGroupMembership(
 function translateMarketingConsent(c: ProfileMarketingConsentCondition): CondResult {
   const channel = c.consent?.channel;
   const subscription = c.consent?.consent_status?.subscription;
+  const canReceive = c.consent?.can_receive_marketing;
+
+  // "Can receive email marketing" (eligibility, not strict opt-in) → Redo's
+  // can-receive-email-marketing dimension, when no explicit subscription state
+  // is set. Email channel only (Redo has no can-receive-sms dimension).
+  if (channel === "email" && (subscription == null || subscription === "any") && canReceive != null) {
+    return {
+      kind: "exact",
+      condition: {
+        type: "customer_attribute",
+        whereCondition: {
+          type: "boolean",
+          dimension: "can-receive-email-marketing",
+          comparison: { type: "boolean", value: canReceive },
+        },
+      },
+    };
+  }
+
   const dimension =
     channel === "sms" ? "subscribed-to-sms" : channel === "email" ? "subscribed-to-email" : null;
   if (!dimension)
@@ -383,6 +538,13 @@ function stringAttr(
   return {
     type: "customer_attribute",
     whereCondition: { type: "string", dimension, comparison: { type: "string", operator, value } },
+  };
+}
+
+function dateAttr(dimension: string, comparison: Timeframe, annual = false): QueryCondition {
+  return {
+    type: "customer_attribute",
+    whereCondition: { type: annual ? "date-annual" : "date", dimension, comparison },
   };
 }
 
