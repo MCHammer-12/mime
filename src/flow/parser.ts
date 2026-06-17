@@ -485,16 +485,9 @@ async function convertAction(
       // count + timeframe). Unmapped condition types stay as warnings and
       // omit from the expression.
       const expression = translateConditionalSplitExpression(action, metrics, warnings);
-      const conditionCount =
-        (expression as any)?.inlineSegment?.conditions?.length ?? 0;
-      const customTitle =
-        conditionCount > 0
-          ? undefined
-          : `TODO: configure condition (was Klaviyo conditional-split)`;
       const step: ConditionStep = {
         type: StepType.CONDITION,
         id,
-        ...(customTitle ? { customTitle } : {}),
         expression,
         nextTrueId,
         nextFalseId,
@@ -517,9 +510,6 @@ async function convertAction(
       const step: ConditionStep = {
         type: StepType.CONDITION,
         id,
-        ...(tsExpr
-          ? {}
-          : { customTitle: `TODO: configure condition (was Klaviyo trigger-split)` }),
         expression,
         nextTrueId,
         nextFalseId,
