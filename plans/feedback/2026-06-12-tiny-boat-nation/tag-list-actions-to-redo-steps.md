@@ -1,7 +1,7 @@
 ---
-status: blocked
-branch: fix/tag-list-actions-to-redo-steps
-pr: null
+status: partial
+branch: fix/segment-auto-creation-at-import
+pr: 121
 ---
 
 **Decision note (2026-06-12):** the `list-update → manage_static_segment` half of this task needs a Redo `segmentId`, which requires segment creation at import. Michael ruled: **auto-create the segment; for static lists, copy the members** (memory `feedback_segment_import_decision`). That capability is now its own foundational task — [ad-hoc Task 4 `segment-auto-creation-at-import`](../2026-05-26-ad-hoc/segment-auto-creation-at-import.md), gated on a merchant-facing create-segment RPC that doesn't yet exist in redoapp. **This task's list→segment half is blocked on Task 4.** The **tag half** (`add/remove tag → manage_customer_tags`) is independent and can ship now — split it out and proceed with tags; leave the segment half for after Task 4.
@@ -102,4 +102,24 @@ mapping exists.
 
 ## Done
 
-(filled by executor on completion)
+**List half SHIPPED — PR [#121](https://github.com/MCHammer-12/mime/pull/121) (2026-06-12).**
+`list-update` → `manage_static_segment` is built end-to-end:
+
+- `ManageStaticSegmentStep` type; parser emits it (operation `"add"`, defaults
+  flagged) with a transient `_klaviyoListId` marker + degraded-mapping warning.
+- treeify handles the new step type (rewritePointers + cloneStepWithNewId).
+- `resolveSegmentSteps` (import) matches an existing same-named Redo segment via
+  `fetchTeamSegments`, else `createStaticSegment`, deduped per list. Segment
+  populates members at flow runtime, so no member-copy is needed for the ACTION.
+  Failure → chain-preserving WAIT + `segmentWarnings`.
+- W2yEfw verified: its lone `list-update` (`list_id XxFujr`) now yields a
+  `manage_static_segment` step. Smoke: `src/migrate/segment-resolution.smoke.ts`.
+
+This supersedes the blanket `list-update` drop (memory
+`feedback_drop_unsupported_actions`) for the add-to-list subset.
+
+**Tag half NOT done — no fixture.** No Tiny Boat flow has an add-tag/remove-tag
+action, so `manage_customer_tags` has nothing to build/verify against this
+batch, and a name→`tagId` resolution gap would need its own decision. Per memory
+`feedback_skipped_action_mappings`, not mapping it speculatively. Re-open when a
+flow with a real tag action appears.

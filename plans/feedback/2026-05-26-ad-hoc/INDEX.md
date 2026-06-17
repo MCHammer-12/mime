@@ -11,7 +11,7 @@ workflow as the merchant batches.
 | 1 | done | [Flow condition on metric VALUE mistranslated as event COUNT](cart-value-condition-mistranslated.md) | `fix/condition-value-measurement` | [#110](https://github.com/MCHammer-12/mime/pull/110) |
 | 2 | done | [Font preflight: map Klaviyo font → brand-kit font after adding](font-name-mismatch-mapping.md) | `fix/font-name-mismatch-mapping` | [#111](https://github.com/MCHammer-12/mime/pull/111) |
 | 3 | unclaimed | [Klaviyo date / predictive triggers crash import (50KB Zod 400)](date-predictive-trigger-failure.md) | `fix/date-predictive-trigger-failure` | — |
-| 4 | unclaimed | [Auto-create Redo segments at import (copy static lists, members included)](segment-auto-creation-at-import.md) | `fix/segment-auto-creation-at-import` | — |
+| 4 | partial | [Auto-create Redo segments at import (copy static lists, members included)](segment-auto-creation-at-import.md) — action-side (create/match) shipped; member-copy for conditions still gapped | `fix/segment-auto-creation-at-import` | [#121](https://github.com/MCHammer-12/mime/pull/121) |
 | 5 | done | [Started Checkout → Checkout Abandonment (reverse PR #43)](started-checkout-to-checkout-abandonment.md) | `fix/started-checkout-to-checkout-abandonment` | [#122](https://github.com/MCHammer-12/mime/pull/122) |
 
 ## Michael's decisions — 2026-06-12

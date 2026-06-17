@@ -7,7 +7,7 @@ import {
 } from "./condition-mapping.js";
 import type { TemplateResolver } from "./template-resolver.js";
 import { treeifyFlow } from "./treeify.js";
-import { resolveTrigger, type TriggerResolution } from "./trigger-mapping.js";
+import { resolveTrigger, summarizeTriggerFilter, type TriggerResolution } from "./trigger-mapping.js";
 import { rewriteKlaviyoLiquid } from "./variable-mapping.js";
 import { substituteStringVars } from "../transform.js";
 import { formatAddress, type KlaviyoAccount } from "../fetch-account.js";
@@ -16,6 +16,7 @@ import {
   StepType,
   WaitTimeUnit,
   type AbTestStep,
+  type ManageStaticSegmentStep,
   type AdvancedFlow,
   type ConditionStep,
   type DoNothingStep,
@@ -566,11 +567,45 @@ async function convertAction(
       return dropAction(terminate(next, state));
     }
 
+    case "list-update": {
+      // Klaviyo list-update (add the profile to a list) → Redo
+      // manage_static_segment step. The Redo segmentId is resolved at
+      // import time (match-by-name or create — see resolveSegmentSteps in
+      // import-rpc.ts); the parser carries the Klaviyo list id as a marker.
+      // The step populates the segment at flow runtime, mirroring Klaviyo.
+      const listId = action.data?.list_id;
+      if (!listId) {
+        warnings.push({
+          kind: "unsupported-action",
+          actionId: id,
+          message: `list-update action ${id} has no list_id — dropped`,
+        });
+        return dropAction(terminate(next, state));
+      }
+      // Klaviyo flow list-updates are overwhelmingly "add to list". The
+      // action data doesn't reliably distinguish remove, so default to add
+      // and flag it so the operator can flip a rare remove-flow manually.
+      warnings.push({
+        kind: "degraded-mapping",
+        actionId: id,
+        message: `list-update (Klaviyo list ${listId}) → manage_static_segment "add". A Redo static segment is created/matched at import; the step adds members at runtime. If this flow REMOVES from a list, flip the operation in the Redo flow builder.`,
+      });
+      const step: ManageStaticSegmentStep = {
+        type: StepType.MANAGE_STATIC_SEGMENT,
+        id,
+        operation: "add",
+        segmentId: "", // resolved at import from _klaviyoListId
+        nextId: terminate(next, state),
+        disabled: false,
+        _klaviyoListId: String(listId),
+      };
+      return step;
+    }
+
     // Drop policy: actions with no Redo equivalent that would otherwise leave
     // a "TODO" WAIT stub for the merchant to clean up. Re-stitch chain past
     // them using the drop sentinel.
     case "update-profile":
-    case "list-update":
     case "target-date":
     default: {
       warnings.push({
@@ -715,9 +750,12 @@ export async function parseFlow(
   const triggers = defn?.triggers ?? [];
   for (const t of triggers) {
     if (t.trigger_filter) {
+      const summary = summarizeTriggerFilter(t.trigger_filter);
       warnings.push({
         kind: "requires-review",
-        message: `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter (product/event filter) that mime doesn't yet translate at the flow level — configure manually in the Redo flow builder`,
+        message: summary
+          ? `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter "${summary}" that mime doesn't yet translate at the flow level — re-create this condition manually in the Redo flow builder`
+          : `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter (product/event filter) that mime doesn't yet translate at the flow level — configure manually in the Redo flow builder`,
       });
     }
   }

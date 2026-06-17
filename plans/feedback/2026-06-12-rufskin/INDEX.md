@@ -8,17 +8,15 @@ Items: 4 flows (3 feedback + 1 hard failure)
 
 | # | Status | Task | Branch | PR |
 |---|--------|------|--------|----|
-| 1 | unclaimed | [Survey/custom-event metric mis-resolved + trigger_filter not migrated](survey-metric-trigger-filter.md) | `fix/survey-metric-trigger-filter` | — |
+| 1 | done | [Survey/custom-event metric mis-resolved + trigger_filter not migrated](survey-metric-trigger-filter.md) | `fix/survey-metric-trigger-filter` | [#124](https://github.com/MCHammer-12/mime/pull/124) |
 | 2 | unclaimed | [Welcome Series — "SHOP NOW" text link dropped + text formatting distorted](welcome-shop-now-link-formatting.md) | `fix/welcome-shop-now-link-formatting` | — |
 
-## Needs Michael's decision (NOT a task yet)
+## ~~Needs Michael's decision~~ → RESOLVED (PR #122)
 
-**HseqBM "Abandoned Cart" — trigger mapping conflict.** Reviewer says:
+**HseqBM "Abandoned Cart" — trigger mapping conflict.** Reviewer:
 > the flow trigger was migrated incorrectly. Redo created it as an Abandoned Cart flow when the original Klaviyo flow was actually triggered by Started Checkout.
 
-**This is a deliberate mime design decision, not a bug.** Per PR [#43](https://github.com/MCHammer-12/mime/pull/43) + memory `project_sms_migration_plan` era work + SESSION-LOG 2026-05-08: mime intentionally maps Klaviyo "Started Checkout" → Redo `MARKETING_CART_ABANDONMENT` (not checkout abandonment), because Klaviyo's stock "Abandoned Cart" flow uses Started Checkout as its trigger and merchants think of it as cart abandonment. Confirmed with Redo eng at the time. The parse-result shows `cart_abandoned` / `marketing_cart_abandonment` — working as designed.
-
-The Rufskin reviewer disagrees with that mapping for this flow. **Decision needed:** keep the current Started-Checkout→Cart-Abandonment mapping, make it operator-selectable, or revisit the default. Until Michael rules, no task. (If revisited, it's a change to `trigger-mapping.ts` + likely the trigger-picker.)
+**Resolved 2026-06-12 — the reviewer was right.** Michael reversed PR [#43](https://github.com/MCHammer-12/mime/pull/43): Klaviyo "Started Checkout" → Redo **Checkout Abandonment** (`MARKETING_CHECKOUT_ABANDONMENT`), shipped in PR [#122](https://github.com/MCHammer-12/mime/pull/122) ([ad-hoc Task 5](../2026-05-26-ad-hoc/started-checkout-to-checkout-abandonment.md)). HseqBM will now import as Checkout Abandonment on re-import. `added to cart` stays cart abandonment.
 
 ## Collapsed into other batches
 
@@ -35,6 +33,6 @@ The Rufskin reviewer disagrees with that mapping for this flow. **Decision neede
 
 **Flow IDs + triggers (from parse-results):**
 - H8K2Tu — Welcome Series — `email_signup` (Task 2 + font/formatting)
-- Y7HwZ3 — SURVEY COMPLETED (GV support) — mime resolved to `order_fulfilled`/`order_tracking` (**wrong** — Task 1) + trigger_filter `survey_code equals 689d034ddda30` not translated
-- HseqBM — Abandoned Cart — `cart_abandoned` (trigger = design decision above; fonts + dynamic product collapsed)
+- Y7HwZ3 — SURVEY COMPLETED (GV support) — now → null (skip → trigger picker), no longer `order_fulfilled` (Task 1 done #124); trigger_filter `survey_code equals 689d034ddda30` surfaced by name
+- HseqBM — Abandoned Cart — Started Checkout → **Checkout Abandonment** as of #122 (was `cart_abandoned`); fonts + dynamic product collapsed
 - HFqsSH — Happy Birthday Email - Standard — `date`/`marketing_date` — **FAILED** (ad-hoc Task 3)
