@@ -39,14 +39,16 @@ const METRIC_NAME_MAP: Record<
   string,
   { key: TriggerKey; schemaType: SchemaType; category: FlowCategory }
 > = {
-  // Klaviyo's "Started Checkout" is colloquially "abandoned cart" — it's the
-  // event Klaviyo's stock "Abandoned Cart" flow uses. Strict semantics would
-  // map it to MARKETING_CHECKOUT_ABANDONMENT, but in practice merchants think
-  // of "they put stuff in cart and didn't buy" as cart abandonment, and Redo's
-  // CART trigger is the closer match for their workflow + UI label. Confirmed
-  // with Redo eng on 2026-05-08.
-  "started checkout":   { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT,     category: "Marketing" },
-  "checkout started":   { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT,     category: "Marketing" },
+  // Klaviyo's "Started Checkout" → Redo CHECKOUT abandonment (strict semantics).
+  // This REVERSES the 2026-05-08 decision (PR #43) that mapped it to CART
+  // abandonment on merchant-naming grounds ("merchants call it abandoned cart").
+  // Michael's call 2026-06-12: semantic correctness wins — Started Checkout is
+  // checkout abandonment — driven by reviewer feedback (Rufskin HseqBM, SHOC
+  // R3uzmb wanted Checkout Abandonment). `added to cart` below stays CART
+  // abandonment; only the two Started-Checkout aliases flip. The key flip also
+  // auto-selects the isCheckoutAbandoned skip field (AUTO_SKIP_ABANDONMENT_FIELD).
+  "started checkout":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT, category: "Marketing" },
+  "checkout started":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT, category: "Marketing" },
   "added to cart":      { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT,     category: "Marketing" },
   "viewed product":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
   "active on site":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
