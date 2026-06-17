@@ -22,7 +22,7 @@ Klaviyo definition = `condition_groups[]` (AND) → `conditions[]` (OR). Redo = 
 | `organization` | — | unsupported | ➕ | |
 | `image` | — | unsupported | — | not a segmentation field |
 | `address1`/`address2` | — | unsupported | ➕ | Redo has no street-address dim |
-| `city` / `location['city']` | `city` (token-hierarchy) | **NEEDS MICHAEL** | ➕ | Redo `city` needs country+state prerequisites; Klaviyo city is plain text → see Q3 |
+| `city` / `location['city']` | `city` (token-hierarchy) | substituted | ➕ | Michael 2026-06-16: assume US + best-effort (like `$region`) |
 | `region` / `$region` (state) | `state-province` (token-hierarchy) | substituted | ✅ | assumes country US (prereq) |
 | `country` / `$country` | `country` (token) | exact | ✅ | name→ISO map (partial in proto — needs full ISO table) |
 | `zip` / `$zip` | — (Redo ZIP commented out) | unsupported | ➕ | no Redo zip characteristic |
@@ -31,7 +31,7 @@ Klaviyo definition = `condition_groups[]` (AND) → `conditions[]` (OR). Redo = 
 | `locale` | — | unsupported | ➕ | |
 | `created` (profile created) | `created-time` (date) | exact | ➕ | direct date map |
 | `updated` | — | unsupported | ➕ | Redo has only `created-time` |
-| `last_active` | — | **NEEDS MICHAEL** | ➕ | no Redo last-activity dim → see Q2 |
+| `last_active` / `expected_date_of_next_purchase` | `order-placed` zero_times in last N days | substituted | ➕ | Michael 2026-06-16: lapsed-buyer proxy, N auto-tuned |
 | `$source` (initial source) | — | unsupported | ➕ | |
 | date custom props / anniversaries | `custom-fields` (date) or `birthday` | substituted | ➕ | birthday→`birthday` (annual); other dates→custom-field if defined |
 
@@ -72,9 +72,11 @@ Klaviyo definition = `condition_groups[]` (AND) → `conditions[]` (OR). Redo = 
 | Received / Opened / Clicked Email | `received-email` / `opened-email` / `clicked-email` | exact | ✅ |
 | Received / Clicked SMS | `received-text` / `clicked-text` | exact | ✅ |
 | Subscribed to Back in Stock | `subscribed-to-back-in-stock` | exact | ➕ |
-| Refunded Order | `return-processed`? | **NEEDS MICHAEL** | ➕ | Q1 |
-| Cancelled / Fulfilled Order | — | **NEEDS MICHAEL** | ➕ | Q1 |
-| Bounced Email / Marked Spam / Unsub Email | — / consent? | **NEEDS MICHAEL** | ➕ | Q4 (unsub) |
+| Refunded Order | `return-processed` | substituted | ➕ | Michael 2026-06-16: refund≈return |
+| Cancelled Order | — | unsupported | ➕ | no Redo activity |
+| Fulfilled Order | — | unsupported | ➕ | no fulfillment activity in segments (only flow triggers); `custom_event` only if Redo ingests it |
+| Unsubscribed Email | `subscribed-to-email` = false | substituted | ➕ | Michael 2026-06-16: map to current unsub state (loses timeframe) |
+| Bounced Email / Marked Spam | — | unsupported | ➕ | no Redo activity |
 | Bounced/Failed SMS, Submitted Search, Shipment events | — | unsupported | ➕ | no Redo activity |
 
 ### Measurement
@@ -142,11 +144,11 @@ Klaviyo definition = `condition_groups[]` (AND) → `conditions[]` (OR). Redo = 
 
 ---
 
-## NEEDS MICHAEL (the genuine judgment calls)
-- **Q1 — Refunded / Cancelled / Fulfilled Order metrics.** Redo has `return-processed` (Redo Returns) but no Shopify refund/cancel/fulfillment activity. Map Refunded→return-processed (approx), or drop all three?
-- **Q2 — Lapsed / last-active.** Klaviyo `last_active` + `expected_date_of_next_order` have no Redo characteristic. Substitute "lapsed" via `order-placed zero_times in last N days`, or drop?
-- **Q3 — Bare city.** Redo `city` needs country+state context; Klaviyo city is plain text. Assume US + best-effort (like `$region`), drop+warn, or match against a custom field?
-- **Q4 — "Unsubscribed Email" metric** (the event, not consent state). Map to `subscribed-to-email = false`, or drop?
+## RESOLVED (Michael, 2026-06-16)
+- **Q1 — order events.** Refunded Order → `return-processed` (substituted). Cancelled + Fulfilled Order → unsupported (no Redo segment activity; fulfillment exists only as a flow trigger, and `custom_event` would only work if Redo ingests it).
+- **Q2 — lapsed / last-active.** Substitute via `order-placed zero_times in last N days` (N auto-tuned to Klaviyo population).
+- **Q3 — bare city.** Assume US + best-effort, same as `$region`/state.
+- **Q4 — unsubscribed-email event.** Map to `subscribed-to-email = false` (current state; timeframe nuance dropped).
 
 ## Build gaps vs. the prototype (the ➕ rows above, summarized)
 1. `metric_filters` → `event_filters` (product/collection/vendor/sku/quantity/item_count) — biggest gap.
