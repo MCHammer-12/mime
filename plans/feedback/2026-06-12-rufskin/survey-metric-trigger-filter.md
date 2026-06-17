@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: done
 branch: fix/survey-metric-trigger-filter
-pr: null
+pr: 124
 ---
 
 # Survey/custom-event metric mis-resolved to order_fulfilled + trigger_filter dropped
@@ -68,4 +68,31 @@ Scope: **the trigger resolution + filter for survey/custom-event metrics.** Don'
 
 ## Done
 
-(filled by executor on completion)
+**Shipped — PR #124 (2026-06-12).**
+
+**Part 1 (silent wrong-default) was already fixed — verified + locked.** Current
+`resolveMetricTrigger` returns `null` (→ skip → trigger picker) for any metric
+not in `METRIC_NAME_MAP`; "Survey Response Completed" / "Quiz Finished" / etc. no
+longer resolve to `order_fulfilled` (the unknown→skip path postdates Rufskin's
+troubleshoot). This matches Michael's decision (`feedback_migration_decisions`:
+unknown custom-event metrics always go to the picker, never silent-default).
+Added `survey-trigger.smoke.ts` to lock it: unknown survey/custom metrics →
+null + unsupported-trigger warning; real order metrics still resolve (regression
+guard). **Did NOT auto-map to Redo's `custom_event` trigger** (it does exist,
+triggers.ts:1346) — that would contradict the "go to the picker" decision.
+
+**Part 2 (trigger_filter) — now surfaced by name.** New `summarizeTriggerFilter`
+(trigger-mapping.ts) renders the filter (AND within a group, OR across groups);
+the parser's review warning now reads `... has a trigger_filter "survey_code
+equals 689d034ddda30" ... re-create this condition manually` instead of a vague
+note. Still not auto-translated to a Redo trigger-data expression — surfaced
+actionably per the task's fallback. (Fires when a trigger resolves, e.g. via the
+picker; an unknown-metric flow is skipped before reaching it.)
+
+Verify: `survey-trigger.smoke` 4/4; `flow-reentry-criteria.smoke` still green
+(message still contains "trigger_filter"); all flow smokes + `batch-test`
+416/0-failed.
+
+**Out of scope (noted):** social-links cloning folds into the socials work
+(Castle #90); the `profile_filter` profile-property warning is the separate
+profile-property gap — neither expanded here.
