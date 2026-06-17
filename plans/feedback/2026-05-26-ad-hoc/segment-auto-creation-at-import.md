@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: partial
 branch: fix/segment-auto-creation-at-import
-pr: null
+pr: 121
 ---
 
 # Auto-create Redo segments at import (copy static Klaviyo lists, members included)
@@ -97,4 +97,26 @@ In [`src/migrate/import-rpc.ts`](../../../src/migrate/import-rpc.ts) (import pat
 
 ## Done
 
-(filled by executor on completion)
+**ACTION-side slice SHIPPED — PR [#121](https://github.com/MCHammer-12/mime/pull/121) (2026-06-12).**
+
+What landed: Klaviyo `list-update` ACTION → Redo `manage_static_segment`. At
+import, `resolveSegmentSteps` matches an existing same-named Redo segment via
+`fetchTeamSegments` (the "match-by-name interim" from Notes) and, when absent,
+**creates** one via `createStaticSegment` — both merchant-callable RPCs exist
+(see Step 0 RESOLVED). Deduped per unique Klaviyo list. The action populates the
+segment at flow runtime, so **no member-copy is needed for this path** — the
+segment only has to exist. Failure → chain-preserving WAIT + `segmentWarnings`.
+
+**Still gapped (NOT in #121):**
+1. **List-membership CONDITIONS over static lists** (SHOC Task 1, Yes Homo
+   segment route) need the segment's *members* copied so a `customer is in
+   segment X` check evaluates correctly at import time — not just at runtime.
+   That needs a merchant-facing **add-members-to-static-segment RPC**, which
+   does NOT exist in redoapp today (`updateStaticSegment` renames only). This is
+   the one real remaining blocker; the "members included" half of this task's
+   title lives here.
+2. **DYNAMIC Klaviyo segments** → `createDynamicSegment({conditions})` is
+   unbuilt (separate from static lists).
+
+Net: the foundational *create/match* capability is proven and in use. Member-copy
+for static-list CONDITIONS remains parked on the redoapp add-members RPC.
