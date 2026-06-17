@@ -214,6 +214,32 @@ function hasCommentSoldSourceFilter(triggerFilter: unknown): boolean {
   return false;
 }
 
+// Render a Klaviyo trigger_filter into a short human string for a review
+// warning, e.g. `survey_code equals 689d034ddda30`. Conditions within a group
+// join with AND; groups join with OR. Returns null if nothing readable is
+// found (caller falls back to a generic message). mime doesn't yet translate
+// trigger_filters to Redo trigger-data expressions — naming the exact filter
+// lets the operator re-create it by hand.
+export function summarizeTriggerFilter(triggerFilter: unknown): string | null {
+  if (!triggerFilter || typeof triggerFilter !== "object") return null;
+  const tf = triggerFilter as any;
+  const groupStrs: string[] = [];
+  for (const g of tf.condition_groups ?? []) {
+    const condStrs: string[] = [];
+    for (const c of g?.conditions ?? []) {
+      const field = c?.field ?? c?.type;
+      const op = c?.filter?.operator ?? c?.operator;
+      const val = c?.filter?.value ?? c?.value;
+      if (!field && !op) continue;
+      condStrs.push(
+        [field, op, val].filter((x) => x !== undefined && x !== null && x !== "").join(" "),
+      );
+    }
+    if (condStrs.length) groupStrs.push(condStrs.join(" AND "));
+  }
+  return groupStrs.length ? groupStrs.join(" OR ") : null;
+}
+
 function resolveMetricTrigger(
   t: KlaviyoTrigger,
   metrics: MetricLookup,

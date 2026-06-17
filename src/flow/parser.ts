@@ -7,7 +7,7 @@ import {
 } from "./condition-mapping.js";
 import type { TemplateResolver } from "./template-resolver.js";
 import { treeifyFlow } from "./treeify.js";
-import { resolveTrigger, type TriggerResolution } from "./trigger-mapping.js";
+import { resolveTrigger, summarizeTriggerFilter, type TriggerResolution } from "./trigger-mapping.js";
 import { rewriteKlaviyoLiquid } from "./variable-mapping.js";
 import { substituteStringVars } from "../transform.js";
 import { formatAddress, type KlaviyoAccount } from "../fetch-account.js";
@@ -750,9 +750,12 @@ export async function parseFlow(
   const triggers = defn?.triggers ?? [];
   for (const t of triggers) {
     if (t.trigger_filter) {
+      const summary = summarizeTriggerFilter(t.trigger_filter);
       warnings.push({
         kind: "requires-review",
-        message: `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter (product/event filter) that mime doesn't yet translate at the flow level — configure manually in the Redo flow builder`,
+        message: summary
+          ? `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter "${summary}" that mime doesn't yet translate at the flow level — re-create this condition manually in the Redo flow builder`
+          : `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter (product/event filter) that mime doesn't yet translate at the flow level — configure manually in the Redo flow builder`,
       });
     }
   }
