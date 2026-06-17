@@ -19,6 +19,7 @@ const metrics: MetricLookup = {
   m_unsub: { id: "m_unsub", name: "Unsubscribed Email", integration_name: null, integration_category: null, integration_key: null, created: null },
   m_cancel: { id: "m_cancel", name: "Cancelled Order", integration_name: null, integration_category: null, integration_key: null, created: null },
   m_bounce: { id: "m_bounce", name: "Bounced Email", integration_name: null, integration_category: null, integration_key: null, created: null },
+  m_csms: { id: "m_csms", name: "Clicked SMS", integration_name: null, integration_category: null, integration_key: null, created: null },
 };
 
 let passed = 0;
@@ -331,6 +332,15 @@ function seg(conditions: KlaviyoCondition[][], extra?: Partial<TranslateContext>
   const c: any = r.query.conditionBlocks[0].conditions[0];
   ok(c.timeframe.type === "between-dates" && c.timeframe.options.range[0] === "2026-01-01", "between → between-dates range");
   console.log("✓ timeframe between-dates");
+}
+
+// ── SMS metric aliases: "Clicked SMS" → clicked-text (live-data fix) ────────
+{
+  const r = seg([[{ type: "profile-metric", metric_id: "m_csms", measurement: "count", measurement_filter: { operator: "greater-than", value: 0 } }]]);
+  const c: any = r.query.conditionBlocks[0].conditions[0];
+  ok(c.type === "customer_activity" && c.event === "clicked-text", "Clicked SMS → clicked-text");
+  ok(r.substitutions.length === 0, "Clicked SMS is exact, not a custom_event");
+  console.log("✓ Clicked SMS → clicked-text");
 }
 
 console.log(`\n${passed} assertions passed.`);

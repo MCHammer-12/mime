@@ -28,10 +28,10 @@ async function main() {
     const name = s.attributes?.name ?? null;
     const base = `${id}-${slug(name, id)}`;
 
-    // definition = condition tree; profile_count is rate-limited (1/s) but the
-    // klaviyo() helper backs off on 429 automatically.
+    // definition (condition tree) comes back by default; profile_count is the
+    // only valid additional-field (rate-limited 1/s — klaviyo() backs off on 429).
     const detail = await klaviyo(
-      `/segments/${id}/?additional-fields%5Bsegment%5D=definition,profile_count`,
+      `/segments/${id}/?additional-fields%5Bsegment%5D=profile_count`,
       key,
     );
     await writeFile(join(outDir, `${base}.json`), JSON.stringify(detail, null, 2));

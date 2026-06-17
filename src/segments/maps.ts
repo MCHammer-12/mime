@@ -54,6 +54,9 @@ export const METRIC_TO_ACTIVITY: Record<string, string> = {
   "received email": "received-email",
   "clicked text": "clicked-text",
   "received text": "received-text",
+  // Klaviyo names its SMS metrics "Clicked SMS" / "Received SMS" (not "Text").
+  "clicked sms": "clicked-text",
+  "received sms": "received-text",
   "viewed product": "viewed-product",
   "added to cart": "added-product-to-cart",
   "placed order": "order-placed",
