@@ -1,7 +1,15 @@
 # Klaviyo → Redo segment field mapping (authoritative)
 
-**Status:** research complete 2026-06-16. The spec for extending `src/segments/maps.ts` + `substitutions.ts` + `translate.ts`. A few rows are flagged **NEEDS MICHAEL** — see the bottom.
-**Sources:** Klaviyo OpenAPI `create_segment.json` + help center; Redo `redo/model/src/marketing/segments/*` (segment-types.ts, segment-data-structures.ts, segment-where-condition.ts, segment-timeframe.ts).
+**Status:** research complete 2026-06-16; **re-verified against current Redo main 2026-06-17** (see banner). Spec for `src/segments/maps.ts` + `substitutions.ts` + `translate.ts`.
+**Sources:** Klaviyo OpenAPI `create_segment.json` + help center; Redo `redo/model/src/marketing/segments/*`.
+
+## ⚠️ Re-verification 2026-06-17 — corrections (supersede the tables below)
+The first pass read a **9,640-commits-stale** local redoapp checkout and undersold Redo. Re-checked against current main (`origin/main` HEAD `7227aaf`). Corrections:
+- **Already supported + already mapped** (never actually dropped in the engine): `subscribed-to-email`, `subscribed-to-sms`, **`can-receive-email-marketing`**, `country`, `state-province`, `city`, `proximity-to-city`, `static-segment-membership`, `phone-number-area-code`. "Address" = the location set (country/state/city/proximity); "phone" = area code.
+- **Now mapped (built 2026-06-17):** Bounced Email → `bounced-email` activity (new on current main). **Fulfilled Order (and any other unmapped metric) → count-gated `custom_event`** by event name (only matches if Redo ingests that event; ±10% check flags it otherwise). `profile-postal-code-distance` → **`proximity-to-city`** (radius/operator/country mapped; postal left as the city value for the operator to complete).
+- **Still genuinely absent on current main:** predictive CLV/AOV/churn/gender/next-order as *characteristics* (→ order-based substitutions + auto-tune, unchanged); **full phone-number string** + **street-address line (address1)** (only area-code + location exist — DEFERRED, Michael checking where these live); exact zip as a characteristic (→ proximity workaround above).
+- **Decisions:** Cancelled Order stays dropped (2026-06-16). Refunded → `return-processed` (2026-06-16).
+- New activities available if needed: `payment-failed-no-order-created`, `payment-failed-after-order-created`.
 
 ## How to read
 - **Tier** — `exact` (clean 1:1), `substituted` (proxy + "here's our logic", needs the ±10% count check), `unsupported` (no Redo target → drop + warn).
