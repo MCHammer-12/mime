@@ -30,10 +30,11 @@ upcoming-charge, OMS fulfillment; **false** for everything else (abandonment
 cart/checkout/browse, date, custom-event, segment, list, price-drop). For the
 false set the per-step field is honored and defaults to throttle-on.
 
-**Memory correction:** `project_redo_smart_sending_skip_conditions` claimed
-"abandonment automations need shouldSkipSmartSending (default on)" — that's
-wrong; abandonment is in the false set. The `isCartAbandoned==false` skip
-condition (separate mechanism) part of that memory stands.
+**Memory note:** `project_redo_smart_sending_skip_conditions`'s body was already
+correct and prescribed this exact mapping (Klaviyo `false` → `shouldSkipSmartSending:true`;
+default behavior ON). Only its one-line index summary read ambiguously. Enhanced
+the memory with the per-trigger-key force-skip nuance (`shouldSkipSmartSendingForTriggerKey`),
+which it hadn't captured.
 
 ## Change (shipped)
 
