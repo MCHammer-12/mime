@@ -47,6 +47,12 @@ const FLOW_END_ID = "flow_end";
 // reference so parseFlow can append the step.
 interface ParseState {
   needsTerminal: boolean;
+  // Klaviyo `smart_sending_enabled` is per-message; Redo's equivalent
+  // (`trigger.shouldSkipSmartSending`) is flow-wide. Track whether any message
+  // bypassed smart sending (→ set the trigger flag true) and whether any kept
+  // it (→ a mixed flow we can't represent per-message, so warn).
+  smartSendingBypass?: boolean;
+  smartSendingThrottled?: boolean;
 }
 
 function terminate(
@@ -298,16 +304,11 @@ async function convertAction(
         recipientNameFieldName: "customerFullName",
         nextId: terminate(next, state),
       };
-      if (msg.smart_sending_enabled === false) {
-        // Flag for the importer to set shouldSkipSmartSending on the TRIGGER step
-        // (Redo can only toggle smart-sending at the trigger level). Warn so we
-        // don't silently flip flow-wide behaviour.
-        warnings.push({
-          kind: "requires-review",
-          actionId: id,
-          message: `send-email has smart_sending_enabled: false; Redo only supports this flow-wide via trigger.shouldSkipSmartSending — review before enabling`,
-        });
-      }
+      // Klaviyo's per-message smart-sending → Redo's flow-wide
+      // trigger.shouldSkipSmartSending (set after the action loop). Record the
+      // intent; mixed flows are warned there.
+      if (msg.smart_sending_enabled === false) state.smartSendingBypass = true;
+      else state.smartSendingThrottled = true;
       if (msg.transactional === true) {
         warnings.push({
           kind: "requires-review",
@@ -374,13 +375,10 @@ async function convertAction(
           message: `send-sms marked transactional — Redo coerces SmsTemplate.templateType to "marketing"; verify intended audience`,
         });
       }
-      if (msg.smart_sending_enabled === false) {
-        warnings.push({
-          kind: "requires-review",
-          actionId: id,
-          message: `send-sms has smart_sending_enabled: false; Redo only supports this flow-wide via trigger.shouldSkipSmartSending — review before enabling`,
-        });
-      }
+      // Smart-sending intent → flow-wide trigger.shouldSkipSmartSending (set
+      // after the action loop; mixed flows warned there).
+      if (msg.smart_sending_enabled === false) state.smartSendingBypass = true;
+      else state.smartSendingThrottled = true;
 
       placeholderSmsTemplates.push({
         sentinelId,
@@ -822,6 +820,23 @@ export async function parseFlow(
       continue;
     }
     steps.push(result);
+  }
+
+  // Klaviyo's per-message `smart_sending_enabled` → Redo's flow-wide
+  // `trigger.shouldSkipSmartSending`. Now that the loop has seen every message,
+  // bypass flow-wide if any message disabled smart sending. (Redo ignores this
+  // for always-bypass keys — order-tracking/signup/back-in-stock/campaign — but
+  // it's the deciding field for abandonment/date/custom triggers, where omitting
+  // it defaults to throttle-on and loses the merchant's bypass intent.) A flow
+  // that mixes on and off can't be represented per-message — bypass + warn.
+  if (state.smartSendingBypass) {
+    triggerStep.shouldSkipSmartSending = true;
+    if (state.smartSendingThrottled) {
+      warnings.push({
+        kind: "requires-review",
+        message: `Flow mixes smart-sending on and off across messages, but Redo's shouldSkipSmartSending is flow-wide — set to bypass to honor the messages that disabled it. Review per-message intent.`,
+      });
+    }
   }
 
   // Resolve transitive drops so a single hop replacement always lands on a
