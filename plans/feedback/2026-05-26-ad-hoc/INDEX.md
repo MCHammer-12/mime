@@ -11,6 +11,7 @@ workflow as the merchant batches.
 | 1 | done | [Flow condition on metric VALUE mistranslated as event COUNT](cart-value-condition-mistranslated.md) | `fix/condition-value-measurement` | [#110](https://github.com/MCHammer-12/mime/pull/110) |
 | 2 | done | [Font preflight: map Klaviyo font → brand-kit font after adding](font-name-mismatch-mapping.md) | `fix/font-name-mismatch-mapping` | [#111](https://github.com/MCHammer-12/mime/pull/111) |
 | 6 | unclaimed | [Condition timeframe in minutes → round to nearest hour (Redo supports hours only)](timeframe-minutes-round-to-hours.md) | `fix/timeframe-minutes-round-to-hours` | — |
+| 7 | unclaimed | [Klaviyo universal (saved/shared) content blocks not migrated](universal-content-blocks-not-migrated.md) | `fix/universal-content-blocks` | — |
 
 (Tasks 3–5 — date-trigger, segment-auto-creation, started-checkout — live on their own in-flight PRs; numbering reflects creation order.)
 
