@@ -1,7 +1,7 @@
 ---
 status: done
 branch: fix/carry-smart-sending-bypass
-pr: TBD
+pr: 134
 ---
 
 # Klaviyo `smart_sending_enabled: false` not carried to Redo (only warned)
