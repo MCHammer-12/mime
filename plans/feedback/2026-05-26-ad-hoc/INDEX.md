@@ -13,6 +13,9 @@ workflow as the merchant batches.
 | 3 | unclaimed | [Klaviyo date / predictive triggers crash import (50KB Zod 400)](date-predictive-trigger-failure.md) | `fix/date-predictive-trigger-failure` | — |
 | 4 | unclaimed | [Auto-create Redo segments at import (copy static lists, members included)](segment-auto-creation-at-import.md) | `fix/segment-auto-creation-at-import` | — |
 | 5 | unclaimed | [Started Checkout → Checkout Abandonment (reverse PR #43)](started-checkout-to-checkout-abandonment.md) | `fix/started-checkout-to-checkout-abandonment` | — |
+| 8 | **unclaimed — URGENT** | [Flow emails orphaned — placeholder templateId never resolved (breaks ALL flow imports)](flow-email-templateid-orphaned.md) | `fix/flow-email-templateid-orphaned` | — |
+
+(Tasks 6–7 — timeframe rounding, universal blocks — live on PR #132 until merged; numbering = creation order.)
 
 ## Michael's decisions — 2026-06-12
 
