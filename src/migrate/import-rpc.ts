@@ -1059,6 +1059,24 @@ export async function importFlowRpc(
     );
   }
 
+  // Guard: a marketing_date trigger MUST carry triggerSpecificFields, or
+  // createAdvancedFlow rejects the whole flow with a 50KB Zod wall (the
+  // date-trigger crash). Fail with a precise reason rather than shipping a
+  // trigger Redo will 400 on.
+  const badDateTrigger = (newFlow.steps ?? []).find(
+    (s: any) =>
+      s?.type === "trigger" &&
+      s?.schemaType === "marketing_date" &&
+      (s?.triggerSpecificFields == null || typeof s.triggerSpecificFields !== "object"),
+  );
+  if (badDateTrigger) {
+    throw new Error(
+      `Flow "${bundle.automation.name}": marketing_date trigger is missing triggerSpecificFields ` +
+        `(needs a birthday dimension + comparison). Aborting before createAdvancedFlow — ` +
+        `this would 400 on a Zod validation wall.`,
+    );
+  }
+
   let created: any;
   try {
     // createAdvancedFlow is mounted on the general /rpc router, NOT /marketing-rpc.

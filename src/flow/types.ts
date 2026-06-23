@@ -154,6 +154,20 @@ export interface BaseStep {
   customTitle?: string;
 }
 
+// Redo's `marketing_date` trigger REQUIRES triggerSpecificFields, and its only
+// supported dimension is BIRTHDAY (redoapp marketingDateTriggerStepSchema /
+// marketingDateTriggerFields). `comparison` is the timing relative to the date:
+// fire on the day (`today`) or an exact N-units before/after.
+export interface MarketingDateTriggerFields {
+  dimension: "birthday";
+  comparison:
+    | { type: "today"; options: null }
+    | {
+        type: "before-now-relative-exact" | "after-now-relative-exact";
+        options: { value: number; units: "day" | "week" | "month" | "year" };
+      };
+}
+
 export interface TriggerStep extends BaseStep {
   type: StepType.TRIGGER;
   schemaType: SchemaType;
@@ -165,6 +179,8 @@ export interface TriggerStep extends BaseStep {
     conditions: unknown[];
   };
   shouldSkipSmartSending?: boolean;
+  // Required by Redo for the marketing_date trigger; omitted for others.
+  triggerSpecificFields?: MarketingDateTriggerFields;
 }
 
 export interface WaitStep extends BaseStep {

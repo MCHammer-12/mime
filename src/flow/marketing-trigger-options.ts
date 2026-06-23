@@ -123,11 +123,13 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
   },
   {
     value: "date",
-    label: "Date (anniversary, birthday, …)",
+    label: "Date — birthday (Redo's only date trigger)",
     resolution: {
       key: MarketingTriggerKey.DATE,
       schemaType: SchemaType.MARKETING_DATE,
       category: "Marketing",
+      // Redo's marketing_date trigger requires this and supports only birthday.
+      triggerSpecificFields: { dimension: "birthday", comparison: { type: "today", options: null } },
     },
   },
   {
