@@ -1,7 +1,7 @@
 ---
 status: done
 branch: fix/date-predictive-trigger-failure
-pr: TBD
+pr: 136
 ---
 
 # Klaviyo date / predictive-analytics triggers crash the flow import (50KB Zod 400)
@@ -67,7 +67,7 @@ Consider a pre-flight validation in [`import-rpc.ts`](../../../src/migrate/impor
 
 ## Done
 
-**Shipped — PR TBD (2026-06-23). The 400 crash is fixed.**
+**Shipped — PR #136 (2026-06-23). The 400 crash is fixed.**
 
 Confirmed the exact Redo shape against `origin/main` (local redoapp ~9640 behind):
 `marketingDateTriggerStepSchema.triggerSpecificFields = { dimension:
