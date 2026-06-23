@@ -161,6 +161,39 @@ export interface ImportResult {
   name: string;
 }
 
+/**
+ * Pull the newly-created template's Mongo `_id` out of a create-template RPC
+ * response. On current redoapp `createEmailTemplate`/`createSmsTemplate`
+ * return the full entity with `_id` as a top-level 24-char hex string (the
+ * RPC `output` schema runs `objectId().transform(String)`), so `created._id`
+ * is the happy path. The extra paths defend against response-shape drift
+ * (the `zod → zod-util` / Zod 3→4 era already shifted one EmailTemplate
+ * contract — see #127): if the id ever nests under `.template`/`.data` or the
+ * field gets renamed, we still find it instead of silently capturing `""`.
+ *
+ * Returns "" only when NO id is present anywhere — callers MUST treat that as
+ * a hard failure, never as a usable id (an empty id silently orphans flow
+ * steps: the sentinel→real swap leaves the `__PLACEHOLDER__` in place and
+ * createAdvancedFlow accepts it because its templateId is an unvalidated
+ * `z.string()`).
+ */
+export function extractCreatedTemplateId(created: any): string {
+  if (created == null) return "";
+  const candidate =
+    created._id ??
+    created.id ??
+    created.template?._id ??
+    created.template?.id ??
+    created.data?._id ??
+    created.data?.id ??
+    "";
+  const id = String(candidate ?? "");
+  // Guard the "[object Object]" footgun: objectId()'s predicate accepts any
+  // object with toString, so a non-string/non-ObjectId value stringifies to
+  // junk rather than a hex id. A real Mongo id is 24 lowercase hex chars.
+  return /^[a-f0-9]{24}$/i.test(id) ? id : "";
+}
+
 // ─── Template import ───────────────────────────────────────────────────────
 
 export interface ImportTemplateOptions extends ImportOptions {
@@ -228,8 +261,24 @@ export async function importTemplateRpc(
     });
     throw e;
   }
+  const templateId = extractCreatedTemplateId(created);
+  if (!templateId) {
+    // The create returned 200 but we couldn't find a usable `_id`. Shipping
+    // this "" downstream is what orphaned every flow email (Jack Henry,
+    // 2026-06-23): the sentinel→real swap silently kept the placeholder.
+    // Fail loud instead — a broken import must be visible, not silent.
+    const rpc = options.asSavedTemplate
+      ? "createSavedEmailTemplate"
+      : "createEmailTemplate";
+    throw new Error(
+      `${rpc} returned no template _id for "${template.name ?? "(unnamed)"}". ` +
+        `Response shape may have changed on the redoapp side — refusing to ` +
+        `continue with an empty id (would orphan the flow step). ` +
+        `Response keys: ${created && typeof created === "object" ? Object.keys(created).join(", ") : typeof created}`,
+    );
+  }
   const result: ImportResult = {
-    templateId: String(created._id ?? created.id ?? ""),
+    templateId,
     name: String(created.name ?? template.name ?? ""),
   };
   options.onProgress?.({
@@ -812,6 +861,16 @@ export async function importFlowRpc(
 
     try {
       const created = await importTemplateRpc(templateJson, options);
+      // importTemplateRpc throws on an empty id, so `created.templateId` is
+      // guaranteed real here. Belt-and-suspenders: only record the mapping +
+      // bump the counter when we actually have one, so the reported
+      // createdTemplateCount can never overstate success (the old code
+      // incremented even when the id was "").
+      if (!created.templateId) {
+        throw new Error(
+          `importTemplateRpc returned an empty templateId for "${ph.subject}"`,
+        );
+      }
       sentinelToRealId.set(ph.sentinelId, created.templateId);
       if (ph.fullTemplate) createdTemplateCount++;
       else blankTemplateCount++;
@@ -829,6 +888,11 @@ export async function importFlowRpc(
           buildBlankTemplate(bundle.automation.name, ph, flowSchemaType),
           options,
         );
+        if (!blank.templateId) {
+          throw new Error(
+            `blank-fallback importTemplateRpc returned an empty templateId for "${ph.subject}"`,
+          );
+        }
         sentinelToRealId.set(ph.sentinelId, blank.templateId);
         blankTemplateCount++;
       } catch (e2: any) {
@@ -869,7 +933,16 @@ export async function importFlowRpc(
         { template },
         options,
       );
-      const realId = String(created._id ?? created.id ?? "");
+      const realId = extractCreatedTemplateId(created);
+      if (!realId) {
+        // Same orphan trap as the email path: an empty id would leave the
+        // SendSmsStep pointing at its sentinel. Fail loud.
+        throw new Error(
+          `createSmsTemplate returned no template _id for "${template.name}". ` +
+            `Response shape may have changed on the redoapp side. ` +
+            `Response keys: ${created && typeof created === "object" ? Object.keys(created).join(", ") : typeof created}`,
+        );
+      }
       sentinelToRealId.set(ph.sentinelId, realId);
       options.onProgress?.({
         kind: "template_created",
@@ -934,10 +1007,26 @@ export async function importFlowRpc(
 
   // 2. Swap sentinel templateIds in the automation. Both send_email and
   //    send_sms steps use the same sentinel→real map.
+  //
+  //    FAIL LOUD on an unresolved sentinel. The old code did
+  //    `if (!real) return step` — silently leaving the `__PLACEHOLDER__` on
+  //    the step. createAdvancedFlow's send_email schema is an unvalidated
+  //    `z.string()` (it accepts ObjectIds OR special identifiers), so the
+  //    placeholder sailed through and the flow imported "successfully" with
+  //    every email orphaned (Jack Henry, 2026-06-23). A missing mapping now
+  //    throws so the import fails visibly instead of shipping dead emails.
   const steps = segResolved.steps.map((step) => {
     if (step.type !== "send_email" && step.type !== "send_sms") return step;
-    const real = sentinelToRealId.get(String(step.templateId ?? ""));
-    if (!real) return step; // leave as-is; server will reject, caller sees the error
+    const sentinel = String(step.templateId ?? "");
+    const real = sentinelToRealId.get(sentinel);
+    if (!real) {
+      throw new Error(
+        `Flow "${bundle.automation.name}": ${step.type} step ${step.id ?? "(no id)"} ` +
+          `has templateId "${sentinel}" with no resolved Redo template id. ` +
+          `Refusing to POST a placeholder to createAdvancedFlow (would orphan the email). ` +
+          `Known sentinels: [${[...sentinelToRealId.keys()].join(", ")}]`,
+      );
+    }
     return { ...step, templateId: real };
   });
 
@@ -950,6 +1039,25 @@ export async function importFlowRpc(
   } = bundle.automation;
 
   const newFlow = { ...flowRest, steps, team: await resolveTeamId(options) };
+
+  // Guard: no step may retain a `__PLACEHOLDER_` templateId. The swap above
+  // already throws on an unresolved sentinel; this is the final backstop so a
+  // placeholder can NEVER reach createAdvancedFlow (the bug we're fixing —
+  // orphaned flow emails that imported with zero errors).
+  const orphanedSteps = (newFlow.steps ?? []).filter(
+    (s: any) =>
+      (s?.type === "send_email" || s?.type === "send_sms") &&
+      typeof s?.templateId === "string" &&
+      s.templateId.startsWith("__PLACEHOLDER_"),
+  );
+  if (orphanedSteps.length > 0) {
+    throw new Error(
+      `Flow "${bundle.automation.name}": ${orphanedSteps.length} step(s) still ` +
+        `carry a __PLACEHOLDER_ templateId after the sentinel swap ` +
+        `(${orphanedSteps.map((s: any) => `${s.type}:${s.templateId}`).join(", ")}). ` +
+        `Aborting before createAdvancedFlow — these would be orphaned emails.`,
+    );
+  }
 
   let created: any;
   try {
