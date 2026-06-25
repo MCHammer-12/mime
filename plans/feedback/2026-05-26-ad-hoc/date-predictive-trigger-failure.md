@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: done
 branch: fix/date-predictive-trigger-failure
-pr: null
+pr: 136
 ---
 
 # Klaviyo date / predictive-analytics triggers crash the flow import (50KB Zod 400)
@@ -67,4 +67,40 @@ Consider a pre-flight validation in [`import-rpc.ts`](../../../src/migrate/impor
 
 ## Done
 
-(filled by executor on completion)
+**Shipped — PR #136 (2026-06-23). The 400 crash is fixed.**
+
+Confirmed the exact Redo shape against `origin/main` (local redoapp ~9640 behind):
+`marketingDateTriggerStepSchema.triggerSpecificFields = { dimension:
+CustomerCharacteristicType, comparison: today | before-now-relative-exact |
+after-now-relative-exact }`, and `marketingDateTriggerFields = [BIRTHDAY]` — the
+**only** supported dimension (`CustomerCharacteristicType.BIRTHDAY = "birthday"`).
+`comparison` `today` = `{ type: "today", options: null }`.
+
+**Part A + B (combined, pragmatic).** mime can't reliably read Klaviyo's exact
+date property/offset (no fixture; Redo only supports birthday anyway), so any
+Klaviyo `date` trigger now emits `triggerSpecificFields: { dimension: "birthday",
+comparison: { type: "today", options: null } }` + a `degraded-mapping` warning
+telling the operator to confirm the date property/offset in Redo. This unblocks
+the flow **and its email content** — the real cost of the 400 was the entire
+flow (templates included) failing, which is exactly the Rufskin pain ("rebuilt
+from scratch"). Non-birthday/predictive date flows import as birthday-on-day +
+the loud warning, landing inactive for review, instead of crashing.
+
+Files: `types.ts` (`MarketingDateTriggerFields` + `TriggerStep.triggerSpecificFields`),
+`trigger-mapping.ts` (`case "date"` emits it + warns; `BIRTHDAY_ON_DAY` const),
+`marketing-trigger-options.ts` (picker Date option carries it too), `parser.ts`
+(spreads it onto the trigger step).
+
+**Part C — preflight guard** in `import-rpc.ts`: before `createAdvancedFlow`,
+throw a precise error if a `marketing_date` trigger lacks `triggerSpecificFields`
+(backstop against the 50KB Zod wall for any future gap).
+
+Verify: new `date-trigger.smoke` 3/3 (resolveTrigger shape + parseFlow trigger
+step + non-date regression); all flow smokes green; `batch-test` 416/0-failed;
+0 new tsc errors.
+
+**Residual (separate task, NOT this PR):** Jackson Hole's `profile-predictive-analytics`
+**condition** still translates to an empty `conditions: []` + the existing
+"not yet translated" warning. The flow no longer 400s (trigger is valid now), so
+it imports degraded rather than failing — but faithfully migrating/blocking that
+predictive condition is a condition-mapping item, not a trigger one.

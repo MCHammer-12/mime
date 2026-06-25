@@ -794,6 +794,9 @@ export async function parseFlow(
     ...(skipConditions.length > 0
       ? { skipConditions: { conjunctionMode: "OR", conditions: skipConditions } }
       : {}),
+    ...(resolution.triggerSpecificFields
+      ? { triggerSpecificFields: resolution.triggerSpecificFields }
+      : {}),
   };
 
   const steps: Step[] = [triggerStep];

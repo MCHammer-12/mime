@@ -7,6 +7,7 @@ import {
   type FlowCategory,
   type KlaviyoFlow,
   type KlaviyoTrigger,
+  type MarketingDateTriggerFields,
   type ParseWarning,
   type TriggerKey,
 } from "./types.js";
@@ -25,7 +26,20 @@ export interface TriggerResolution {
   //   viewed-product   → skip if customer has NOT viewed-product in window
   //   active-on-site   → skip if customer HAS viewed-product in window
   klaviyoSource?: "viewed-product" | "active-on-site";
+  // Required by Redo for the marketing_date trigger (parseFlow writes it onto
+  // the trigger step). Without it createAdvancedFlow 400s on a 50KB Zod wall.
+  triggerSpecificFields?: MarketingDateTriggerFields;
 }
+
+// Redo's marketing_date trigger only supports a birthday dimension firing on
+// the day. mime can't read Klaviyo's exact date property/offset reliably, so
+// default to that and warn — it unblocks the flow + its email content (the
+// real cost of the 400 was the whole flow, including templates, failing) while
+// the operator confirms the date property + offset in the Redo builder.
+const BIRTHDAY_ON_DAY: MarketingDateTriggerFields = {
+  dimension: "birthday",
+  comparison: { type: "today", options: null },
+};
 
 // Well-known Klaviyo metric names → Redo trigger. Keys are case-insensitive.
 // Merchants customize metric NAMES rarely but metric IDs always — the name is
@@ -348,7 +362,16 @@ export function resolveTrigger(
         category: "Marketing",
       };
     case "date":
-      return { key: MarketingTriggerKey.DATE, schemaType: SchemaType.MARKETING_DATE, category: "Marketing" };
+      warnings.push({
+        kind: "degraded-mapping",
+        message: `Klaviyo date trigger imported as "birthday, on the day" — the only date trigger Redo supports. If this flow keyed on a different date property (anniversary, custom or predicted date) or used a day offset, set it in the Redo flow builder before enabling.`,
+      });
+      return {
+        key: MarketingTriggerKey.DATE,
+        schemaType: SchemaType.MARKETING_DATE,
+        category: "Marketing",
+        triggerSpecificFields: BIRTHDAY_ON_DAY,
+      };
     case "price-drop":
       return { key: MarketingTriggerKey.PRICE_DROP, schemaType: SchemaType.MARKETING_PRICE_DROP, category: "Marketing" };
     default:
