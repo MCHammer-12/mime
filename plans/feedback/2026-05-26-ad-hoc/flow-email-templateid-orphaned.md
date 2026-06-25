@@ -1,8 +1,11 @@
 ---
-status: partially-shipped — #135 landed the orphaning fix; 2 items remain
+status: done (diagnosis doc) — #135 MERGED; remaining work = Tasks 9 + 10
 branch: fix/flow-email-templateid-orphaned
-pr: 135 (orphaning half only)
+pr: 135 (merged)
 priority: URGENT — Jack Henry flow emails blank
+note: This file is the diagnosis + history record. Actionable follow-ups are
+  Task 10 (surface-resolve-failure-reason — do first) and Task 9
+  (simple-editor-template-parser). #135 is fully merged, not partial.
 ---
 
 # URGENT: flow emails show no content — Jack Henry
