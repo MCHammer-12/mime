@@ -2,14 +2,44 @@
 status: unclaimed
 branch: fix/flow-email-templateid-orphaned
 pr: null
-priority: URGENT — breaks all flow email imports
+priority: URGENT — Jack Henry flow emails blank
 ---
 
-# URGENT: flow emails show no content — placeholder templateId never resolved
+# URGENT: flow emails show no content — Jack Henry
 
 ## Feedback (verbatim)
 
-Jack Henry, Michael (2026-06-23): "all of the emails in this and every other flow aren't showing any content. there is no email. what is happening??" — 5 flows, every email blank in Redo.
+Jack Henry, Michael (2026-06-23 + 2026-06-25): "all of the emails in this and every other flow aren't showing any content. there is no email." Persisted across two re-imports.
+
+## CORRECTION (2026-06-25) — the templateId-swap theory below is DISPROVEN
+
+Live inspection via the Redo MCP of a real mime-imported flow ("Added To Cart (Arvo)", `6a26e00499ad61dbf054c05a`, imported 2026-06-08) shows the importer **works end-to-end**:
+- every `send_email` step carries a **real ObjectId templateId** (e.g. `6a26e002090fd8338876f05b`), NOT a placeholder — the swap works;
+- `get_template` on that id returns a **fully populated** template (images, columns, button, socials, footer).
+
+So the placeholder-swap / empty-`_id` mechanism described in the "Root cause" section below is **not** what's happening. Disregard it.
+
+**What's actually wrong (from the 2026-06-25 bundle, flow SRiAES "WC | Abandoned Cart"):**
+- `createdTemplateCount: 2, blankTemplateCount: 6` (8 email steps). manifest `emailsImported: 8`.
+- Per [import-rpc.ts:756-762](../../../src/migrate/import-rpc.ts), `blankTemplateCount++` fires when **`ph.fullTemplate` is null** — i.e. the template **failed to resolve at parse time**, so mime built a BLANK. So **6 of 8 templates never resolved → blank → no content.** 2 resolved fine.
+- **The resolver recorded NO reason** — the bundle has zero `templateWarnings`. The typed `ResolveFailure` reasons (PR #39) are not surfacing. We've been blind across two rounds because of this.
+
+The 8 Klaviyo template ids (resolve targets): `RqyJ8H, SY7JvT, Y7vBZa, Y4TmNh, Vra2UZ, R2rkiC, UYqnU3, Tmf26k`.
+
+**Leading hypothesis (needs confirmation, same method that cracked Castle Sports):** the 6 failing templates are `editor_type: CODE` → the CODE parser returns empty → null fullTemplate → blank. Could also be Klaviyo API errors fetching them. **Cannot confirm without Jack Henry's Klaviyo key** (to check `editor_type` on those 8 ids + re-parse) OR the Redo MCP pointed at Jack Henry's team (to inspect flow `6a3d7b703ea1aa15b600bbdf` + its templates live — the MCP is currently authed to a different team, "Arvo/Otishi").
+
+**Open discrepancy:** Michael reports "every flow, every email" blank, but the first bundle had flows with `blankTemplateCount: 0` (content created). If content templates ALSO render blank in Redo, there may be a SECOND issue (a regression after 2026-06-08, since Arvo imported then works). Needs live Jack Henry data to confirm.
+
+## TWO actionable items regardless of the above
+
+1. **Surface the resolve-failure reason (do this first — it's why we're blind).** The resolver/import path must emit a `templateWarning` with the typed `ResolveFailure` reason for EVERY template that falls to blank (`ph.fullTemplate === null`). Today it's silent. With it, the next bundle tells us exactly why each of the 6 went blank instead of guessing. Files: [`src/flow/template-resolver.ts`](../../../src/flow/template-resolver.ts), the resolve call in the flow parser, [`import-rpc.ts:756`](../../../src/migrate/import-rpc.ts).
+2. **Don't swallow the content-create error in the blank fallback** ([import-rpc.ts:769-786](../../../src/migrate/import-rpc.ts)): if `importTemplateRpc` throws for a content template, the catch builds a blank and discards the original error `e` (only re-thrown if the blank ALSO fails). Log/emit `e` so a createEmailTemplate failure is visible, not masked as a silent blank.
+
+## NEXT STEP TO LOCALIZE (needs Michael)
+Provide ONE of: (a) Jack Henry's Klaviyo private key → check `editor_type` of the 8 template ids + re-parse the failing ones (confirms CODE vs API-error); (b) the Redo MCP scoped to Jack Henry's team → inspect flow `6a3d7b703ea1aa15b600bbdf` and whether its 2 "content" templates actually render. Either localizes it in minutes.
+
+---
+## (DISPROVEN — kept for history) Original root cause hypothesis
 
 ## Root cause — mechanism confirmed end-to-end
 
