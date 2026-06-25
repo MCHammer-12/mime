@@ -1,8 +1,17 @@
 import { parseKlaviyoHtml } from "./index.js";
-import { readFileSync, readdirSync } from "fs";
+import { readFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
 
-const dirs = ["migrations/test-account/templates", "migrations/merchant-2/templates"];
+// Auto-discover every migrations/<merchant>/templates dir. The corpus is
+// gitignored and populated by extract-templates.ts (which writes
+// migrations/<MERCHANT>/templates), so the merchant names aren't known ahead
+// of time — glob them rather than hardcoding.
+const root = "migrations";
+const dirs = existsSync(root)
+  ? readdirSync(root)
+      .map((m) => join(root, m, "templates"))
+      .filter((d) => existsSync(d))
+  : [];
 let total = 0, clean = 0, warned = 0, failed = 0;
 
 for (const dir of dirs) {
