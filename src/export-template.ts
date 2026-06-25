@@ -62,13 +62,19 @@ export async function exportTemplateFromHtml(
   meta: TemplateMetadata,
   opts: { account: KlaviyoAccount | null; skipAi: boolean },
 ): Promise<ExportFromHtmlResult> {
-  // Route to the appropriate parser. CODE templates are hand-coded email
-  // HTML without the kl-*/gxp-kl-* class markers the default parser relies
-  // on. If editor_type isn't known, fall back to a heuristic: if the HTML
-  // has zero kl-* classes, use the CODE parser.
+  // Route to the appropriate parser. The default parser keys entirely on
+  // kl-*/gxp-kl-* block classes. CODE and SIMPLE templates have none — CODE is
+  // hand-coded HTML; SIMPLE is plain <div>/<span> text (Jack Henry's
+  // abandoned-cart emails, "Hi {{ first_name }}, you left a few things behind").
+  // Both must use the non-class CODE parser, which extracts text/image/button
+  // from arbitrary HTML. Belt-and-braces: ANY zero-kl-class HTML routes there
+  // too — the kl parser can only ever yield 0 sections (a blank email) on it,
+  // which is exactly the silent-blank bug (2 of Jack Henry's 8 emails).
+  const hasKlClasses = /class="[^"]*(?:kl-|gxp-kl-)/.test(html);
   const useCodeParser =
     meta.editorType === "CODE" ||
-    (!meta.editorType && !/class="[^"]*(?:kl-|gxp-kl-)/.test(html));
+    meta.editorType === "SIMPLE" ||
+    !hasKlClasses;
   const {
     sections: rawSections,
     warnings,
@@ -79,6 +85,15 @@ export async function exportTemplateFromHtml(
   } = useCodeParser
     ? parseCodeTemplateHtml(html, { storeUrl: opts.account?.websiteUrl ?? null })
     : parseKlaviyoHtml(html, { storeUrl: opts.account?.websiteUrl ?? null });
+
+  // Never silently ship a blank: if the chosen parser produced nothing, say so
+  // (names the editor_type so a "blank email" report is self-diagnosing — pairs
+  // with the import-side blank-reason surfacing).
+  if (rawSections.length === 0) {
+    warnings.push(
+      `Template parsed to 0 sections (editor_type=${meta.editorType ?? "unknown"}, ${useCodeParser ? "code" : "kl"} parser) — the imported email will be blank. Review the source template.`,
+    );
+  }
 
   let sections = rawSections;
   let substitutions: string[] = [];
