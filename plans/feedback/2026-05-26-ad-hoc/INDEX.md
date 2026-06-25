@@ -13,7 +13,16 @@ workflow as the merchant batches.
 | 3 | unclaimed | [Klaviyo date / predictive triggers crash import (50KB Zod 400)](date-predictive-trigger-failure.md) | `fix/date-predictive-trigger-failure` | — |
 | 4 | partial | [Auto-create Redo segments at import (copy static lists, members included)](segment-auto-creation-at-import.md) — action-side (create/match) shipped; member-copy for conditions still gapped | `fix/segment-auto-creation-at-import` | [#121](https://github.com/MCHammer-12/mime/pull/121) |
 | 5 | done | [Started Checkout → Checkout Abandonment (reverse PR #43)](started-checkout-to-checkout-abandonment.md) | `fix/started-checkout-to-checkout-abandonment` | [#122](https://github.com/MCHammer-12/mime/pull/122) |
-| 8 | **unclaimed — URGENT** | [Flow emails blank — templates resolve to nothing + SIMPLE-editor gap; resolver is silent on why](flow-email-templateid-orphaned.md) | `fix/flow-email-templateid-orphaned` | — |
+| 8 | **partially shipped — URGENT** | [Flow emails blank](flow-email-templateid-orphaned.md) — #135 shipped the orphaning fail-loud (fixed GPA) but Jack Henry still blank: templates resolve to nothing, resolver silent on why → **surface the reason** | `fix/flow-email-templateid-orphaned` | [#135](https://github.com/MCHammer-12/mime/pull/135) (orphaning half) |
+| 9 | unclaimed | [Klaviyo `editor_type: SIMPLE` templates parse to 0 sections (silent blank)](simple-editor-template-parser.md) — Jack Henry, 2 of 8; split from Task 8 | `fix/simple-editor-template-parser` | — |
+
+(Tasks 6–7 — timeframe rounding, universal blocks — live on PR #132 until merged; numbering = creation order.)
+
+## Deployed 2026-06-25 (Michael published after #137/#138/#139)
+Live now: **#135** (flow-email orphaning fail-loud — fixed GPA placeholder bug),
+**#136** (date triggers — completes Cluster B), **#137** (h2/h3 bold restore),
+**#138** (video→Image block), **#139** (docs/triage; closes GPA no-email).
+**Open after this batch:** Task 8 resolve-reason + Task 9 SIMPLE (Jack Henry).
 
 ## Michael's decisions — 2026-06-12
 

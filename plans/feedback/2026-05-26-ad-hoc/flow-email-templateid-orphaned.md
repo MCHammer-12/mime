@@ -1,11 +1,49 @@
 ---
-status: unclaimed
+status: partially-shipped — #135 landed the orphaning fix; 2 items remain
 branch: fix/flow-email-templateid-orphaned
-pr: null
+pr: 135 (orphaning half only)
 priority: URGENT — Jack Henry flow emails blank
 ---
 
 # URGENT: flow emails show no content — Jack Henry
+
+## STATUS 2026-06-25 — what shipped (#135) vs what remains
+
+**#135 shipped + deployed** (`5d66e69 Published your App`). It hardened the
+sentinel→real-id **swap** path: empty/unresolved id now **throws** instead of
+silently shipping a `__PLACEHOLDER__`; a final guard asserts no step retains a
+placeholder; the counter only increments on a real id. **This fixed the GPA
+`__PLACEHOLDER_NDsips__` orphaning case** (see #139) and the executor **refuted
+the response-shape hypothesis** against live redoapp `origin/main` —
+`createEmailTemplate` does return `body.output._id` as a top-level hex string.
+
+**BUT #135 does NOT fix Jack Henry's specific symptom.** Jack Henry's bundle
+had `blankTemplateCount: 6` — that is the **`ph.fullTemplate === null` path**
+([import-rpc.ts:761](../../../src/migrate/import-rpc.ts)): the template failed
+to **resolve at parse time**, so mime built a BLANK, created it as a *real*
+template, and the swap mapped the sentinel to that real (empty) id. The swap
+succeeds → #135's fail-loud never fires → flow imports pointing at real-but-
+blank templates. Different path from the orphaning #135 closed.
+
+**Two items STILL OPEN for Jack Henry:**
+1. **Surface the resolve-failure reason** (the meta-fix). The 6 blanks came from
+   `fullTemplate === null` and mime logged **no reason** — we still can't tell
+   deploy-timing vs Klaviyo api-error vs manifest-miss. `buildBlankTemplate`
+   and the parse-time resolver must emit the typed `ResolveFailure` reason per
+   blanked template. Until this ships we stay blind on any re-import that still
+   blanks. → carved into the resolver/import path; see "TWO actionable items #1".
+2. **Handle `editor_type: SIMPLE`** — the 2 plain-`<div>/<span>` templates
+   (zero `kl-*` classes) parse to 0 sections. New parser gap, sibling to CODE.
+   No SIMPLE path exists in `src/` today (only CODE). → split to its own task
+   [`simple-editor-template-parser.md`](simple-editor-template-parser.md).
+
+**Re-import test (now valid — deploy fully live):** re-run Jack Henry. The 6
+SYSTEM_DRAGGABLE emails should come through with content **iff** the original
+blank was deploy-timing (import hit a half-rolled instance). If they're STILL
+blank → it was a resolver fetch error and item #1 is required to see why. The
+2 SIMPLE stay blank regardless until item #2 ships.
+
+---
 
 ## Feedback (verbatim)
 
@@ -32,7 +70,14 @@ Fetched all 8 Jack Henry abandoned-cart templates from Klaviyo and ran mime's pa
 - (#3 NEW) **Handle `editor_type: SIMPLE`** — a plain-HTML parser path (no kl-classes), like the CODE path. Fixes the 2.
 
 ---
-## (earlier correction) the templateId-swap theory below is DISPROVEN
+## (nuance — read with the STATUS block above) swap-orphaning was REAL but is NOT Jack Henry's path
+
+Update 2026-06-25: the swap-orphaning **mechanism** below turned out to be real
+(GPA had a literal `__PLACEHOLDER_NDsips__`) and #135 fixed it. What was
+*disproven* is (a) the **response-shape** hypothesis (`createEmailTemplate`
+returns a top-level `_id` fine) and (b) that this is **Jack Henry's** symptom —
+his 6 blanks are the `fullTemplate === null` resolve path, not the swap. The
+live-Arvo inspection below still stands as proof the swap works when ids resolve.
 
 Live inspection via the Redo MCP of a real mime-imported flow ("Added To Cart (Arvo)", `6a26e00499ad61dbf054c05a`, imported 2026-06-08) shows the importer **works end-to-end**:
 - every `send_email` step carries a **real ObjectId templateId** (e.g. `6a26e002090fd8338876f05b`), NOT a placeholder — the swap works;
