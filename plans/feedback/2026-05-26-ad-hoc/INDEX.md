@@ -13,6 +13,16 @@ workflow as the merchant batches.
 | 3 | unclaimed | [Klaviyo date / predictive triggers crash import (50KB Zod 400)](date-predictive-trigger-failure.md) | `fix/date-predictive-trigger-failure` | — |
 | 4 | partial | [Auto-create Redo segments at import (copy static lists, members included)](segment-auto-creation-at-import.md) — action-side (create/match) shipped; member-copy for conditions still gapped | `fix/segment-auto-creation-at-import` | [#121](https://github.com/MCHammer-12/mime/pull/121) |
 | 5 | done | [Started Checkout → Checkout Abandonment (reverse PR #43)](started-checkout-to-checkout-abandonment.md) | `fix/started-checkout-to-checkout-abandonment` | [#122](https://github.com/MCHammer-12/mime/pull/122) |
+| 8 | **partially shipped — URGENT** | [Flow emails blank](flow-email-templateid-orphaned.md) — #135 shipped the orphaning fail-loud (fixed GPA) but Jack Henry still blank: templates resolve to nothing, resolver silent on why → **surface the reason** | `fix/flow-email-templateid-orphaned` | [#135](https://github.com/MCHammer-12/mime/pull/135) (orphaning half) |
+| 9 | unclaimed | [Klaviyo `editor_type: SIMPLE` templates parse to 0 sections (silent blank)](simple-editor-template-parser.md) — Jack Henry, 2 of 8; split from Task 8 | `fix/simple-editor-template-parser` | — |
+
+(Tasks 6–7 — timeframe rounding, universal blocks — live on PR #132 until merged; numbering = creation order.)
+
+## Deployed 2026-06-25 (Michael published after #137/#138/#139)
+Live now: **#135** (flow-email orphaning fail-loud — fixed GPA placeholder bug),
+**#136** (date triggers — completes Cluster B), **#137** (h2/h3 bold restore),
+**#138** (video→Image block), **#139** (docs/triage; closes GPA no-email).
+**Open after this batch:** Task 8 resolve-reason + Task 9 SIMPLE (Jack Henry).
 
 ## Michael's decisions — 2026-06-12
 
@@ -23,6 +33,8 @@ Four open questions resolved this session (memory `feedback_segment_import_decis
 4. **Unknown custom-event metrics: always surface to the picker**, never silently map to a real trigger (e.g. survey → order_fulfilled). Locks Rufskin Task 1's direction.
 
 ## Cross-cutting notes
+
+**Task 8 note:** #135 (fail-loud on placeholder templateId) was a DEFENSIVE fix for a different hypothesis — it did NOT resolve the Jack Henry blank emails. Real cause (2026-06-25 diagnosis): templates resolve to blank with no logged reason + a SIMPLE-editor parser gap. Surface the resolve-failure reason first.
 
 **Segment auto-creation (Task 4) is the foundational unblocker** for the condition/segment cluster. Decision 2026-06-12 (memory `feedback_segment_import_decision`): ship the buildable parts now, defer static-list member-copy until redoapp adds an add-members RPC. Dependents: SHOC Task 1 (list-membership condition, deferred), Tiny Boat Task 2 (list-update action, buildable). (Task 3 file lives on PR #113 until merged.)
 
