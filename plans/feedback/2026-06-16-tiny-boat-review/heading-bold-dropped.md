@@ -1,7 +1,7 @@
 ---
 status: done
 branch: fix/tbn-heading-bold-dropped
-pr: TBD
+pr: 137
 ---
 
 # Heading bold dropped ("Make Your Dumb Trolling Motor...SMART")
@@ -32,7 +32,7 @@ When converting an `<h1>..<h4>` to a text block, apply the heading's default wei
 - Routes to Content cluster (D). Likely shares a fix surface with any "heading styling lost" reports.
 
 ## Done
-**Shipped — PR TBD.** mime was already preserving the `<h2>` tag (verified: the
+**Shipped — PR #137.** mime was already preserving the `<h2>` tag (verified: the
 output kept `<h2><span style="font-size:24px">Make Your Dumb Trolling Motor...SMART</span></h2>`),
 but Redo's text editor doesn't apply the heading-tag default weight, so the bold
 was lost. Fix: new `applyHeadingWeight` transform in `text.ts` wraps `<h2>`/`<h3>`
