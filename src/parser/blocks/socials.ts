@@ -63,6 +63,32 @@ export function detectSocialPlatformFromIconSrc(src: string): SocialPlatform | n
   return platform ? (platform as SocialPlatform) : null;
 }
 
+// Redo's createEmailTemplate schema accepts only this social-platform enum
+// (redoapp redo/model/src/brand-kit.ts `SocialPlatform`). mime's SocialPlatform
+// is broader — x, threads, bluesky, twitch, telegram, whatsapp, website, email
+// are NOT accepted. An unaccepted value 400s the ENTIRE template ("Received x")
+// and the flow importer then saves a BLANK email, so one stray icon blanks the
+// whole message for every affected merchant. Map known aliases to a Redo value;
+// drop the rest (with a warning) so the email still imports with its content.
+const REDO_SOCIAL_PLATFORMS = new Set<string>([
+  "apple", "discord", "facebook", "github", "google", "instagram", "linkedin",
+  "pinterest", "reddit", "snapchat", "tiktok", "twitter", "youtube",
+]);
+// Platforms Redo represents under a different key. Redo renders the X logo under
+// "twitter" (its icon asset is literally named social-icon-x.png).
+const SOCIAL_PLATFORM_ALIASES: Record<string, SocialPlatform> = {
+  x: SocialPlatform.TWITTER,
+};
+export function mapPlatformToRedo(
+  platform: SocialPlatform | string,
+): SocialPlatform | null {
+  const alias = SOCIAL_PLATFORM_ALIASES[platform as string];
+  if (alias) return alias;
+  return REDO_SOCIAL_PLATFORMS.has(platform as string)
+    ? (platform as SocialPlatform)
+    : null;
+}
+
 export function parseSocialsBlock(
   $: $,
   $wrapper: cheerio.Cheerio<El>,
@@ -81,8 +107,15 @@ export function parseSocialsBlock(
     const href = $link.attr("href") || "";
     const platform = detectSocialPlatform(href);
     if (!platform) return;
-    if (seenPlatforms.has(platform)) return;
-    seenPlatforms.add(platform);
+    const redoPlatform = mapPlatformToRedo(platform);
+    if (!redoPlatform) {
+      ctx.warnings.push(
+        `Socials block: dropped "${platform}" link — Redo's email social-platform set doesn't include it, and sending it would 400 (blank) the whole template.`,
+      );
+      return;
+    }
+    if (seenPlatforms.has(redoPlatform)) return;
+    seenPlatforms.add(redoPlatform);
     if (href) classifyKlaviyoUrl(href, EmailBlockType.SOCIALS, ctx);
 
     const $img = $link.find("img").first();
@@ -102,7 +135,7 @@ export function parseSocialsBlock(
 
     socialLinks.push({
       id: `social-${i}`,
-      platform: platform as SocialPlatform,
+      platform: redoPlatform,
       url: href,
     });
   });
@@ -118,10 +151,17 @@ export function parseSocialsBlock(
       const src = $(img).attr("src") || "";
       const platform = detectSocialPlatformFromIconSrc(src);
       if (!platform) return;
+      const redoPlatform = mapPlatformToRedo(platform);
+      if (!redoPlatform) {
+        ctx.warnings.push(
+          `Socials block: dropped "${platform}" icon — not in Redo's email social-platform set (would 400 the template).`,
+        );
+        return;
+      }
       if (detectedColor === null) {
         detectedColor = detectSocialIconColor(src);
       }
-      socialLinks.push({ id: `social-${i}`, platform, url: "" });
+      socialLinks.push({ id: `social-${i}`, platform: redoPlatform, url: "" });
       dropped++;
     });
     if (dropped > 0) {
