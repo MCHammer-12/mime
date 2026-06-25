@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: done
 branch: fix/simple-editor-template-parser
-pr: null
+pr: 141
 priority: high — silent blank emails (Jack Henry, 2 of 8)
 ---
 
@@ -60,4 +60,17 @@ warning today; the merchant just sees no content. Sibling to the CODE gap
   multi-column) can degrade-warn rather than block.
 
 ## Done
-(filled by executor)
+
+**SHIPPED — PR [#141](https://github.com/MCHammer-12/mime/pull/141) (2026-06-25).**
+Turned out to be a one-line routing fix, not a new parser: the existing CODE
+parser (`code-template.ts`) already handles class-less HTML. The router in
+[export-template.ts](../../../src/export-template.ts) now sends
+`editor_type === "SIMPLE"` (and any zero-`kl-class` HTML) to the CODE path:
+```ts
+const hasKlClasses = /class="[^"]*(?:kl-|gxp-kl-)/.test(html);
+const useCodeParser = meta.editorType === "CODE" || meta.editorType === "SIMPLE" || !hasKlClasses;
+```
+Plus a 0-section warning naming the editor_type + which parser ran (pairs with
+#140). Verified on Jack Henry `R2rkiC` + `Tmf26k`: each now exports 1 Text
+section with the greeting + merge tags intact, no longer blank. Smoke:
+`src/parser/simple-editor-routing.smoke.ts` (3/3).
