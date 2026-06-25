@@ -1,7 +1,7 @@
 ---
-status: unclaimed
+status: done — shipped in PR #143 (proven end-to-end against prod)
 branch: fix/socials-platform-x-rejected
-pr: null
+pr: 143
 priority: URGENT — SYSTEMIC. Blanks flow emails for EVERY merchant whose templates have an X/Twitter social
 ---
 
@@ -67,9 +67,10 @@ mirroring how `mapIconColor` already clamps to Redo's limited color enum
 - End-to-end: re-import a flow that was blanking → emails arrive WITH content.
 
 ## Cleanup note
-The diagnosis created one stray test template in Jack Henry's Redo account:
-**`6a3d9bdf1672b501d551f4c7`** — name `[mime-diag] WC | Abandoned Checkout — S3qazv`.
-Safe to delete.
+The diagnosis created TWO stray test templates in Jack Henry's Redo account
+(team `mcht/6877ca4dfbc2e80adb2b02ea`) — both safe to delete:
+- **`6a3d9bdf1672b501d551f4c7`** — `[mime-diag] WC | Abandoned Checkout — S3qazv` (manual x→twitter patch proof)
+- **`6a3d9da54482db2331a3e509`** — `[mime-diag-fixed] S3qazv` (fixed-parser end-to-end proof)
 
 ## Supersedes / re-scopes
 - Task 8 (`flow-email-templateid-orphaned`): the Jack Henry symptom is THIS, not
