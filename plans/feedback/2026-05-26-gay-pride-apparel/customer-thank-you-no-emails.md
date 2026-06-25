@@ -1,5 +1,5 @@
 ---
-status: unclaimed
+status: done
 branch: fix/customer-thank-you-no-emails
 pr: null
 ---
@@ -61,5 +61,8 @@ Relevant files:
 - The Customer Thank You trigger is `order_created` (schemaType `order_tracking`), not a marketing trigger. Possibility: the import path for `order_tracking` flows handles template attachment differently from marketing flows, and that path has the bug.
 
 ## Done
-
-(filled by executor on completion)
+**Resolved by PR #135 (orphaned flow-email templateId fix).** This task's root
+cause is `templateId: "__PLACEHOLDER_NDsips__"` on send_email steps — the exact
+silent-orphaning bug fixed in #135 (`extractCreatedTemplateId` + fail-loud guard
+so a placeholder can never reach createAdvancedFlow). Re-import the GPA Customer
+Thank You flow with current `main` to confirm real template ids land.

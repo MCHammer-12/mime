@@ -38,3 +38,10 @@ So the investigation question: **does Redo's email editor honor inline anchor `c
 
 ## Done
 (filled by executor)
+
+## Executor triage 2026-06-25
+NOT A MIME BUG. Confirmed mime preserves the inline anchor colors exactly
+(`#15c` blue ×2, `rgb(248,1,1)` red). The red the merchant sees is a Redo
+editor/brand-kit link-color render question, not parser output. Resolve by
+checking whether Redo's email editor honors inline anchor `color` or forces
+`template.linkColor`/brand-kit — a redoapp investigation, not a mime change.
