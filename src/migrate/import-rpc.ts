@@ -141,6 +141,12 @@ export type ImportProgressEvent =
   | { kind: "filter_created"; templateName: string; productFilterId: string }
   | { kind: "template_created"; templateName: string; templateId: string }
   | { kind: "template_failed"; templateName: string; error: string }
+  | {
+      kind: "template_blanked";
+      templateName: string;
+      klaviyoTemplateId: string | null;
+      reason: string;
+    }
   | { kind: "font_uploading"; family: string; fileName: string }
   | { kind: "font_registered"; family: string }
   | { kind: "fonts_done"; uploaded: number; skipped: number }
@@ -758,6 +764,15 @@ export interface FlowImportResult {
   name: string;
   createdTemplateCount: number;
   blankTemplateCount: number;
+  /** One entry per email that imported BLANK (no content), with the typed
+   *  resolver-failure reason. Without this a "the emails are blank" report is a
+   *  guessing game — this turns it into a one-look diagnosis (Jack Henry,
+   *  2026-06-25). Empty/absent when every template resolved with content. */
+  blankedTemplates?: Array<{
+    name: string;
+    klaviyoTemplateId: string | null;
+    reason: string;
+  }>;
   /** Non-fatal notes from segment resolution (e.g. a list whose segment
    *  couldn't be created, whose step was converted to a pass-through WAIT). */
   segmentWarnings?: string[];
@@ -838,6 +853,37 @@ export async function importFlowRpc(
   const sentinelToRealId = new Map<string, string>();
   let createdTemplateCount = 0;
   let blankTemplateCount = 0;
+  // Per-email blank reasons surfaced to the import summary (Task 10 — the
+  // Jack Henry blind-spot). The parse path already records the typed
+  // ResolveFailure reason on `ph.templateWarnings`; we lift it here so a
+  // blanked email is never silent — the summary names which emails went blank
+  // and why (api-error vs manifest-miss vs html-empty), turning a multi-round
+  // "the emails are blank" guessing game into a one-look diagnosis.
+  const blankedTemplates: FlowImportResult["blankedTemplates"] = [];
+  const blankReasonFor = (p: {
+    templateWarnings: string[];
+  }): string => {
+    const ws = p.templateWarnings ?? [];
+    return (
+      ws.find((w) => /^Resolver failed/i.test(w)) ??
+      (ws.length
+        ? ws.join("; ")
+        : "template resolved to null with no recorded reason")
+    );
+  };
+  const recordBlank = (
+    p: { subject: string; klaviyoTemplateId: string | null },
+    reason: string,
+  ) => {
+    const name = `${bundle.automation.name} — ${p.subject || "email"}`.slice(0, 200);
+    blankedTemplates!.push({ name, klaviyoTemplateId: p.klaviyoTemplateId, reason });
+    options.onProgress?.({
+      kind: "template_blanked",
+      templateName: name,
+      klaviyoTemplateId: p.klaviyoTemplateId,
+      reason,
+    });
+  };
 
   // The flow's trigger schemaType determines which dynamic variables the
   // email builder exposes (e.g. productName/productUrl on
@@ -872,8 +918,13 @@ export async function importFlowRpc(
         );
       }
       sentinelToRealId.set(ph.sentinelId, created.templateId);
-      if (ph.fullTemplate) createdTemplateCount++;
-      else blankTemplateCount++;
+      if (ph.fullTemplate) {
+        createdTemplateCount++;
+      } else {
+        // Resolved to null at parse time → imported blank. Surface why.
+        blankTemplateCount++;
+        recordBlank(ph, blankReasonFor(ph));
+      }
     } catch (e: any) {
       // Auth-expiry must NOT be swallowed by the blank-template fallback —
       // a 401 means every subsequent template create will fail with the
@@ -895,6 +946,7 @@ export async function importFlowRpc(
         }
         sentinelToRealId.set(ph.sentinelId, blank.templateId);
         blankTemplateCount++;
+        recordBlank(ph, `template create failed, imported blank: ${e.message ?? e}`);
       } catch (e2: any) {
         // Same rule for the fallback path: surface auth expiry typed.
         if (e2 instanceof RedoAuthExpiredError) throw e2;
@@ -1126,6 +1178,7 @@ export async function importFlowRpc(
     name: bundle.automation.name,
     createdTemplateCount,
     blankTemplateCount,
+    ...(blankedTemplates && blankedTemplates.length > 0 ? { blankedTemplates } : {}),
     ...(segResolved.warnings.length > 0 ? { segmentWarnings: segResolved.warnings } : {}),
   };
 }
