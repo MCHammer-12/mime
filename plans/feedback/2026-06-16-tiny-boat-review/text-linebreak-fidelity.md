@@ -39,3 +39,10 @@ Files: [`src/parser/blocks/text.ts`](../../../src/parser/blocks/text.ts) — blo
 
 ## Done
 (filled by executor)
+
+## Executor triage 2026-06-25
+DEFERRED (real, but fiddly + regression-prone). The fix is whitespace/empty-node
+handling in text.ts (spacer divs, trailing `<div><strong> </strong></div>`,
+fragment comments) — exactly the kind of change that risks the 416-template
+corpus. Needs visual before/after on the Big-5 template, not just assertions.
+Worth doing, but as its own careful PR with corpus diffing, not bundled.

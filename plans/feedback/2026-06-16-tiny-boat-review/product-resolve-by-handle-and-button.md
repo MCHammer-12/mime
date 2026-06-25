@@ -37,3 +37,8 @@ Tiny Boat (AutoBoat, R3rU5j), Michael: "in Klaviyo it uses a static product bloc
 
 ## Done
 (filled by executor)
+
+## Executor triage 2026-06-25
+DEFERRED — needs the static-product Shopify resolver (resolve by handle) +
+carrying the product button. Bigger than a parser tweak; belongs with the
+Products cluster (E) static-product work, not the quick TBN fidelity batch.

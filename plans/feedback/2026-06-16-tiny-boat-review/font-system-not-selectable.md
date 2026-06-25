@@ -36,3 +36,11 @@ Likely (1) for the truly-generic system stack (Helvetica Neue, Arial, Georgia, e
 
 ## Done
 (filled by executor)
+
+## Executor triage 2026-06-25
+NEEDS A DECISION (not a clean parser fix). mime correctly SET the font
+(`fontFamily: "Helvetica Neue"`); the problem is it's a system font, not a
+brand-kit/Google option, so Redo's editor shows no selection. Options: (a) map
+common system fonts → a Redo-supported equivalent at parse time, (b) add them to
+the brand kit during preflight, (c) leave as-is (renders fine, just not
+editor-selectable). Pick one before coding — same family as #111 font work.
