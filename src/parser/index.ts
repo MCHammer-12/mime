@@ -23,7 +23,7 @@ import { parseMenuFromHeader } from "./blocks/menu.js";
 import { parseLineBlock } from "./blocks/line.js";
 import { parseSpacerBlock } from "./blocks/spacer.js";
 import { parseSocialsBlock } from "./blocks/socials.js";
-import { parseColumnRow, parseSplitBlock } from "./blocks/column.js";
+import { parseColumnRow, parseSplitBlock, parseTableImageRow } from "./blocks/column.js";
 import {
   parseProductBlock,
   parseLineItemsUcbBlock,
@@ -100,6 +100,39 @@ export function parseKlaviyoHtml(
     rootStyle["background-color"] ||
     bodyStyle["background-color"] ||
     "#ffffff";
+
+  // Section/hero background images aren't representable in Redo: email sections
+  // carry only a flat `sectionColor` (email-template.ts baseSectionSchema —
+  // confirmed against origin/main 2026-06-16; no hero/overlay block exists).
+  // Klaviyo sets hero backgrounds via a `background:url(...)` /
+  // `background-image:url(...)` inline style, which we drop (keeping just the
+  // color). Surface each dropped image URL — deduped — so the operator can
+  // re-add it manually as an Image block instead of silently losing it.
+  //
+  // Scoped to Klaviyo media-library images (`.../company/<id>/images/...`) on
+  // Klaviyo's CDN — the same host the socials parser keys on. A raw
+  // `background:url()` match would fire on ~52% of templates (Liquid-dynamic
+  // bgs, Outlook VML fallbacks, migration-tool decoration); the Klaviyo
+  // merchant-image scope is the real "merchant uploaded a hero background"
+  // signal (~2% of templates) with no observed false positives.
+  const droppedBgImages = new Set<string>();
+  $("[style]").each((_, el) => {
+    const m = ($(el).attr("style") || "").match(
+      /background(?:-image)?\s*:[^;]*url\(\s*['"]?([^'")\s]+)/i,
+    );
+    const url = m?.[1];
+    if (
+      !url ||
+      !/d3k81ch9hvuctc\.cloudfront\.net\/company\/[^/]+\/images\//i.test(url) ||
+      droppedBgImages.has(url)
+    ) {
+      return;
+    }
+    droppedBgImages.add(url);
+    ctx.warnings.push(
+      `Section background image not migrated — Redo email sections support only a flat background color, not a background image. Re-add it manually as an Image block in the editor: ${url}`,
+    );
+  });
 
   const boundParseColumnContent = (
     $: $,
@@ -339,6 +372,14 @@ function parseColumnContent(
     const baCardBlock = parseBrowseAbandonmentCardBlock($, $wrapper, ctx);
     if (baCardBlock) {
       blocks.push(baCardBlock);
+      return;
+    }
+
+    // Trust-bar / badge row: a kl-table whose cells are images. Without this
+    // it falls through to "Unknown block" below and every badge is dropped.
+    const tableImageRow = parseTableImageRow($, $wrapper, ctx);
+    if (tableImageRow) {
+      blocks.push(tableImageRow);
       return;
     }
 

@@ -7,6 +7,7 @@ import {
   type FlowCategory,
   type KlaviyoFlow,
   type KlaviyoTrigger,
+  type MarketingDateTriggerFields,
   type ParseWarning,
   type TriggerKey,
 } from "./types.js";
@@ -25,7 +26,20 @@ export interface TriggerResolution {
   //   viewed-product   → skip if customer has NOT viewed-product in window
   //   active-on-site   → skip if customer HAS viewed-product in window
   klaviyoSource?: "viewed-product" | "active-on-site";
+  // Required by Redo for the marketing_date trigger (parseFlow writes it onto
+  // the trigger step). Without it createAdvancedFlow 400s on a 50KB Zod wall.
+  triggerSpecificFields?: MarketingDateTriggerFields;
 }
+
+// Redo's marketing_date trigger only supports a birthday dimension firing on
+// the day. mime can't read Klaviyo's exact date property/offset reliably, so
+// default to that and warn — it unblocks the flow + its email content (the
+// real cost of the 400 was the whole flow, including templates, failing) while
+// the operator confirms the date property + offset in the Redo builder.
+const BIRTHDAY_ON_DAY: MarketingDateTriggerFields = {
+  dimension: "birthday",
+  comparison: { type: "today", options: null },
+};
 
 // Well-known Klaviyo metric names → Redo trigger. Keys are case-insensitive.
 // Merchants customize metric NAMES rarely but metric IDs always — the name is
@@ -39,14 +53,16 @@ const METRIC_NAME_MAP: Record<
   string,
   { key: TriggerKey; schemaType: SchemaType; category: FlowCategory }
 > = {
-  // Klaviyo's "Started Checkout" is colloquially "abandoned cart" — it's the
-  // event Klaviyo's stock "Abandoned Cart" flow uses. Strict semantics would
-  // map it to MARKETING_CHECKOUT_ABANDONMENT, but in practice merchants think
-  // of "they put stuff in cart and didn't buy" as cart abandonment, and Redo's
-  // CART trigger is the closer match for their workflow + UI label. Confirmed
-  // with Redo eng on 2026-05-08.
-  "started checkout":   { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT,     category: "Marketing" },
-  "checkout started":   { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT,     category: "Marketing" },
+  // Klaviyo's "Started Checkout" → Redo CHECKOUT abandonment (strict semantics).
+  // This REVERSES the 2026-05-08 decision (PR #43) that mapped it to CART
+  // abandonment on merchant-naming grounds ("merchants call it abandoned cart").
+  // Michael's call 2026-06-12: semantic correctness wins — Started Checkout is
+  // checkout abandonment — driven by reviewer feedback (Rufskin HseqBM, SHOC
+  // R3uzmb wanted Checkout Abandonment). `added to cart` below stays CART
+  // abandonment; only the two Started-Checkout aliases flip. The key flip also
+  // auto-selects the isCheckoutAbandoned skip field (AUTO_SKIP_ABANDONMENT_FIELD).
+  "started checkout":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT, category: "Marketing" },
+  "checkout started":   { key: MarketingTriggerKey.CHECKOUT_ABANDONED, schemaType: SchemaType.MARKETING_CHECKOUT_ABANDONMENT, category: "Marketing" },
   "added to cart":      { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT,     category: "Marketing" },
   "viewed product":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
   "active on site":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
@@ -214,6 +230,32 @@ function hasCommentSoldSourceFilter(triggerFilter: unknown): boolean {
   return false;
 }
 
+// Render a Klaviyo trigger_filter into a short human string for a review
+// warning, e.g. `survey_code equals 689d034ddda30`. Conditions within a group
+// join with AND; groups join with OR. Returns null if nothing readable is
+// found (caller falls back to a generic message). mime doesn't yet translate
+// trigger_filters to Redo trigger-data expressions — naming the exact filter
+// lets the operator re-create it by hand.
+export function summarizeTriggerFilter(triggerFilter: unknown): string | null {
+  if (!triggerFilter || typeof triggerFilter !== "object") return null;
+  const tf = triggerFilter as any;
+  const groupStrs: string[] = [];
+  for (const g of tf.condition_groups ?? []) {
+    const condStrs: string[] = [];
+    for (const c of g?.conditions ?? []) {
+      const field = c?.field ?? c?.type;
+      const op = c?.filter?.operator ?? c?.operator;
+      const val = c?.filter?.value ?? c?.value;
+      if (!field && !op) continue;
+      condStrs.push(
+        [field, op, val].filter((x) => x !== undefined && x !== null && x !== "").join(" "),
+      );
+    }
+    if (condStrs.length) groupStrs.push(condStrs.join(" AND "));
+  }
+  return groupStrs.length ? groupStrs.join(" OR ") : null;
+}
+
 function resolveMetricTrigger(
   t: KlaviyoTrigger,
   metrics: MetricLookup,
@@ -320,7 +362,16 @@ export function resolveTrigger(
         category: "Marketing",
       };
     case "date":
-      return { key: MarketingTriggerKey.DATE, schemaType: SchemaType.MARKETING_DATE, category: "Marketing" };
+      warnings.push({
+        kind: "degraded-mapping",
+        message: `Klaviyo date trigger imported as "birthday, on the day" — the only date trigger Redo supports. If this flow keyed on a different date property (anniversary, custom or predicted date) or used a day offset, set it in the Redo flow builder before enabling.`,
+      });
+      return {
+        key: MarketingTriggerKey.DATE,
+        schemaType: SchemaType.MARKETING_DATE,
+        category: "Marketing",
+        triggerSpecificFields: BIRTHDAY_ON_DAY,
+      };
     case "price-drop":
       return { key: MarketingTriggerKey.PRICE_DROP, schemaType: SchemaType.MARKETING_PRICE_DROP, category: "Marketing" };
     default:

@@ -404,6 +404,25 @@ export function stripStandaloneCoupons(html: string): string {
   );
 }
 
+// Klaviyo's stock heading CSS bolds <h2>/<h3> via the document <style> (h1 and
+// h4 stay normal), so the bold is implied by the tag, not an inline weight.
+// mime preserves the <h2> tag, but Redo's text editor doesn't apply the
+// heading-tag default weight, so the bold is lost on import ("Make Your Dumb
+// Trolling Motor...SMART"). Make it explicit: wrap h2/h3 content in <strong>
+// unless an inline font-weight already decides the weight (override or already
+// bold). Faithful to source regardless of how Redo renders <h2>.
+function applyHeadingWeight(html: string): string {
+  return html.replace(
+    /<(h2|h3)\b([^>]*)>([\s\S]*?)<\/\1>/gi,
+    (full, tag: string, attrs: string, inner: string) => {
+      if (/font-weight\s*:/i.test(attrs) || /font-weight\s*:|<strong\b|<b\b/i.test(inner)) {
+        return full;
+      }
+      return `<${tag}${attrs}><strong>${inner}</strong></${tag}>`;
+    },
+  );
+}
+
 export function parseTextBlock(
   $: $,
   $td: cheerio.Cheerio<El>,
@@ -449,6 +468,7 @@ export function parseTextBlock(
   textHtml = suppressUrlAutolink(textHtml);
   textHtml = substituteSystemFontsInHtml(textHtml);
   textHtml = rewriteWeightedCustomFontSpans(textHtml);
+  textHtml = applyHeadingWeight(textHtml);
   textHtml = wrapText(textHtml);
 
   // Klaviyo often sets the outer div to text-align:left (its default)

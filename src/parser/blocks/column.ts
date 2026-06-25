@@ -341,6 +341,55 @@ export function parseSplitBlock(
 }
 
 /**
+ * Klaviyo "Table" block used as a trust-bar / badge row: a `kl-table` whose
+ * cells each hold an image (Tiny Boat Welcome #1 — free-shipping / warranty /
+ * guarantee badges). Product-card kl-tables are caught earlier in
+ * parseColumnContent (parseLineItemsUcbBlock / parseBrowseAbandonmentCardBlock),
+ * so by the time this runs the table is a plain content table. Without it the
+ * whole table falls through to the "Unknown block" fallback and every badge is
+ * dropped. Emit the cells side-by-side as a ColumnBlock so the row survives.
+ *
+ * Requires ≥2 image cells (a genuine row); a lone-image table is left to the
+ * other handlers / fallback rather than speculatively reshaped.
+ */
+export function parseTableImageRow(
+  $: $,
+  $wrapper: cheerio.Cheerio<El>,
+  ctx: ParseContext,
+): ColumnBlock | null {
+  const $table = findCls($wrapper, "kl-table").first();
+  if ($table.length === 0) return null;
+
+  // Each kl-table-subblock cell carrying an image is one badge column.
+  const cells: cheerio.Cheerio<El>[] = [];
+  findCls($table, "kl-table-subblock").each((_, el) => {
+    const $cell = $(el);
+    if ($cell.find("img[src]").length > 0) cells.push($cell);
+  });
+  if (cells.length < 2) return null;
+
+  const sectionColor = findAncestorBackgroundColor($table) || "#ffffff";
+  // Reuse the split-subblock extractor (button > image > text) per cell so
+  // badge images get the same padding/clickthrough treatment as split images.
+  const columns = cells.map((c) => parseSplitSubblock($, c, ctx, sectionColor));
+  if (columns.filter(Boolean).length < 2) return null;
+
+  const width = Math.round(100 / columns.length);
+  return {
+    type: EmailBlockType.COLUMN,
+    blockId: nextId(),
+    sectionPadding: sumAncestorPadding($table),
+    sectionColor,
+    columns,
+    columnCount: columns.length,
+    gap: 0,
+    stackOnMobile: true,
+    alignment: VerticalAlignment.CENTER,
+    columnWidths: columns.map(() => width),
+  };
+}
+
+/**
  * Extract the primary content of a kl-split subblock into a single nestable block.
  * Priority: button > image > text. Images without src return null (placeholder).
  *

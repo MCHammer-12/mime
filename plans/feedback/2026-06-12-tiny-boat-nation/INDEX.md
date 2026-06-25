@@ -9,8 +9,8 @@ Items: 4 flows (all imported OK; content + branch-logic feedback)
 | # | Status | Task | Branch | PR |
 |---|--------|------|--------|----|
 | 1 | done | [Branch/split conditions on profile + event properties silently dropped](branch-conditions-dropped.md) | `fix/branch-conditions-dropped` | [#116](https://github.com/MCHammer-12/mime/pull/116) |
-| 2 | blocked | [Klaviyo tag/list actions dropped — map to manage_customer_tags / manage_static_segment](tag-list-actions-to-redo-steps.md) | `fix/tag-list-actions-to-redo-steps` | — |
-| 3 | blocked | [Welcome Series — background image, hero buttons, trust bar, footer links broken](welcome-content-blocks.md) | `fix/welcome-content-blocks` | — |
+| 2 | partial | [Klaviyo tag/list actions dropped — map to manage_customer_tags / manage_static_segment](tag-list-actions-to-redo-steps.md) — list half done; tag half no fixture | `fix/segment-auto-creation-at-import` | [#121](https://github.com/MCHammer-12/mime/pull/121) |
+| 3 | partial | [Welcome Series — background image, hero buttons, trust bar, footer links broken](welcome-content-blocks.md) — #3 trust-bar fixed; #1 needs schema decision, #2 already works, #4 source-data | `fix/tbn-trust-bar-images` | [#126](https://github.com/MCHammer-12/mime/pull/126) |
 
 ## Headline
 

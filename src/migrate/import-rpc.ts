@@ -161,6 +161,39 @@ export interface ImportResult {
   name: string;
 }
 
+/**
+ * Pull the newly-created template's Mongo `_id` out of a create-template RPC
+ * response. On current redoapp `createEmailTemplate`/`createSmsTemplate`
+ * return the full entity with `_id` as a top-level 24-char hex string (the
+ * RPC `output` schema runs `objectId().transform(String)`), so `created._id`
+ * is the happy path. The extra paths defend against response-shape drift
+ * (the `zod → zod-util` / Zod 3→4 era already shifted one EmailTemplate
+ * contract — see #127): if the id ever nests under `.template`/`.data` or the
+ * field gets renamed, we still find it instead of silently capturing `""`.
+ *
+ * Returns "" only when NO id is present anywhere — callers MUST treat that as
+ * a hard failure, never as a usable id (an empty id silently orphans flow
+ * steps: the sentinel→real swap leaves the `__PLACEHOLDER__` in place and
+ * createAdvancedFlow accepts it because its templateId is an unvalidated
+ * `z.string()`).
+ */
+export function extractCreatedTemplateId(created: any): string {
+  if (created == null) return "";
+  const candidate =
+    created._id ??
+    created.id ??
+    created.template?._id ??
+    created.template?.id ??
+    created.data?._id ??
+    created.data?.id ??
+    "";
+  const id = String(candidate ?? "");
+  // Guard the "[object Object]" footgun: objectId()'s predicate accepts any
+  // object with toString, so a non-string/non-ObjectId value stringifies to
+  // junk rather than a hex id. A real Mongo id is 24 lowercase hex chars.
+  return /^[a-f0-9]{24}$/i.test(id) ? id : "";
+}
+
 // ─── Template import ───────────────────────────────────────────────────────
 
 export interface ImportTemplateOptions extends ImportOptions {
@@ -228,8 +261,24 @@ export async function importTemplateRpc(
     });
     throw e;
   }
+  const templateId = extractCreatedTemplateId(created);
+  if (!templateId) {
+    // The create returned 200 but we couldn't find a usable `_id`. Shipping
+    // this "" downstream is what orphaned every flow email (Jack Henry,
+    // 2026-06-23): the sentinel→real swap silently kept the placeholder.
+    // Fail loud instead — a broken import must be visible, not silent.
+    const rpc = options.asSavedTemplate
+      ? "createSavedEmailTemplate"
+      : "createEmailTemplate";
+    throw new Error(
+      `${rpc} returned no template _id for "${template.name ?? "(unnamed)"}". ` +
+        `Response shape may have changed on the redoapp side — refusing to ` +
+        `continue with an empty id (would orphan the flow step). ` +
+        `Response keys: ${created && typeof created === "object" ? Object.keys(created).join(", ") : typeof created}`,
+    );
+  }
   const result: ImportResult = {
-    templateId: String(created._id ?? created.id ?? ""),
+    templateId,
     name: String(created.name ?? template.name ?? ""),
   };
   options.onProgress?.({
@@ -709,6 +758,56 @@ export interface FlowImportResult {
   name: string;
   createdTemplateCount: number;
   blankTemplateCount: number;
+  /** Non-fatal notes from segment resolution (e.g. a list whose segment
+   *  couldn't be created, whose step was converted to a pass-through WAIT). */
+  segmentWarnings?: string[];
+}
+
+/**
+ * Resolve `manage_static_segment` step markers (`_klaviyoListId`) to real Redo
+ * segment ids. `resolveListId` returns the Redo segmentId for a Klaviyo list
+ * id, or null if resolution failed.
+ *
+ * - Resolved: set `segmentId`, strip the `_klaviyoListId` marker.
+ * - Failed: replace the step with a 0-duration WAIT that keeps the chain
+ *   intact (DO_NOTHING is terminal-only, and an unresolved segmentId would
+ *   400 createAdvancedFlow) and collect a warning. The flow still imports.
+ *
+ * Pure over its `resolveListId` arg, so unit-testable without a Redo
+ * connection.
+ */
+export async function resolveSegmentSteps(
+  steps: any[],
+  resolveListId: (listId: string) => Promise<string | null>,
+): Promise<{ steps: any[]; warnings: string[] }> {
+  const warnings: string[] = [];
+  const out: any[] = [];
+  for (const step of steps) {
+    if (step?.type !== "manage_static_segment" || !step._klaviyoListId) {
+      out.push(step);
+      continue;
+    }
+    const listId = String(step._klaviyoListId);
+    const segmentId = await resolveListId(listId);
+    if (segmentId) {
+      const { _klaviyoListId: _drop, ...rest } = step;
+      out.push({ ...rest, segmentId });
+    } else {
+      warnings.push(
+        `Could not create/resolve a Redo segment for Klaviyo list ${listId}; the add-to-list step was converted to a no-op (flow chain preserved). Add the segment + step manually in the Redo flow builder.`,
+      );
+      out.push({
+        type: "wait",
+        id: step.id,
+        customTitle: `TODO: add-to-list (Klaviyo list ${listId}) — segment unresolved`,
+        numDays: 0,
+        numSeconds: 0,
+        timeUnit: "Minutes",
+        nextId: step.nextId,
+      });
+    }
+  }
+  return { steps: out, warnings };
 }
 
 /**
@@ -762,6 +861,16 @@ export async function importFlowRpc(
 
     try {
       const created = await importTemplateRpc(templateJson, options);
+      // importTemplateRpc throws on an empty id, so `created.templateId` is
+      // guaranteed real here. Belt-and-suspenders: only record the mapping +
+      // bump the counter when we actually have one, so the reported
+      // createdTemplateCount can never overstate success (the old code
+      // incremented even when the id was "").
+      if (!created.templateId) {
+        throw new Error(
+          `importTemplateRpc returned an empty templateId for "${ph.subject}"`,
+        );
+      }
       sentinelToRealId.set(ph.sentinelId, created.templateId);
       if (ph.fullTemplate) createdTemplateCount++;
       else blankTemplateCount++;
@@ -779,6 +888,11 @@ export async function importFlowRpc(
           buildBlankTemplate(bundle.automation.name, ph, flowSchemaType),
           options,
         );
+        if (!blank.templateId) {
+          throw new Error(
+            `blank-fallback importTemplateRpc returned an empty templateId for "${ph.subject}"`,
+          );
+        }
         sentinelToRealId.set(ph.sentinelId, blank.templateId);
         blankTemplateCount++;
       } catch (e2: any) {
@@ -819,7 +933,16 @@ export async function importFlowRpc(
         { template },
         options,
       );
-      const realId = String(created._id ?? created.id ?? "");
+      const realId = extractCreatedTemplateId(created);
+      if (!realId) {
+        // Same orphan trap as the email path: an empty id would leave the
+        // SendSmsStep pointing at its sentinel. Fail loud.
+        throw new Error(
+          `createSmsTemplate returned no template _id for "${template.name}". ` +
+            `Response shape may have changed on the redoapp side. ` +
+            `Response keys: ${created && typeof created === "object" ? Object.keys(created).join(", ") : typeof created}`,
+        );
+      }
       sentinelToRealId.set(ph.sentinelId, realId);
       options.onProgress?.({
         kind: "template_created",
@@ -841,12 +964,69 @@ export async function importFlowRpc(
     }
   }
 
+  // 1c. Resolve manage_static_segment markers (from Klaviyo list-update
+  //     actions) → real Redo segment ids. One segment per unique Klaviyo
+  //     list (dedup cache); match an existing same-named Redo segment first,
+  //     else create a static segment. The step adds members at flow runtime,
+  //     so the segment only needs to exist (no member-copy). On failure the
+  //     step becomes a pass-through WAIT and the flow still imports.
+  const segmentCache = new Map<string, string | null>();
+  const resolveListId = async (listId: string): Promise<string | null> => {
+    if (segmentCache.has(listId)) return segmentCache.get(listId)!;
+    const name = `Klaviyo list ${listId}`;
+    try {
+      const found: any = await postMarketingRpc(
+        "fetchTeamSegments",
+        { searchText: name, pageSize: 100 },
+        options,
+      );
+      const match = (found?.segments ?? []).find(
+        (s: any) => String(s?.name ?? "").toLowerCase() === name.toLowerCase(),
+      );
+      let segId = match?._id ? String(match._id) : "";
+      if (!segId) {
+        const created: any = await postMarketingRpc("createStaticSegment", { name }, options);
+        segId = String(created?._id ?? created?.id ?? "");
+      }
+      if (!segId) throw new Error("createStaticSegment/fetchTeamSegments returned no id");
+      segmentCache.set(listId, segId);
+      return segId;
+    } catch (e: any) {
+      if (e instanceof RedoAuthExpiredError) throw e;
+      segmentCache.set(listId, null);
+      return null;
+    }
+  };
+  const hasSegmentSteps = bundle.automation.steps.some(
+    (s: any) => s?.type === "manage_static_segment" && s._klaviyoListId,
+  );
+  const segResolved = hasSegmentSteps
+    ? await resolveSegmentSteps(bundle.automation.steps, resolveListId)
+    : { steps: bundle.automation.steps as any[], warnings: [] as string[] };
+  for (const w of segResolved.warnings) console.warn(`importFlowRpc: ${w}`);
+
   // 2. Swap sentinel templateIds in the automation. Both send_email and
   //    send_sms steps use the same sentinel→real map.
-  const steps = bundle.automation.steps.map((step) => {
+  //
+  //    FAIL LOUD on an unresolved sentinel. The old code did
+  //    `if (!real) return step` — silently leaving the `__PLACEHOLDER__` on
+  //    the step. createAdvancedFlow's send_email schema is an unvalidated
+  //    `z.string()` (it accepts ObjectIds OR special identifiers), so the
+  //    placeholder sailed through and the flow imported "successfully" with
+  //    every email orphaned (Jack Henry, 2026-06-23). A missing mapping now
+  //    throws so the import fails visibly instead of shipping dead emails.
+  const steps = segResolved.steps.map((step) => {
     if (step.type !== "send_email" && step.type !== "send_sms") return step;
-    const real = sentinelToRealId.get(String(step.templateId ?? ""));
-    if (!real) return step; // leave as-is; server will reject, caller sees the error
+    const sentinel = String(step.templateId ?? "");
+    const real = sentinelToRealId.get(sentinel);
+    if (!real) {
+      throw new Error(
+        `Flow "${bundle.automation.name}": ${step.type} step ${step.id ?? "(no id)"} ` +
+          `has templateId "${sentinel}" with no resolved Redo template id. ` +
+          `Refusing to POST a placeholder to createAdvancedFlow (would orphan the email). ` +
+          `Known sentinels: [${[...sentinelToRealId.keys()].join(", ")}]`,
+      );
+    }
     return { ...step, templateId: real };
   });
 
@@ -859,6 +1039,43 @@ export async function importFlowRpc(
   } = bundle.automation;
 
   const newFlow = { ...flowRest, steps, team: await resolveTeamId(options) };
+
+  // Guard: no step may retain a `__PLACEHOLDER_` templateId. The swap above
+  // already throws on an unresolved sentinel; this is the final backstop so a
+  // placeholder can NEVER reach createAdvancedFlow (the bug we're fixing —
+  // orphaned flow emails that imported with zero errors).
+  const orphanedSteps = (newFlow.steps ?? []).filter(
+    (s: any) =>
+      (s?.type === "send_email" || s?.type === "send_sms") &&
+      typeof s?.templateId === "string" &&
+      s.templateId.startsWith("__PLACEHOLDER_"),
+  );
+  if (orphanedSteps.length > 0) {
+    throw new Error(
+      `Flow "${bundle.automation.name}": ${orphanedSteps.length} step(s) still ` +
+        `carry a __PLACEHOLDER_ templateId after the sentinel swap ` +
+        `(${orphanedSteps.map((s: any) => `${s.type}:${s.templateId}`).join(", ")}). ` +
+        `Aborting before createAdvancedFlow — these would be orphaned emails.`,
+    );
+  }
+
+  // Guard: a marketing_date trigger MUST carry triggerSpecificFields, or
+  // createAdvancedFlow rejects the whole flow with a 50KB Zod wall (the
+  // date-trigger crash). Fail with a precise reason rather than shipping a
+  // trigger Redo will 400 on.
+  const badDateTrigger = (newFlow.steps ?? []).find(
+    (s: any) =>
+      s?.type === "trigger" &&
+      s?.schemaType === "marketing_date" &&
+      (s?.triggerSpecificFields == null || typeof s.triggerSpecificFields !== "object"),
+  );
+  if (badDateTrigger) {
+    throw new Error(
+      `Flow "${bundle.automation.name}": marketing_date trigger is missing triggerSpecificFields ` +
+        `(needs a birthday dimension + comparison). Aborting before createAdvancedFlow — ` +
+        `this would 400 on a Zod validation wall.`,
+    );
+  }
 
   let created: any;
   try {
@@ -909,6 +1126,7 @@ export async function importFlowRpc(
     name: bundle.automation.name,
     createdTemplateCount,
     blankTemplateCount,
+    ...(segResolved.warnings.length > 0 ? { segmentWarnings: segResolved.warnings } : {}),
   };
 }
 

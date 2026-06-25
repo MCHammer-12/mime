@@ -154,6 +154,20 @@ export interface BaseStep {
   customTitle?: string;
 }
 
+// Redo's `marketing_date` trigger REQUIRES triggerSpecificFields, and its only
+// supported dimension is BIRTHDAY (redoapp marketingDateTriggerStepSchema /
+// marketingDateTriggerFields). `comparison` is the timing relative to the date:
+// fire on the day (`today`) or an exact N-units before/after.
+export interface MarketingDateTriggerFields {
+  dimension: "birthday";
+  comparison:
+    | { type: "today"; options: null }
+    | {
+        type: "before-now-relative-exact" | "after-now-relative-exact";
+        options: { value: number; units: "day" | "week" | "month" | "year" };
+      };
+}
+
 export interface TriggerStep extends BaseStep {
   type: StepType.TRIGGER;
   schemaType: SchemaType;
@@ -165,6 +179,8 @@ export interface TriggerStep extends BaseStep {
     conditions: unknown[];
   };
   shouldSkipSmartSending?: boolean;
+  // Required by Redo for the marketing_date trigger; omitted for others.
+  triggerSpecificFields?: MarketingDateTriggerFields;
 }
 
 export interface WaitStep extends BaseStep {
@@ -237,12 +253,30 @@ export interface AbTestStep extends BaseStep {
   }>;
 }
 
+// Redo "add/remove from static segment" step (advanced-flow-db-parser.ts
+// manageStaticSegmentStepSchema). Maps Klaviyo's `list-update` action.
+// `segmentId` references a real Redo segment that must EXIST — the parser
+// can't call Redo, so it emits `_klaviyoListId` as a resolution marker and
+// the import path (resolveSegmentSteps in import-rpc.ts) swaps it for a
+// real id (match-by-name or create) and strips the marker before send.
+export interface ManageStaticSegmentStep extends BaseStep {
+  type: StepType.MANAGE_STATIC_SEGMENT;
+  operation: "add" | "remove";
+  segmentId: string;
+  nextId: string;
+  disabled: boolean;
+  /** Pre-resolution marker — the Klaviyo list id this segment mirrors.
+   *  Present only between parse and import; stripped before createAdvancedFlow. */
+  _klaviyoListId?: string;
+}
+
 export type Step =
   | TriggerStep
   | WaitStep
   | SendEmailStep
   | SendSmsStep
   | SendWebhookStep
+  | ManageStaticSegmentStep
   | DoNothingStep
   | ConditionStep
   | AbTestStep;

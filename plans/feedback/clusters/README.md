@@ -38,7 +38,7 @@ The "looks-successful-but-wrong" family: splits that migrated with empty/wrong p
 ## B. Triggers — small, high-impact, mostly decided
 | Item | Status | Where |
 |------|--------|-------|
-| Date/birthday triggers 400 (emit `triggerSpecificFields:[BIRTHDAY]`; fail predictive gracefully) | ⬜ open, 2 merchants | ad-hoc Task 3 (PR #113) |
+| Date/birthday triggers 400 (emit `triggerSpecificFields:[BIRTHDAY]`; fail predictive gracefully) | ✅ shipped — date 400 fixed (birthday-on-day + warning + preflight guard); predictive-*condition* residual is a condition-mapping item | ad-hoc Task 3 |
 | Started Checkout → **Checkout Abandonment** (reverse #43) | ⬜ open | ad-hoc Task 5 (PR #119) |
 | Unknown custom-event metric → **always picker** (kill silent order_fulfilled mis-resolve) | ⬜ open | Rufskin Task 1 (PR #113-adjacent) |
 

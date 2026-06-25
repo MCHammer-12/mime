@@ -1,8 +1,12 @@
 /**
  * Klaviyo-only blocks: video, preview quote (review), and drop shadow.
- * None of these have a Redo equivalent.
  *
- * Video + preview quote: skip entirely, push to ctx.skippedBlocks.
+ * Video: structurally a thumbnail <img> wrapped in an <a class="kl-img-link">
+ *   clickthrough — exactly what Redo's Image block supports. So we route it
+ *   through parseImageBlock (thumbnail src → imageUrl, video href →
+ *   clickthroughUrl) rather than dropping it. A video with no thumbnail img
+ *   has nothing to emit, so that case still skips via ctx.skippedBlocks.
+ * Preview quote: skip entirely, push to ctx.skippedBlocks.
  * Drop shadow: if bodyBackgroundColor is white, emit an Image block pointing
  *   to the pre-made drop shadow asset; otherwise skip via ctx.skippedBlocks.
  *
@@ -15,7 +19,8 @@ import type * as cheerio from "cheerio";
 import type { ImageBlock, Section } from "../../renderer/types.js";
 import { EmailBlockType, Size } from "../../renderer/types.js";
 import { findAncestorBackgroundColor, parseInlineStyles, parsePadding } from "../style-utils.js";
-import { type $, type El, nextId, sel } from "../helpers.js";
+import { type $, type El, findCls, nextId, sel } from "../helpers.js";
+import { parseImageBlock } from "./image.js";
 import type { ParseContext } from "../index.js";
 
 // On Replit, set `DROP_SHADOW_URL` in Secrets to the deployed static asset URL
@@ -33,9 +38,27 @@ export function tryParseKlaviyoSpecific(
   bodyBackgroundColor: string,
 ): Section[] | null {
   if (isVideoBlock($wrapper)) {
+    const $videoTd = findCls($wrapper, "kl-video").first();
+    const hasThumb = $videoTd.find("img").first().attr("src");
+    const hasLink = $videoTd.find(sel("kl-img-link")).first().attr("href");
+    if (hasThumb && hasLink) {
+      // A Klaviyo video is a thumbnail <img> inside an <a class="kl-img-link">
+      // clickthrough — structurally an image-with-clickthrough. Route it to the
+      // image parser: thumbnail → imageUrl, video href → clickthroughUrl. The
+      // external video URL (e.g. youtu.be) passes through as a web-page link.
+      const block = parseImageBlock($, $videoTd, $wrapper, ctx);
+      if (block) {
+        ctx.warnings.push(
+          "Klaviyo video block → static thumbnail Image with the video URL as " +
+            "clickthrough (no play affordance) — merchant may want to review",
+        );
+        return [block];
+      }
+    }
+    // No thumbnail/link to convert — nothing to emit, so skip as before.
     ctx.skippedBlocks.push({
       blockType: "video",
-      reason: "Klaviyo video block — not supported in Redo",
+      reason: "Klaviyo video block — no thumbnail image to convert",
     });
     return [];
   }

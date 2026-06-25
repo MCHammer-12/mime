@@ -17,9 +17,19 @@ Templates: VXS62D (Boat Giveaway), TzNyG5 (Big 5 - Ongoing), R3rU5j (AutoBoat).
 | 6 | Video block emitted/skipped | mime currently SKIPS `kl-video`. Source has thumbnail `<img>` + `<a href="youtu.be/...">`. **Can emit an Image block w/ thumbnail + video URL as clickthrough.** | Content (D) — [`video-to-image-clickthrough.md`](video-to-image-clickthrough.md) |
 | 7 | Static product not selected + button missing | Klaviyo surfaces: name, price ($899.97), image URL, and the **Shopify handle in the product URL** (`/products/autoboat-gps-trolling-motor-anchor-system`). mime resolves by fuzzy NAME → wrong/no pick. **Resolve by handle.** Per-product "Shop now" button (bg `#1155cc`) not carried — Redo product-block button support is a schema question. | Products (E) — extends Charlie 2 |
 
-## Quick wins (clean, low-risk — recommend doing now)
-- **#1 socials dedup** — [`socials-double-icons.md`](socials-double-icons.md)
-- **#6 video → image clickthrough** — [`video-to-image-clickthrough.md`](video-to-image-clickthrough.md)
+## Task queue
+
+| Status | Task | Cluster | Notes |
+|--------|------|---------|-------|
+| done [#128](https://github.com/MCHammer-12/mime/pull/128) | [socials-double-icons](socials-double-icons.md) | D | dedup by platform; 6→3 verified |
+| unclaimed | [video-to-image-clickthrough](video-to-image-clickthrough.md) | D | quick win — stop skipping kl-video, emit Image+link |
+| unclaimed | [text-linebreak-fidelity](text-linebreak-fidelity.md) | D | spacer-div + trailing-div + fragment handling |
+| unclaimed | [heading-bold-dropped](heading-bold-dropped.md) | D | apply h2/h3 default bold from Klaviyo heading CSS |
+| unclaimed | [link-color-investigate](link-color-investigate.md) | D | inline colors ARE preserved — investigate template/brand-kit override |
+| unclaimed | [font-system-not-selectable](font-system-not-selectable.md) | **C (keystone)** | system fonts not selectable in editor — set the policy |
+| unclaimed | [product-resolve-by-handle-and-button](product-resolve-by-handle-and-button.md) | E | resolve by Shopify handle (not fuzzy name) + per-product button |
+
+Two are clean quick-wins (socials done; video next). The font one is the **Fonts-cluster keystone** — Michael's recurring "font not applied" likely resolves here. Product-by-handle is a general upgrade to `_pendingProducts`.
 
 ## Notes
 - The note labels are slightly crossed (double-socials filed under "Boat Giveaway" but VXS62D has no socials — it's the Big 5 template). Bug is real regardless.

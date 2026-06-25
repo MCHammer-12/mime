@@ -7,7 +7,7 @@ import {
 } from "./condition-mapping.js";
 import type { TemplateResolver } from "./template-resolver.js";
 import { treeifyFlow } from "./treeify.js";
-import { resolveTrigger, type TriggerResolution } from "./trigger-mapping.js";
+import { resolveTrigger, summarizeTriggerFilter, type TriggerResolution } from "./trigger-mapping.js";
 import { rewriteKlaviyoLiquid } from "./variable-mapping.js";
 import { substituteStringVars } from "../transform.js";
 import { formatAddress, type KlaviyoAccount } from "../fetch-account.js";
@@ -16,6 +16,7 @@ import {
   StepType,
   WaitTimeUnit,
   type AbTestStep,
+  type ManageStaticSegmentStep,
   type AdvancedFlow,
   type ConditionStep,
   type DoNothingStep,
@@ -46,6 +47,12 @@ const FLOW_END_ID = "flow_end";
 // reference so parseFlow can append the step.
 interface ParseState {
   needsTerminal: boolean;
+  // Klaviyo `smart_sending_enabled` is per-message; Redo's equivalent
+  // (`trigger.shouldSkipSmartSending`) is flow-wide. Track whether any message
+  // bypassed smart sending (→ set the trigger flag true) and whether any kept
+  // it (→ a mixed flow we can't represent per-message, so warn).
+  smartSendingBypass?: boolean;
+  smartSendingThrottled?: boolean;
 }
 
 function terminate(
@@ -297,16 +304,11 @@ async function convertAction(
         recipientNameFieldName: "customerFullName",
         nextId: terminate(next, state),
       };
-      if (msg.smart_sending_enabled === false) {
-        // Flag for the importer to set shouldSkipSmartSending on the TRIGGER step
-        // (Redo can only toggle smart-sending at the trigger level). Warn so we
-        // don't silently flip flow-wide behaviour.
-        warnings.push({
-          kind: "requires-review",
-          actionId: id,
-          message: `send-email has smart_sending_enabled: false; Redo only supports this flow-wide via trigger.shouldSkipSmartSending — review before enabling`,
-        });
-      }
+      // Klaviyo's per-message smart-sending → Redo's flow-wide
+      // trigger.shouldSkipSmartSending (set after the action loop). Record the
+      // intent; mixed flows are warned there.
+      if (msg.smart_sending_enabled === false) state.smartSendingBypass = true;
+      else state.smartSendingThrottled = true;
       if (msg.transactional === true) {
         warnings.push({
           kind: "requires-review",
@@ -373,13 +375,10 @@ async function convertAction(
           message: `send-sms marked transactional — Redo coerces SmsTemplate.templateType to "marketing"; verify intended audience`,
         });
       }
-      if (msg.smart_sending_enabled === false) {
-        warnings.push({
-          kind: "requires-review",
-          actionId: id,
-          message: `send-sms has smart_sending_enabled: false; Redo only supports this flow-wide via trigger.shouldSkipSmartSending — review before enabling`,
-        });
-      }
+      // Smart-sending intent → flow-wide trigger.shouldSkipSmartSending (set
+      // after the action loop; mixed flows warned there).
+      if (msg.smart_sending_enabled === false) state.smartSendingBypass = true;
+      else state.smartSendingThrottled = true;
 
       placeholderSmsTemplates.push({
         sentinelId,
@@ -484,16 +483,9 @@ async function convertAction(
       // count + timeframe). Unmapped condition types stay as warnings and
       // omit from the expression.
       const expression = translateConditionalSplitExpression(action, metrics, warnings);
-      const conditionCount =
-        (expression as any)?.inlineSegment?.conditions?.length ?? 0;
-      const customTitle =
-        conditionCount > 0
-          ? undefined
-          : `TODO: configure condition (was Klaviyo conditional-split)`;
       const step: ConditionStep = {
         type: StepType.CONDITION,
         id,
-        ...(customTitle ? { customTitle } : {}),
         expression,
         nextTrueId,
         nextFalseId,
@@ -516,9 +508,6 @@ async function convertAction(
       const step: ConditionStep = {
         type: StepType.CONDITION,
         id,
-        ...(tsExpr
-          ? {}
-          : { customTitle: `TODO: configure condition (was Klaviyo trigger-split)` }),
         expression,
         nextTrueId,
         nextFalseId,
@@ -566,11 +555,45 @@ async function convertAction(
       return dropAction(terminate(next, state));
     }
 
+    case "list-update": {
+      // Klaviyo list-update (add the profile to a list) → Redo
+      // manage_static_segment step. The Redo segmentId is resolved at
+      // import time (match-by-name or create — see resolveSegmentSteps in
+      // import-rpc.ts); the parser carries the Klaviyo list id as a marker.
+      // The step populates the segment at flow runtime, mirroring Klaviyo.
+      const listId = action.data?.list_id;
+      if (!listId) {
+        warnings.push({
+          kind: "unsupported-action",
+          actionId: id,
+          message: `list-update action ${id} has no list_id — dropped`,
+        });
+        return dropAction(terminate(next, state));
+      }
+      // Klaviyo flow list-updates are overwhelmingly "add to list". The
+      // action data doesn't reliably distinguish remove, so default to add
+      // and flag it so the operator can flip a rare remove-flow manually.
+      warnings.push({
+        kind: "degraded-mapping",
+        actionId: id,
+        message: `list-update (Klaviyo list ${listId}) → manage_static_segment "add". A Redo static segment is created/matched at import; the step adds members at runtime. If this flow REMOVES from a list, flip the operation in the Redo flow builder.`,
+      });
+      const step: ManageStaticSegmentStep = {
+        type: StepType.MANAGE_STATIC_SEGMENT,
+        id,
+        operation: "add",
+        segmentId: "", // resolved at import from _klaviyoListId
+        nextId: terminate(next, state),
+        disabled: false,
+        _klaviyoListId: String(listId),
+      };
+      return step;
+    }
+
     // Drop policy: actions with no Redo equivalent that would otherwise leave
     // a "TODO" WAIT stub for the merchant to clean up. Re-stitch chain past
     // them using the drop sentinel.
     case "update-profile":
-    case "list-update":
     case "target-date":
     default: {
       warnings.push({
@@ -715,9 +738,12 @@ export async function parseFlow(
   const triggers = defn?.triggers ?? [];
   for (const t of triggers) {
     if (t.trigger_filter) {
+      const summary = summarizeTriggerFilter(t.trigger_filter);
       warnings.push({
         kind: "requires-review",
-        message: `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter (product/event filter) that mime doesn't yet translate at the flow level — configure manually in the Redo flow builder`,
+        message: summary
+          ? `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter "${summary}" that mime doesn't yet translate at the flow level — re-create this condition manually in the Redo flow builder`
+          : `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter (product/event filter) that mime doesn't yet translate at the flow level — configure manually in the Redo flow builder`,
       });
     }
   }
@@ -768,6 +794,9 @@ export async function parseFlow(
     ...(skipConditions.length > 0
       ? { skipConditions: { conjunctionMode: "OR", conditions: skipConditions } }
       : {}),
+    ...(resolution.triggerSpecificFields
+      ? { triggerSpecificFields: resolution.triggerSpecificFields }
+      : {}),
   };
 
   const steps: Step[] = [triggerStep];
@@ -794,6 +823,23 @@ export async function parseFlow(
       continue;
     }
     steps.push(result);
+  }
+
+  // Klaviyo's per-message `smart_sending_enabled` → Redo's flow-wide
+  // `trigger.shouldSkipSmartSending`. Now that the loop has seen every message,
+  // bypass flow-wide if any message disabled smart sending. (Redo ignores this
+  // for always-bypass keys — order-tracking/signup/back-in-stock/campaign — but
+  // it's the deciding field for abandonment/date/custom triggers, where omitting
+  // it defaults to throttle-on and loses the merchant's bypass intent.) A flow
+  // that mixes on and off can't be represented per-message — bypass + warn.
+  if (state.smartSendingBypass) {
+    triggerStep.shouldSkipSmartSending = true;
+    if (state.smartSendingThrottled) {
+      warnings.push({
+        kind: "requires-review",
+        message: `Flow mixes smart-sending on and off across messages, but Redo's shouldSkipSmartSending is flow-wide — set to bypass to honor the messages that disabled it. Review per-message intent.`,
+      });
+    }
   }
 
   // Resolve transitive drops so a single hop replacement always lands on a
