@@ -11,7 +11,28 @@ priority: URGENT — Jack Henry flow emails blank
 
 Jack Henry, Michael (2026-06-23 + 2026-06-25): "all of the emails in this and every other flow aren't showing any content. there is no email." Persisted across two re-imports.
 
-## CORRECTION (2026-06-25) — the templateId-swap theory below is DISPROVEN
+## RESOLVED DIAGNOSIS (2026-06-25, with Klaviyo key + Redo JWT)
+
+Fetched all 8 Jack Henry abandoned-cart templates from Klaviyo and ran mime's parser on each. **Two distinct things, both real:**
+
+| Klaviyo id | editor_type | html | mime parse |
+|---|---|---|---|
+| RqyJ8H, SY7JvT, Y7vBZa, Y4TmNh, Vra2UZ, UYqnU3 | **SYSTEM_DRAGGABLE** | 38–47KB | **13–18 sections (FULL content)** ✓ |
+| R2rkiC, Tmf26k | **SIMPLE** | ~2.8KB | **0 sections** ✗ |
+
+1. **The 6 content emails parse perfectly on current mime** (13–18 sections each, with images / interactive-cart / socials / text). They are NOT broken. But the bundle marked them blank (`blankTemplateCount: 6`). So the **deploy produced empties for templates that parse fine locally.** Most likely: the import (19:03 UTC) ran ~3.5 min after a deploy (`c133b02` 18:59 UTC) that hadn't finished rolling out → hit the old instance; OR a resolver `api-error` fetching the 6 large templates. **Can't pin which because the resolver logged no reason** (see #1 below). NOT a fundamental parse problem.
+
+2. **The 2 SIMPLE-editor emails are a genuine parser gap → 0 sections.** `editor_type: SIMPLE` templates are plain `<div>/<span>` (R2rkiC has **zero `kl-*` classes** — "Hi {{ first_name }}, Noticed you left a few things behind…"). mime's parser keys entirely on `kl-*` block classes, so SIMPLE templates produce nothing. This is a NEW unsupported-editor-type gap, sibling to CODE. **These are blank no matter what.**
+
+**Immediate test for Michael:** re-run the Jack Henry import NOW (deploy is fully live hours later). The 6 SYSTEM_DRAGGABLE emails should come through with content. The 2 SIMPLE ones will still be blank (need the parser gap fixed). If the 6 are STILL blank on a fresh import → it's a deploy-side resolver fetch/runtime issue, and fix #1 will reveal the reason.
+
+**Three fixes (see "TWO actionable items" + this):**
+- (#1) Surface the `ResolveFailure` reason per blanked template (the meta-fix — would have shown api-error vs propagation in one bundle).
+- (#2) Stop the blank-fallback swallowing the create error.
+- (#3 NEW) **Handle `editor_type: SIMPLE`** — a plain-HTML parser path (no kl-classes), like the CODE path. Fixes the 2.
+
+---
+## (earlier correction) the templateId-swap theory below is DISPROVEN
 
 Live inspection via the Redo MCP of a real mime-imported flow ("Added To Cart (Arvo)", `6a26e00499ad61dbf054c05a`, imported 2026-06-08) shows the importer **works end-to-end**:
 - every `send_email` step carries a **real ObjectId templateId** (e.g. `6a26e002090fd8338876f05b`), NOT a placeholder — the swap works;
