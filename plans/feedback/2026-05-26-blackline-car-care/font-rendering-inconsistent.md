@@ -1,7 +1,8 @@
 ---
-status: unclaimed
+status: blocked
 branch: fix/font-rendering-inconsistent
 pr: null
+blocked-on: Redo editor runtime (FOUT) + a non-Google-font preflight decision
 ---
 
 # Imported fonts render inconsistently in Redo editor
@@ -66,4 +67,20 @@ Don't ship a one-off fix for just Poppins Thin or just Chirp. The right fix addr
 
 ## Done
 
-(filled by executor on completion)
+**BLOCKED — diagnosed 2026-06-26 (troubleshoot bundle on disk).** Two findings:
+
+1. **The reported symptom is Redo-editor-side, not mime.** The bundled
+   `template-YvCSGH` source references only **Ubuntu / Futura / Arial** — never
+   the "Poppins Thin" or "Chirp Medium" Austin named (those were him
+   experimenting in the Redo editor). `parse-result.json` has `warnings: []`
+   with Futura the sole `available:false` font. The FOUT / flash-to-serif is
+   Redo's editor font-loading runtime, which mime can't reproduce or fix.
+2. **The one real mime lever is decision-gated.** A preflight notice for
+   non-Google fonts (Futura here, Chirp generally) — "this font isn't on
+   Google Fonts, pick a substitute or upload manually" — is the only mime-side
+   change, and the task itself flags it needs Michael's call (map to a Google
+   equivalent? surface-and-warn? leave as-is). Same family as the #111 font
+   preflight and the Tiny Boat `font-system-not-selectable` decision.
+
+No confident code change available without (1) Redo-editor access and (2) the
+non-Google-font policy decision.

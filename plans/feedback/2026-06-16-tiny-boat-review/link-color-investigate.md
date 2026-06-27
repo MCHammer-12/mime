@@ -1,7 +1,8 @@
 ---
-status: unclaimed
+status: blocked
 branch: fix/link-color-investigate
 pr: null
+blocked-on: Redo-side — not a mime bug (see triage 2026-06-25)
 ---
 
 # Link text color shows red in Redo, blue in Klaviyo — investigate where the override comes from
@@ -37,7 +38,15 @@ So the investigation question: **does Redo's email editor honor inline anchor `c
 - Routes to Content cluster (D) — but may resolve as "brand-kit setting, not a bug."
 
 ## Done
-(filled by executor)
+
+**BLOCKED — not a mime bug (re-confirmed 2026-06-26).** Verified against
+R3rU5j's `redo-output.json`: mime preserves every inline anchor color exactly
+(`#15c` blue ×2, `rgb(248,1,1)` red), and `text.ts` `applyContrastFloor` can
+only ever return the original color or black/white — it is structurally
+incapable of producing red. The red is a Redo email-editor render question
+(does it honor per-block/inline anchor `color`, or force template/brand-kit
+`linkColor`), answerable only in the live editor on the Tiny Boat team. No
+mime change available. Next step is a redoapp/editor investigation — see below.
 
 ## Executor triage 2026-06-25
 NOT A MIME BUG. Confirmed mime preserves the inline anchor colors exactly
