@@ -297,6 +297,36 @@ function App() {
     }
   }, [stores, hydratedStores]);
 
+  // Re-fetch a store's campaigns with an optional created_at date range.
+  // since/until are "YYYY-MM-DD" or null. null/null → server's default 10
+  // most-recent. Updates campaigns + a truncated/loading flag on the store data.
+  const reloadCampaigns = useC(async (storeId, since, until) => {
+    setStoreDataMap((m) => ({
+      ...m,
+      [storeId]: { ...(m[storeId] || EMPTY_DATA), campaignsLoading: true, campaignsError: null },
+    }));
+    try {
+      const store = await getHydratedStore(storeId);
+      if (!store?.klaviyoKey) throw new Error("store has no klaviyoKey");
+      const r = await window.reloadCampaigns(store, { since, until });
+      setStoreDataMap((m) => ({
+        ...m,
+        [storeId]: {
+          ...(m[storeId] || EMPTY_DATA),
+          campaigns: r.campaigns ?? [],
+          campaignsTruncated: !!r.truncated,
+          campaignsRange: r.range ?? null,
+          campaignsLoading: false,
+        },
+      }));
+    } catch (e) {
+      setStoreDataMap((m) => ({
+        ...m,
+        [storeId]: { ...(m[storeId] || EMPTY_DATA), campaignsLoading: false, campaignsError: e?.message ?? String(e) },
+      }));
+    }
+  }, [getHydratedStore]);
+
   // Fetch flows + templates when the user opens a store's migration view.
   useE(() => {
     if (view.screen !== "migration" || !view.storeId) return;
@@ -1048,6 +1078,7 @@ function App() {
             lastResult={lastResult[activeStore.id] || new Map()}
             inProgress={inProgress[activeStore.id] || new Set()}
             onImport={() => startImport(activeStore.id)}
+            onReloadCampaigns={(since, until) => reloadCampaigns(activeStore.id, since, until)}
           />
         )}
 
@@ -1277,7 +1308,7 @@ function TopBar({ view, store, hosted, hoursSaved, adminUser, onSwitchAdminUser,
   );
 }
 
-function MigrationScreen({ store, data, state, updateState, imports, priorImports, lastResult, inProgress, onImport }) {
+function MigrationScreen({ store, data, state, updateState, imports, priorImports, lastResult, inProgress, onImport, onReloadCampaigns }) {
   // The hide-already-imported filter intentionally uses `priorImports`
   // (snapshot at store-open) rather than the live `imports` set. If we
   // used `imports`, every flow would vanish from the catalog the moment
@@ -1426,30 +1457,42 @@ function MigrationScreen({ store, data, state, updateState, imports, priorImport
             )}
           />
         ) : state.tab === "campaigns" ? (
-          <ListShell
-            items={visibleCampaigns} selectedIds={state.selectedCampaignIds}
-            onToggle={toggleCampaign} onToggleAll={toggleAllCampaigns}
-            filter={state.campaignFilter} onFilterChange={(v) => updateState({ campaignFilter: v })}
-            statusFilter={state.campaignStatus} onStatusFilterChange={(v) => updateState({ campaignStatus: v })}
-            statuses={["sent", "scheduled", "sending", "draft", "cancelled"]}
-            hideAlreadyImported={state.hideCampaign} onHideAlreadyImportedChange={(v) => updateState({ hideCampaign: v })}
-            alreadyImportedCount={campaignsAlreadyCount}
-            countLabel={`${(data.campaigns ?? []).length} campaigns`}
-            emptyText={
-              data.loading
-                ? "Loading campaigns from Klaviyo…"
-                : data.error
-                ? `Error: ${data.error}`
-                : "No campaigns match these filters."
-            }
-            renderRow={(campaign, selected, toggle) => (
-              <CampaignRow key={campaign.campaignId} campaign={campaign} selected={selected} onToggle={toggle}
-                alreadyImported={imports.campaigns.has(campaign.campaignId)}
-                inProgress={inProgress.has(campaign.campaignId)}
-                lastResult={lastResult.get(campaign.campaignId)}
-                libraryTemplateIds={libraryTemplateIds}/>
-            )}
-          />
+          <div className="h-full flex flex-col">
+            <CampaignDateRange
+              onApply={onReloadCampaigns}
+              loading={data.campaignsLoading}
+              truncated={data.campaignsTruncated}
+              range={data.campaignsRange}
+              error={data.campaignsError}
+              count={(data.campaigns ?? []).length}
+            />
+            <div className="flex-1 overflow-hidden">
+              <ListShell
+                items={visibleCampaigns} selectedIds={state.selectedCampaignIds}
+                onToggle={toggleCampaign} onToggleAll={toggleAllCampaigns}
+                filter={state.campaignFilter} onFilterChange={(v) => updateState({ campaignFilter: v })}
+                statusFilter={state.campaignStatus} onStatusFilterChange={(v) => updateState({ campaignStatus: v })}
+                statuses={["sent", "scheduled", "sending", "draft", "cancelled"]}
+                hideAlreadyImported={state.hideCampaign} onHideAlreadyImportedChange={(v) => updateState({ hideCampaign: v })}
+                alreadyImportedCount={campaignsAlreadyCount}
+                countLabel={`${(data.campaigns ?? []).length} campaigns`}
+                emptyText={
+                  data.loading || data.campaignsLoading
+                    ? "Loading campaigns from Klaviyo…"
+                    : data.error
+                    ? `Error: ${data.error}`
+                    : "No campaigns match these filters."
+                }
+                renderRow={(campaign, selected, toggle) => (
+                  <CampaignRow key={campaign.campaignId} campaign={campaign} selected={selected} onToggle={toggle}
+                    alreadyImported={imports.campaigns.has(campaign.campaignId)}
+                    inProgress={inProgress.has(campaign.campaignId)}
+                    lastResult={lastResult.get(campaign.campaignId)}
+                    libraryTemplateIds={libraryTemplateIds}/>
+                )}
+              />
+            </div>
+          </div>
         ) : (
           <ListShell
             items={visibleTmpls} selectedIds={state.selectedTmplIds}
@@ -1576,6 +1619,43 @@ function SectionRow({ label, section, extra, progressText }) {
           {section.error}
         </span>
       )}
+    </div>
+  );
+}
+
+// Campaigns date-range bar. Empty range = server's default (10 most recent).
+// Applying a range re-fetches campaigns created within [since, until].
+function CampaignDateRange({ onApply, loading, truncated, range, error, count }) {
+  const [since, setSince] = useS("");
+  const [until, setUntil] = useS("");
+  const active = !!(range && (range.since || range.until));
+  const input = "bg-[#010409] border border-[#30363d] rounded-[4px] px-2 py-1 text-[11px] text-[#e6edf3] focus:outline-none focus:border-[#58a6ff]";
+  return (
+    <div className="flex items-center gap-2 px-4 py-2 border-b border-[#21262d] bg-[#0d1117] flex-wrap">
+      <span className="text-[11px] text-[#8b949e]">Sent / created between</span>
+      <input type="date" value={since} max={until || undefined} onChange={(e) => setSince(e.target.value)} className={input} />
+      <span className="text-[#6e7681] text-[11px]">→</span>
+      <input type="date" value={until} min={since || undefined} onChange={(e) => setUntil(e.target.value)} className={input} />
+      <button
+        onClick={() => onApply(since || null, until || null)}
+        disabled={loading || (!since && !until)}
+        className="text-[12px] font-medium text-white bg-[#1f6feb] hover:bg-[#388bfd] disabled:bg-[#21262d] disabled:text-[#6e7681] px-3 py-1 rounded-[4px]"
+      >{loading ? "Loading…" : "Apply"}</button>
+      {active && (
+        <button
+          onClick={() => { setSince(""); setUntil(""); onApply(null, null); }}
+          disabled={loading}
+          className="text-[11px] text-[#8b949e] hover:text-[#e6edf3] px-2 py-1"
+        >Reset to 10 most recent</button>
+      )}
+      <span className="ml-auto text-[11px] text-[#6e7681] tabular-nums">
+        {loading
+          ? "loading…"
+          : active
+          ? `${count} in ${range.since || "any"} – ${range.until || "now"}${truncated ? " · capped at 100, narrow the range" : ""}`
+          : "showing most recent 10"}
+      </span>
+      {error && <span className="text-[11px] text-[#f85149] basis-full">{error}</span>}
     </div>
   );
 }
