@@ -337,3 +337,9 @@ window.STORE_DATA = STORE_DATA;
 window.fetchStoreData = fetchStoreData;
 window.loadPriorImports = loadPriorImports;
 window.savePriorImports = savePriorImports;
+
+// Re-fetch campaigns for a store with an optional created_at date range.
+// since/until are "YYYY-MM-DD" (or null). Returns { campaigns, truncated, range }.
+// Empty range → server falls back to the 10 most-recent.
+window.reloadCampaigns = (store, { since, until } = {}) =>
+  postJson("/api/campaigns", { klaviyoKey: store.klaviyoKey, since: since || undefined, until: until || undefined });

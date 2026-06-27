@@ -192,6 +192,16 @@ function json(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
+/** Normalize a `YYYY-MM-DD` (or already-ISO) date to a Klaviyo filter
+ *  timestamp. A bare date becomes start-of-day, or end-of-day (23:59:59Z)
+ *  for an inclusive upper bound. */
+function toKlaviyoIso(d: string, endOfDay: boolean): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    return `${d}T${endOfDay ? "23:59:59" : "00:00:00"}Z`;
+  }
+  return d;
+}
+
 function ndjsonStart(res: ServerResponse) {
   res.writeHead(200, {
     "content-type": "application/x-ndjson",
@@ -669,19 +679,49 @@ async function handleCampaigns(req: IncomingMessage, res: ServerResponse) {
     // form as the flow-messages call elsewhere in this file. Single-quoted
     // strings are rejected by some merchant accounts with a 400.
     //
-    // We deliberately fetch only the 10 most-recent campaigns (single page,
-    // no pagination). Walking every campaign + every campaign-message +
-    // every template relationship for accounts with hundreds of historical
-    // campaigns would routinely exceed the deploy proxy's 60s response
-    // window and return a 504 Gateway Timeout. Most merchants only want
-    // their recent campaigns migrated anyway; older ones can be added
-    // later by lifting this cap.
-    const filter = encodeURIComponent(`equals(messages.channel,"email")`);
-    const campaignsBody: any = await klaviyo(
-      `/campaigns/?filter=${filter}&fields[campaign]=name,status,send_time,created_at&sort=-created_at&page[size]=10`,
-      key,
+    // DEFAULT: fetch only the 10 most-recent campaigns (single page). Walking
+    // every campaign + message + template relationship for accounts with
+    // hundreds of historical campaigns would blow the deploy proxy's 60s
+    // window (504). Most merchants only want recent campaigns.
+    //
+    // DATE RANGE: when `since`/`until` are supplied, the operator has bounded
+    // the set, so we add created_at bounds to the filter and paginate the
+    // range — still capped at MAX_RANGE to stay under the timeout. `truncated`
+    // tells the client more matched than we returned (narrow the range).
+    const since = (body.since as string | undefined)?.trim() || null;
+    const until = (body.until as string | undefined)?.trim() || null;
+    const hasRange = !!(since || until);
+
+    const filterParts = [`equals(messages.channel,"email")`];
+    if (since) filterParts.push(`greater-or-equal(created_at,${toKlaviyoIso(since, false)})`);
+    if (until) filterParts.push(`less-or-equal(created_at,${toKlaviyoIso(until, true)})`);
+    const filter = encodeURIComponent(
+      filterParts.length === 1 ? filterParts[0] : `and(${filterParts.join(",")})`,
     );
-    const campaigns: CampaignMeta[] = (campaignsBody?.data ?? []).slice(0, 10);
+
+    const MAX_RANGE = 100;
+    let campaigns: CampaignMeta[];
+    let truncated = false;
+    if (hasRange) {
+      campaigns = [];
+      let url: string | null =
+        `/campaigns/?filter=${filter}&fields[campaign]=name,status,send_time,created_at&sort=-created_at&page[size]=50`;
+      while (url && campaigns.length < MAX_RANGE) {
+        const pageBody: any = await klaviyo(url, key);
+        campaigns.push(...((pageBody?.data ?? []) as CampaignMeta[]));
+        const next: string | null = pageBody?.links?.next ?? null;
+        url = next ? next.replace("https://a.klaviyo.com/api", "") : null;
+      }
+      // Still a `next` after hitting the cap → more matched than we returned.
+      truncated = !!url && campaigns.length >= MAX_RANGE;
+      if (campaigns.length > MAX_RANGE) campaigns = campaigns.slice(0, MAX_RANGE);
+    } else {
+      const campaignsBody: any = await klaviyo(
+        `/campaigns/?filter=${filter}&fields[campaign]=name,status,send_time,created_at&sort=-created_at&page[size]=10`,
+        key,
+      );
+      campaigns = (campaignsBody?.data ?? []).slice(0, 10);
+    }
 
     type CampaignOut = {
       campaignId: string;
@@ -796,7 +836,7 @@ async function handleCampaigns(req: IncomingMessage, res: ServerResponse) {
 
     // Already sorted by `-created_at` from the query; no need to re-sort.
 
-    json(res, 200, { campaigns: out, debug });
+    json(res, 200, { campaigns: out, debug, truncated, range: hasRange ? { since, until } : null });
   } catch (e: any) {
     json(res, 500, { error: e.message ?? String(e) });
   }
