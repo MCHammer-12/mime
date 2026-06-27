@@ -25,7 +25,38 @@ So mime **recognizes** coupons and emits a discount block. The gap is downstream
 
 Redo discount model is `redo/model/src/discount.ts`: `DiscountValueType` = `PERCENTAGE` \| `AMOUNT` (maps Klaviyo % vs fixed), plus `DiscountType` (ORDER / FREE_SHIPPING / PRODUCT / BUY_X_GET_Y), expiration, min-requirement.
 
-**Executor step 0 — confirm the merchant-facing create-discount RPC.** The grep found the model + service utils (`lookup-discount-reference.ts`, the manage scripts) but not a clean merchant RPC handler. Find it (or confirm it's a redoapp dependency, same pattern as segment Task 4's add-members RPC). Use MCP `get_discount_config` on a hand-built discount email to see the live shape.
+**Executor step 0 — RESOLVED 2026-06-26 (Michael created a discount through the
+Redo UI; request URL = `POST https://app-server.getredo.com/discounts-rpc/createDiscount`).**
+The merchant RPC exists; my earlier "blocked on redoapp" call was wrong (the
+grep missed `discounts-rpc` because it lives under `redo/merchant/discounts/rpc`,
+not `marketing`). Confirmed against redoapp `origin/main`:
+
+- **Router:** `redo/merchant/discounts/rpc/src/definition.ts` — `createDiscount`,
+  `updateDiscount`, `getDiscount`, `generatePreviewDiscountCode`,
+  `getDiscountsByTeam`, `deleteDiscount`, …
+- **Endpoint:** `POST /discounts-rpc/createDiscount`, merchant JWT (raw
+  `Authorization: <jwt>`, same auth as the marketing-rpc calls mime already makes).
+- **Input:** `{ discountConfiguration: draftDiscount }`; **output:** `redoDiscountSchema`
+  (carries the created discount's id → bind to `DiscountBlock.discountId`).
+- **`draftDiscount`** (`redo/model/src/discount/discount-db-parser.ts`):
+  ```ts
+  { name: string,
+    provider: "shopifyDiscount" | "commentsold" | "other",
+    codeGenerationStrategy: { strategy: "static" | "dynamic", code: string },
+    expiration: { expirationType: "EXPIRATION_DAYS"|"DATE"|"NEVER"|"DELIVERY", … },
+    discountSettings: <SHOPIFY_BASIC | SHOPIFY_FREE_SHIPPING | SHOPIFY_BXGY | DYNAMIC_RANGE>,
+    category?: DiscountCategory }
+  ```
+  For a plain % / $ coupon: `discountSettings = { settingsType: "SHOPIFY_BASIC",
+  discountValueType: "percentage" | "amount", discountValueAmount: number,
+  combinesWith: { orderDiscounts?, productDiscounts?, shippingDiscount? } }`.
+- **Per-recipient codes confirmed in-schema:** `codeGenerationStrategy.strategy =
+  "dynamic"` + `generatePreviewDiscountCode({discountId}) → {discountCode}` +
+  `paginateGeneratedDiscountCodes`. Klaviyo `{% coupon_code %}` (unique per
+  profile) → `strategy: "dynamic"`. A shared static code → `strategy: "static"`.
+
+So the redoapp dependency is **met** — no cross-repo work needed. Steps 1-7 below
+are all mime-side now.
 
 ## New extraction work — Klaviyo coupon definitions
 
@@ -54,7 +85,7 @@ Amount + type live in Klaviyo's **coupon** objects, not the template HTML. mime'
 
 ## Notes
 
-- **Likely cross-repo** (redoapp create-discount RPC + mime consumer), same pattern as segment Task 4. The two share a theme: import-time creation of merchant objects (segments, discounts) that Klaviyo managed externally.
+- **NOT cross-repo after all** (step 0 resolved 2026-06-26): the create-discount RPC already exists in redoapp. All remaining work is mime-side (carry coupon name → extract Klaviyo coupon value/type → call `discounts-rpc/createDiscount` → bind `discountId`). Still shares the segment-Task-4 *theme* (import-time creation of merchant objects), but no redoapp PR needed. Gating inputs for end-to-end: a Klaviyo key (to pull coupon amount/type — step 2) + a merchant JWT (to test the live create call).
 - This unblocks a large class — nearly every welcome/promo flow has a coupon. High recurrence, currently shipping placeholders.
 - Don't rebuild the parse side; `discount.ts` is done. This is purely the create+attach+bind at import.
 
