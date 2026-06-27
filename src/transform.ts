@@ -502,10 +502,16 @@ function mapProfileVars(html: string, ctx: Ctx): string {
 
 function cleanupAfterDrops(html: string): string {
   return html
-    // Empty inline elements left by tag drops
-    .replace(/<span[^>]*>(\s|&nbsp;)*<\/span>/gi, "")
-    .replace(/<em[^>]*>(\s|&nbsp;)*<\/em>/gi, "")
-    .replace(/<strong[^>]*>(\s|&nbsp;)*<\/strong>/gi, "")
+    // Empty inline elements left by tag drops. Match only truly-empty /
+    // plain-whitespace content (`\s*`), NOT `&nbsp;`: a dropped Klaviyo tag
+    // leaves `<span></span>` / `<span> </span>`, whereas `<strong>&nbsp;</strong>`
+    // inside its own block is an intentional blank-line spacer the merchant
+    // authored. Stripping the latter collapsed `<div><strong>&nbsp;</strong></div>`
+    // spacers to empty `<div>`s that Redo then drops, silently deleting the
+    // blank lines (Tiny Boat "Stay sharp, / Tiny Boat Nation" — 3 breaks lost).
+    .replace(/<span[^>]*>\s*<\/span>/gi, "")
+    .replace(/<em[^>]*>\s*<\/em>/gi, "")
+    .replace(/<strong[^>]*>\s*<\/strong>/gi, "")
     // Two consecutive separators (e.g. "Terms | | Unsubscribe" left after
     // dropping the middle anchor that we couldn't bind a separator to)
     .replace(/([|·•])(?:\s|&nbsp;)+([|·•])/g, "$1");

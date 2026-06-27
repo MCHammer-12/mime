@@ -65,6 +65,32 @@ function stripEmptyTables(html: string): string {
   return html.replace(/<table[^>]*>\s*<\/table>/gi, "").trim();
 }
 
+// Microsoft/clipboard fragment markers Klaviyo pastes into text blocks.
+const FRAGMENT_MARKER = String.raw`<!--\s*(?:Start|End)Fragment\s*-->|<!--\s*notionvc:[^>]*-->`;
+
+/**
+ * Remove fragment-marker noise. `<!--StartFragment-->` / `<!--EndFragment-->`
+ * (and Notion's `<!-- notionvc: … -->`) render to nothing, but Klaviyo leaves
+ * them wrapped in empty `<p>`/`<div>` elements — and an empty block renders as
+ * a spurious blank line in Redo's editor. Drop any block wrapper whose ONLY
+ * content is such a marker (optionally nested in one inline tag), then strip
+ * any bare markers that remain inline among real text (removing the comment is
+ * harmless — it never rendered). Caused Tiny Boat's "…giveaway below:" phantom
+ * line breaks. Intentional blank-line spacers (`<div><strong>&nbsp;</strong>…`)
+ * carry no marker, so they're untouched.
+ */
+function stripFragmentNoise(html: string): string {
+  return html
+    .replace(
+      new RegExp(
+        String.raw`<(p|div)\b[^>]*>\s*(?:<(?:span|strong|em|b|i)\b[^>]*>\s*)*(?:${FRAGMENT_MARKER})\s*(?:<\/(?:span|strong|em|b|i)>\s*)*<\/\1>`,
+        "gi",
+      ),
+      "",
+    )
+    .replace(new RegExp(FRAGMENT_MARKER, "gi"), "");
+}
+
 /**
  * Rewrite Klaviyo template variables in inline `<a href>` values inside the
  * text HTML to their Redo equivalents. Button + image blocks already do this
@@ -457,6 +483,7 @@ export function parseTextBlock(
     }
   }
 
+  textHtml = stripFragmentNoise(textHtml);
   textHtml = stripEmptyTables(textHtml);
   textHtml = stripStandaloneCoupons(textHtml);
   // Rewrite Klaviyo variable hrefs (`{{ event.extra.checkout_url }}` etc.)
