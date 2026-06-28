@@ -21,7 +21,7 @@ So mime **recognizes** coupons and emits a discount block. The gap is downstream
 |----------|--------|-----------|
 | What does the block bind to? | **A pre-created Redo discount — reference its `discountId`** (ObjectId). Create the discount, then bind the ID. | `email-builder.ts:141 discountId: string`; `email-template.ts:70,566 discountId: zExt.objectId().optional()` |
 | Static code or per-recipient? | **Redo generates per-recipient.** mime creates the discount *config* only — no code to copy. | Redo "generated discount code" system: MCP `get_generated_discount_code`; `redo/marketing/manage/src/{test,backfill}-generated-discount-code*.ts` |
-| Where do amount + type come from? | **Fetch from the Klaviyo API** (coupon definition), not operator input. | mime does NOT extract coupons today — new work (below) |
+| Where do amount + type come from? | ~~Fetch from the Klaviyo API~~ **REFUTED 2026-06-26 — NOT in Klaviyo. Operator-supplied (prefilled from copy/name heuristic).** | Tested live against Alexander Jane (`pk_b2f…`): 18 templates use `{% coupon_code %}` (`WELCOME20`, `EK_Welcome_Flow`, …) but `GET /api/coupons` returns **0 objects** (clean empty, key valid), and the coupon object schema has only `external_id`+`description` — **no value field**. Codes are Shopify-synced; the % lives in Shopify, not Klaviyo. |
 
 Redo discount model is `redo/model/src/discount.ts`: `DiscountValueType` = `PERCENTAGE` \| `AMOUNT` (maps Klaviyo % vs fixed), plus `DiscountType` (ORDER / FREE_SHIPPING / PRODUCT / BUY_X_GET_Y), expiration, min-requirement.
 
@@ -58,11 +58,30 @@ not `marketing`). Confirmed against redoapp `origin/main`:
 So the redoapp dependency is **met** — no cross-repo work needed. Steps 1-7 below
 are all mime-side now.
 
-## New extraction work — Klaviyo coupon definitions
+## Where amount + type come from — REVISED 2026-06-26 (Klaviyo API ruled out)
 
-Amount + type live in Klaviyo's **coupon** objects, not the template HTML. mime's extractors (`src/klaviyo.ts`, `src/extract-*.ts`) don't fetch them today. Add a Klaviyo coupons API pull (`GET /api/coupons` / coupon-codes), keyed by the coupon **name** the template references.
+Live test against Alexander Jane (`GET /api/coupons` = 0 objects despite 18
+`{% coupon_code %}` templates; coupon schema = `external_id` + `description`, no
+value) proves **Klaviyo does not hold the discount value.** It's a Shopify
+discount. Two viable sources, in preference order:
 
-**Gotcha:** `discount.ts buildDiscountBlock` currently **discards** the coupon name (`_couponName`, unused — confirmed in code). It must be **carried on the DiscountBlock** (e.g. a `_pendingCoupon: { name }` marker, like `_pendingProducts` / `_pendingFilter`) so the import path can look up its amount/type via the Klaviyo coupons API and create the Redo discount.
+1. **Operator prompt, prefilled by a heuristic (recommended).** Parse a hint
+   from (a) the coupon NAME (`WELCOME20` → 20%) and (b) the surrounding email
+   copy ("20% off", "$10 off") that `discount.ts` already has in hand, present
+   it in a per-coupon preflight ("WELCOME20 — 20% off order? [confirm/edit]"),
+   operator confirms. Reuses the existing `ctrl.prompt()`/`awaitInput` infra
+   (same as the font preflight). Prefix defaults to "RE".
+2. **Shopify Admin API pull.** The codes ARE Shopify discounts, so the value is
+   authoritative there — but needs the merchant's Shopify token + scope and a
+   name→Shopify-discount match. Heavier; revisit only if the prompt proves too
+   manual at scale.
+
+**Gotcha:** `discount.ts buildDiscountBlock` currently **discards** the coupon
+name (`_couponName`, unused — confirmed in code). Carry it on the DiscountBlock
+as a `_pendingCoupon: { name, valueHint?, typeHint? }` marker (like
+`_pendingProducts` / `_pendingFilter`) so the import path can resolve value/type
+(prompt, prefilled by the hints) and create the Redo discount. NOT a Klaviyo
+coupons-API pull — that's a dead end (verified).
 
 ## Proposed change
 
