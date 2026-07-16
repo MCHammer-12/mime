@@ -1,9 +1,16 @@
 ---
-status: needs-input
+status: done
 branch: fix/sms-phone-field-name-per-schema
-pr: null
+pr: 146
 priority: HIGH — SMS steps carry wrong phone-field reference for some triggers
 ---
+
+**SHIPPED in [#146](https://github.com/MCHammer-12/mime/pull/146):**
+`phoneFieldForSchema(schemaType)` → `customerPhoneNumber` for
+`sms_marketing_signup`, `customerPhone` otherwise (all current types unchanged →
+zero regression). Full per-schemaType audit of the remaining SMS-capable types
+(price_drop, warranty, order_tracking) is still open below if a future case
+surfaces, but the reported signup bug is fixed.
 
 # send_sms `phoneNumberFieldName` is hardcoded — should be per-schemaType
 
@@ -69,15 +76,13 @@ should build the full `schemaType → phoneFieldName` map from redoapp's `schema
 registry (each schema has one Phone-typed field) rather than trust this partial
 table.
 
-### SEPARATE BUG spotted in the same merchant (flag, don't fold in)
-Blackline's **"1KMH | Customer Winback | SMS"** flow imported with
-`schemaType: "order_tracking"` / category "Order tracking" — wrong for a
-marketing winback SMS flow. Looks like the Klaviyo winback/customer trigger has
-no mime mapping and fell back to `order_tracking`. That mis-schemaType also makes
-its SMS phone field wrong (order_tracking has no `customerPhone`/`customerPhoneNumber`).
-Needs its own task: map the Klaviyo winback trigger to the right Redo marketing
-schemaType (or surface to the trigger picker instead of defaulting to
-order_tracking).
+### Noted (likely NOT a bug) — same merchant
+Blackline's **"1KMH | Customer Winback | SMS"** flow imported as
+`schemaType: "order_tracking"`. Michael's read: it was probably an **order-delivered**
+Klaviyo trigger, in which case `order_tracking` is correct (winback timed off
+last delivery). Not treating as a bug. If any order_tracking flow with an SMS
+step turns up a wrong recipient phone, revisit order_tracking's phone field in
+the per-schemaType audit above — but no action needed now.
 
 ## Proposed fix (clean, self-correcting)
 Don't hardcode. Derive `phoneNumberFieldName` from the flow's `flowSchemaType`
