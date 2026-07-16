@@ -47,12 +47,37 @@ is CORRECT.** A blanket rename to `customerPhoneNumber` would BREAK every
 abandonment SMS flow (the field `customerPhoneNumber` does not exist on those
 schemas → undefined phone → silent no-send). This is the trap to avoid.
 
-### Open item
-I could NOT find a top-level `customerPhoneNumber` field in any Redo marketing
-schema I read. Michael's flow must be a schemaType whose phone field IS
-`customerPhoneNumber` (strong candidate: `SMS_MARKETING_SIGNUP` welcome flow, or
-date/price_drop). **Need: which trigger is the flow Michael saw** → then verify
-that schema's phone field in redoapp before changing anything.
+### CONFIRMED (Blackline Car Care, 2026-07-16)
+Michael's flow "SMS POP UP FLOW" is `schemaType: "sms_marketing_signup"`.
+Redo's `smsMarketingSignupSchema` (marketing.ts) defines the phone field as
+**`customerPhoneNumber`** (`dataType: "Phone"`, doc "…customer who signed up for
+marketing SMS"). `baseMarketingSmsSchema` also uses `customerPhoneNumber`. So:
+
+| schemaType | phone field |
+|---|---|
+| **SMS_MARKETING_SIGNUP** | **`customerPhoneNumber`** ← mime emits `customerPhone`, WRONG |
+| MARKETING_CART/CHECKOUT/BROWSE_ABANDONMENT (+ non-Shopify) | `customerPhone` (mime correct) |
+| MARKETING_DATE | `customerPhone` |
+| MARKETING_BACK_IN_STOCK | `customerPhone` |
+| MARKETING_LOW_INVENTORY | `customerPhone` |
+| MARKETING_SEGMENT_MEMBERSHIP_CHANGE | `customerPhone` |
+| EMAIL_MARKETING_SIGNUP | (no phone field — email only) |
+
+Rule of thumb: the **SMS-native** marketing schemas use `customerPhoneNumber`;
+the email-first schemas that also carry a phone use `customerPhone`. Executor
+should build the full `schemaType → phoneFieldName` map from redoapp's `schemas`
+registry (each schema has one Phone-typed field) rather than trust this partial
+table.
+
+### SEPARATE BUG spotted in the same merchant (flag, don't fold in)
+Blackline's **"1KMH | Customer Winback | SMS"** flow imported with
+`schemaType: "order_tracking"` / category "Order tracking" — wrong for a
+marketing winback SMS flow. Looks like the Klaviyo winback/customer trigger has
+no mime mapping and fell back to `order_tracking`. That mis-schemaType also makes
+its SMS phone field wrong (order_tracking has no `customerPhone`/`customerPhoneNumber`).
+Needs its own task: map the Klaviyo winback trigger to the right Redo marketing
+schemaType (or surface to the trigger picker instead of defaulting to
+order_tracking).
 
 ## Proposed fix (clean, self-correcting)
 Don't hardcode. Derive `phoneNumberFieldName` from the flow's `flowSchemaType`
