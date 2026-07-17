@@ -160,6 +160,19 @@ function isDropResult(r: unknown): r is DropResult {
   return typeof r === "object" && r !== null && (r as any)[DROP] === true;
 }
 
+// The schema-instance field carrying the recipient phone depends on the flow's
+// schemaType. The SMS-native marketing schema (sms_marketing_signup) exposes
+// `customerPhoneNumber`; the email-first marketing schemas that also carry a
+// phone (abandonment, date, back-in-stock, low-inventory, segment) use
+// `customerPhone`. Verified against redoapp
+// redo/flows/common/src/schemas/marketing/marketing.ts. Default to
+// `customerPhone` so any un-mapped schemaType keeps today's behavior.
+export function phoneFieldForSchema(schemaType: SchemaType): string {
+  return schemaType === SchemaType.SMS_MARKETING_SIGNUP
+    ? "customerPhoneNumber"
+    : "customerPhone";
+}
+
 // Per-action dispatcher. Emits exactly one Redo Step, drops the action with
 // re-stitching info, or returns null on hard skip.
 // Async because the send-email handler may need to resolve + parse the
@@ -398,7 +411,7 @@ async function convertAction(
         type: StepType.SEND_SMS,
         id,
         templateId: sentinelId,
-        phoneNumberFieldName: "customerPhone",
+        phoneNumberFieldName: phoneFieldForSchema(flowSchemaType),
         recipientNameFieldName: "customerFirstName",
         nextId: terminate(next, state),
       };
