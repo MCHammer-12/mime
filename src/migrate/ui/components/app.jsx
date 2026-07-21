@@ -1210,7 +1210,7 @@ function IdentityModal({ onPick, claimedUsers }) {
 // Allowed admin identities shown in the first-visit identity modal. Must
 // stay in sync with ALLOWED_ADMIN_USERS in server-side auth.ts — the
 // server is the real gate; this list only drives which buttons render.
-const ADMIN_USERS = ["Austin", "Michael", "Bailey"];
+const ADMIN_USERS = ["Austin", "Michael", "Bailey", "Milo"];
 
 // Per-assistant assist URLs. Update here when new assistants are added.
 const ASSISTANTS = ["Dennis", "Toby"];
