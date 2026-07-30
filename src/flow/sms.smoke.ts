@@ -51,9 +51,12 @@ async function main() {
       console.error(`FAIL: send_sms step ${s.id} has empty templateId`);
       process.exit(1);
     }
-    if (s.phoneNumberFieldName !== "customerPhone") {
+    // phoneNumberFieldName is now per-schema: customerPhone for most schemas,
+    // customerPhoneNumber for sms_marketing_signup. (email_marketing_signup has
+    // no phone field, so its SMS steps are dropped and never reach here.)
+    if (s.phoneNumberFieldName !== "customerPhone" && s.phoneNumberFieldName !== "customerPhoneNumber") {
       console.error(
-        `FAIL: send_sms step ${s.id} has phoneNumberFieldName=${s.phoneNumberFieldName}, expected customerPhone`,
+        `FAIL: send_sms step ${s.id} has phoneNumberFieldName=${s.phoneNumberFieldName}, expected customerPhone or customerPhoneNumber`,
       );
       process.exit(1);
     }

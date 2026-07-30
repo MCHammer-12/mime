@@ -160,6 +160,20 @@ function isDropResult(r: unknown): r is DropResult {
   return typeof r === "object" && r !== null && (r as any)[DROP] === true;
 }
 
+// The phone field a send_sms step should reference, per the flow's trigger
+// schema. Most Redo marketing schemas expose the canonical `customerPhone`, but
+// the signup schemas differ (confirmed against redoapp
+// redo/flows/common/src/schemas/marketing/marketing.ts):
+//   - sms_marketing_signup  → `customerPhoneNumber`
+//   - email_marketing_signup → NO phone field at all → returns null, so the
+//     caller drops the SMS step (Redo's validateStepFieldReferences would
+//     otherwise 400 the whole createAdvancedFlow).
+function smsPhoneFieldForSchema(schemaType: SchemaType): string | null {
+  if (schemaType === SchemaType.SMS_MARKETING_SIGNUP) return "customerPhoneNumber";
+  if (schemaType === SchemaType.EMAIL_MARKETING_SIGNUP) return null;
+  return "customerPhone";
+}
+
 // Per-action dispatcher. Emits exactly one Redo Step, drops the action with
 // re-stitching info, or returns null on hard skip.
 // Async because the send-email handler may need to resolve + parse the
@@ -375,6 +389,19 @@ async function convertAction(
           message: `send-sms marked transactional — Redo coerces SmsTemplate.templateType to "marketing"; verify intended audience`,
         });
       }
+      // Resolve the trigger schema's phone field. If the schema has none
+      // (email_marketing_signup), the SMS step is unmigratable — drop it and
+      // re-stitch, rather than emit a step that 400s the whole flow create.
+      const smsPhoneField = smsPhoneFieldForSchema(flowSchemaType);
+      if (!smsPhoneField) {
+        warnings.push({
+          kind: "unsupported-action",
+          actionId: id,
+          message: `send-sms in a "${flowSchemaType}" flow — that trigger schema has no phone field, so Redo can't send SMS from it. Dropped + chain re-stitched; recreate as a dedicated SMS flow if the merchant needs it.`,
+        });
+        return dropAction(terminate(next, state));
+      }
+
       // Smart-sending intent → flow-wide trigger.shouldSkipSmartSending (set
       // after the action loop; mixed flows warned there).
       if (msg.smart_sending_enabled === false) state.smartSendingBypass = true;
@@ -398,7 +425,7 @@ async function convertAction(
         type: StepType.SEND_SMS,
         id,
         templateId: sentinelId,
-        phoneNumberFieldName: "customerPhone",
+        phoneNumberFieldName: smsPhoneField,
         recipientNameFieldName: "customerFirstName",
         nextId: terminate(next, state),
       };
