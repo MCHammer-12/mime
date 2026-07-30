@@ -17,6 +17,11 @@ send from an email-only trigger) and re-stitches via `dropAction`. First case:
 Felicity Worldwide `Xx9sgd` (email welcome flow with 2 SMS steps).
 **Re-run:** just re-run on current `main` — the parse now drops the SMS steps.
 Flag to the operator that the SMS messages need a dedicated SMS flow.
+**Recreate the dropped SMS as a parallel SMS flow** (same messages, timing, and
+conditions) with `src/flow/build-sms-variant.ts`:
+`KLAVIYO_API_KEY=… REDO_JWT=… FLOW_ID=<id> npx tsx src/flow/build-sms-variant.ts` —
+parses forced to `sms_marketing_signup`, drops the email steps + re-stitches, keeps
+the SMS + waits + conditions. `DIAGNOSE_ONLY=1` dumps without importing.
 
 **General method for any "not a field on schema" error:** open the schema in
 redoapp (`codebase_search`, repo `redoapp/redo`, `redo/flows/common/src/schemas/
