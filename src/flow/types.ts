@@ -206,8 +206,10 @@ export interface SendSmsStep extends BaseStep {
    *  `__PLACEHOLDER_X__` sentinel to be swapped at import time (mirrors
    *  the email-step pattern). */
   templateId: string;
-  /** Schema-instance field name carrying the recipient's phone, in
-   *  camelCase. Canonical for Marketing schemas: `customerPhone`. */
+  /** Schema-instance field name carrying the recipient's phone, in camelCase.
+   *  Depends on the flow's schemaType: `customerPhoneNumber` for
+   *  sms_marketing_signup, `customerPhone` for the email-first marketing
+   *  schemas. See `phoneFieldForSchema` in parser.ts. */
   phoneNumberFieldName: string;
   /** Schema-instance field name for the recipient's first name, used by
    *  Liquid in the SMS body. Canonical: `customerFirstName`. */

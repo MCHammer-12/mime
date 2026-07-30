@@ -6,7 +6,7 @@
  *   npx tsx src/flow/sms.smoke.ts
  */
 import { readFileSync } from "node:fs";
-import { parseFlow } from "./parser.js";
+import { parseFlow, phoneFieldForSchema } from "./parser.js";
 import { StepType, type KlaviyoFlow } from "./types.js";
 
 // migrations/ may live alongside the worktree's parent mime checkout when
@@ -51,12 +51,10 @@ async function main() {
       console.error(`FAIL: send_sms step ${s.id} has empty templateId`);
       process.exit(1);
     }
-    // phoneNumberFieldName is now per-schema: customerPhone for most schemas,
-    // customerPhoneNumber for sms_marketing_signup. (email_marketing_signup has
-    // no phone field, so its SMS steps are dropped and never reach here.)
-    if (s.phoneNumberFieldName !== "customerPhone" && s.phoneNumberFieldName !== "customerPhoneNumber") {
+    const expectedPhoneField = phoneFieldForSchema(r.automation.schemaType);
+    if (s.phoneNumberFieldName !== expectedPhoneField) {
       console.error(
-        `FAIL: send_sms step ${s.id} has phoneNumberFieldName=${s.phoneNumberFieldName}, expected customerPhone or customerPhoneNumber`,
+        `FAIL: send_sms step ${s.id} has phoneNumberFieldName=${s.phoneNumberFieldName}, expected ${expectedPhoneField} for schemaType ${r.automation.schemaType}`,
       );
       process.exit(1);
     }

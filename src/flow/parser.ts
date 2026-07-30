@@ -160,15 +160,15 @@ function isDropResult(r: unknown): r is DropResult {
   return typeof r === "object" && r !== null && (r as any)[DROP] === true;
 }
 
-// The phone field a send_sms step should reference, per the flow's trigger
-// schema. Most Redo marketing schemas expose the canonical `customerPhone`, but
-// the signup schemas differ (confirmed against redoapp
-// redo/flows/common/src/schemas/marketing/marketing.ts):
-//   - sms_marketing_signup  → `customerPhoneNumber`
-//   - email_marketing_signup → NO phone field at all → returns null, so the
-//     caller drops the SMS step (Redo's validateStepFieldReferences would
-//     otherwise 400 the whole createAdvancedFlow).
-function smsPhoneFieldForSchema(schemaType: SchemaType): string | null {
+// The schema-instance field carrying the recipient phone depends on the flow's
+// schemaType. The SMS-native marketing schema (sms_marketing_signup) exposes
+// `customerPhoneNumber`; the email-first schemas that also carry a phone
+// (abandonment, date, back-in-stock, low-inventory, segment) use `customerPhone`.
+// `email_marketing_signup` has NO phone field at all → returns null, so the
+// caller DROPS the SMS step (Redo's validateStepFieldReferences would otherwise
+// 400 the whole createAdvancedFlow). Verified against redoapp
+// redo/flows/common/src/schemas/marketing/marketing.ts.
+export function phoneFieldForSchema(schemaType: SchemaType): string | null {
   if (schemaType === SchemaType.SMS_MARKETING_SIGNUP) return "customerPhoneNumber";
   if (schemaType === SchemaType.EMAIL_MARKETING_SIGNUP) return null;
   return "customerPhone";
@@ -392,7 +392,7 @@ async function convertAction(
       // Resolve the trigger schema's phone field. If the schema has none
       // (email_marketing_signup), the SMS step is unmigratable — drop it and
       // re-stitch, rather than emit a step that 400s the whole flow create.
-      const smsPhoneField = smsPhoneFieldForSchema(flowSchemaType);
+      const smsPhoneField = phoneFieldForSchema(flowSchemaType);
       if (!smsPhoneField) {
         warnings.push({
           kind: "unsupported-action",
