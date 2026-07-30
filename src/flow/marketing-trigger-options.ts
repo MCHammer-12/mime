@@ -77,6 +77,17 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
     },
   },
   {
+    value: "email_signup_shopify",
+    label: "Marketing email signup through Shopify",
+    resolution: {
+      // Source-specific variant of email signup — same schema, Shopify-native
+      // checkbox source instead of the generic list signup.
+      key: MarketingTriggerKey.EMAIL_SIGNUP_SHOPIFY,
+      schemaType: SchemaType.EMAIL_MARKETING_SIGNUP,
+      category: "Marketing",
+    },
+  },
+  {
     value: "sms_signup",
     label: "SMS marketing sign-up",
     resolution: {

@@ -40,6 +40,7 @@ import { fetchAllMetrics } from "../extract-metrics.js";
 }
 import { fetchAccount } from "../fetch-account.js";
 import { klaviyo } from "../klaviyo.js";
+import { MARKETING_TRIGGER_OPTIONS } from "./marketing-trigger-options.js";
 import { parseFlow } from "./parser.js";
 import { createTemplateResolver } from "./template-resolver.js";
 import {
@@ -58,6 +59,24 @@ async function main() {
   if (!klaviyoKey) throw new Error("KLAVIYO_API_KEY not set");
   if (!redoJwt) throw new Error("REDO_JWT not set");
   if (!flowId) throw new Error("FLOW_ID not set");
+
+  // Optional: force a specific Redo trigger instead of auto-resolving from the
+  // Klaviyo flow — this is how you "duplicate a flow with a different trigger".
+  // FORCE_TRIGGER is a MARKETING_TRIGGER_OPTIONS value (e.g. email_signup_shopify).
+  // NAME_SUFFIX is appended to the flow name so the duplicate is distinguishable.
+  const forceTrigger = process.env.FORCE_TRIGGER;
+  const nameSuffix = process.env.NAME_SUFFIX;
+  let forcedTrigger = undefined as (typeof MARKETING_TRIGGER_OPTIONS)[number]["resolution"] | undefined;
+  if (forceTrigger) {
+    const opt = MARKETING_TRIGGER_OPTIONS.find((o) => o.value === forceTrigger);
+    if (!opt) {
+      throw new Error(
+        `FORCE_TRIGGER="${forceTrigger}" not found. Options: ${MARKETING_TRIGGER_OPTIONS.map((o) => o.value).join(", ")}`,
+      );
+    }
+    forcedTrigger = opt.resolution;
+    console.log(`      forcing trigger: ${opt.label} (${opt.resolution.schemaType})`);
+  }
 
   console.log(`[1/5] fetching metrics...`);
   const metrics = await fetchAllMetrics(klaviyoKey);
@@ -98,7 +117,12 @@ async function main() {
     teamId: audTeamId ?? "__TEAM_ID__",
     templateResolver,
     account,
+    forcedTrigger,
   });
+  if (parsed.automation && nameSuffix) {
+    parsed.automation.name = `${parsed.automation.name}${nameSuffix}`;
+    console.log(`      renamed → "${parsed.automation.name}"`);
+  }
 
   if (!parsed.automation) {
     console.error(`parse failed: ${parsed.skipped?.reason ?? "unknown reason"}`);
