@@ -169,8 +169,8 @@ Only after a full merchant migration has run agent-driven. Split by door:
 ## First run — Piperblue Makeup (2026-08-10)
 
 Three flows, chosen because each exercises a different failure class. Klaviyo key
-received 2026-08-10; all three diagnosed. **Still blocked on a Redo JWT for
-Piperblue's store** — nothing can be imported, only diagnosed.
+received 2026-08-10. JWT unblocked the same day via `jwt-bandit`; target store is
+`68b1eaed06badabc590b9168`.
 
 Diagnosis runs need no Redo credentials:
 
@@ -178,11 +178,16 @@ Diagnosis runs need no Redo credentials:
 KLAVIYO_API_KEY=... DIAGNOSE_ONLY=1 SKIP_AI=1 FLOW_ID=Sj5GSG npx tsx src/flow/import-one.ts
 ```
 
-| flow | steps before | steps after | status |
+| flow | steps before | steps after | outcome |
 |---|---|---|---|
-| `XWfahQ` | 52 (27 dup) | **17** (4 dup) | parses; 2 segment conditions need manual config |
-| `Sj5GSG` | 758 (727 dup, 24.5x) | **34** (9 dup) | parses; SMS dropped (trigger schema) |
-| `S6ghDv` | — | — | **fails**: no Redo trigger for the Okendo metric |
+| `XWfahQ` | 52 (27 dup) | **17** (4 dup) | **imported** `6a7a52b68cc1bc50abdc5751`, 10 templates |
+| `Sj5GSG` | 758 (727 dup, 24.5x) | **34** (9 dup) | **imported** `6a7a5297adb058147586583e`, 14 templates |
+| `S6ghDv` | — | **41** (18 dup) | parses since `334ab61`; **not imported** — trigger has no event source |
+
+Both imports ran with **AI transformations skipped** (`ANTHROPIC_API_KEY` unset in the
+run shell → `skipAi`). Image-as-button conversion, coupon rewrites, and the other AI
+passes did not run for those 24 templates. Re-run with a key before treating template
+fidelity as measured.
 
 ### `XWfahQ` — not a control after all
 Intended as the baseline. It has the same disease as `Sj5GSG`: six identical
@@ -241,13 +246,6 @@ Two things rule 1 did *not* recover:
 Klaviyo triggers this on an Okendo metric. Reference implementation on the Redo side is
 the existing "color match quiz completed" trigger.
 
-**Confirmed 2026-08-10.** Parse fails outright — the flow is skipped, not degraded:
-
-```
-21 actions → unsupported-trigger: metric "Submitted Okendo Survey" (Okendo)
-has no Redo trigger equivalent — flow "Customer Survey" skipped
-```
-
 `"Submitted Okendo Survey"` is the literal string that becomes `eventName` on the Redo
 custom-event trigger step.
 
@@ -267,17 +265,39 @@ property conditions evaluated against the event payload
 (`redo/flows/service/src/get-relevant-flows.ts:223`). That maps cleanly onto Klaviyo:
 metric name → `eventName`, `trigger_filter` → `conditions`.
 
-**mime side — the gap.** mime cannot emit this at all today. `custom_event` appears
-nowhere in `src/flow/`, and `MARKETING_TRIGGER_OPTIONS` has 46 entries, none of them a
-custom event. Unknown custom metrics currently resolve to NULL → trigger picker
-(the 2026-06-12 never-silent-default rule, guarded by
-[`survey-trigger.smoke.ts`](../src/flow/survey-trigger.smoke.ts)). That rule stays; this
-adds a real destination the picker can point at.
+**mime side — SHIPPED 2026-08-10** (`334ab61`, covered by
+[`custom-event-trigger.smoke.ts`](../src/flow/custom-event-trigger.smoke.ts)).
+`custom_event` is now a `MARKETING_TRIGGER_OPTIONS` entry; `parseFlow` fills `eventName`
+from the flow's own Klaviyo metric name. The 2026-06-12 never-silent-default rule is
+untouched — an unmapped metric still resolves to NULL and goes to the picker (guarded by
+[`survey-trigger.smoke.ts`](../src/flow/survey-trigger.smoke.ts)). What changed is that
+the picker now has a real destination to point at.
 
-**Genuinely open — needs Redo-side confirmation.** Whether Okendo events actually reach
-Redo's custom-event pipeline for this store, i.e. what populates `schemaInstance.eventName`.
-The trigger can be authored either way, but it won't fire without the event source. This
-is the piece Michael flagged as needing help from the Redo side.
+The same commit fixes a latent hard-failure: every send-email step hardcoded
+`recipientNameFieldName: "customerFullName"`, a field `customEventSchema` does not have
+(it splits into `customerFirstName` / `customerLastName`). Redo's
+`validateStepFieldReferences` + `advanced-flows-repo.ts:345` reject the entire
+`createAdvancedFlow` on that, so this would have 400'd every custom-event flow.
+
+`S6ghDv` now parses to 41 steps / 9 templates with 4 residual warnings, including a
+`trigger_filter` — *"Survey Name equals Customer Survey"* — that Redo's
+`triggerSpecificFields.conditions` (`{property, operator: "equals", value}`) is the exact
+home for. Not wired yet: filling it requires knowing the property key the Okendo→Redo
+payload actually uses, which is downstream of the blocker below.
+
+**BLOCKED — no event source.** Verified live 2026-08-10 against Piperblue
+(`68b1eaed06badabc590b9168`):
+
+```
+POST /marketing-rpc/getCustomEventNames  →  {"output":{"eventNames":[]}}
+```
+
+That handler lists names Redo has actually *ingested*, and the only ingest path is the
+public custom-event API (`redo/public/common/src/custom-events/create-custom-event.ts`).
+Redo's Okendo integration is reviews-only — it has no bridge into the custom-event
+pipeline. So the trigger is authorable and correct, and would sit inert. **Not importing
+`S6ghDv` until Okendo → Redo custom-event ingestion exists for this store** — a
+syntactically valid flow that silently never fires is worse than an absent one.
 
 ## Verification
 
@@ -300,8 +320,16 @@ Felicity for triggers, Blackline for fonts.
 
 ## Open questions
 
-- **Okendo event source** — does Okendo deliver custom events into Redo for this store?
-  Blocks `S6ghDv` firing (not authoring). Redo-side question.
+- **Okendo event source** — answered and it's a no: Piperblue has zero ingested custom
+  events, and Redo's Okendo integration doesn't feed the custom-event pipeline. Someone
+  has to POST `Submitted Okendo Survey` to the public custom-event API. Redo-side work,
+  blocking `S6ghDv`.
+- **Sj5GSG's dropped SMS** — the flow's `email_marketing_signup` trigger schema has no
+  phone field, so its SMS sends are gone. Recreating them as a dedicated SMS flow is a
+  merchant-visible decision, not a mechanical one.
+- **`ANTHROPIC_API_KEY` for run shells** — without it every import silently skips AI
+  transformations. `skipAi` should be surfaced in the run manifest rather than inferred
+  from an unset env var.
 - **Repo boundary** — mime is `MCHammer-12/mime` (personal), internal-tools is
   `redoapp/` (org). S7 either ports mime in or has internal-tools wrap it. Deferred
   until a real run tells us how much of mime the surface actually needs.
