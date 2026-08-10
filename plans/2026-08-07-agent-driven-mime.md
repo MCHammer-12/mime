@@ -189,6 +189,24 @@ run shell → `skipAi`). Image-as-button conversion, coupon rewrites, and the ot
 passes did not run for those 24 templates. Re-run with a key before treating template
 fidelity as measured.
 
+Both landed **inactive** (`enabled: false`), per the standing rule.
+
+**Duplicates from a June run are still in the store.** A prior mime pass on 2026-06-22
+imported the same two flows un-flattened, and they were never cleaned up:
+
+| name | 2026-06-22 | 2026-08-10 |
+|---|---|---|
+| Piper Blue NEW Welcome Series | `6a397ced0b4abb7a4e08dcbb` — **760 steps** | `6a7a5297adb058147586583e` — **34 steps** |
+| Makeup Academy Email Flow | `6a397cd2fe54be008c009ee7` — 54 steps | `6a7a52b68cc1bc50abdc5751` — 17 steps |
+
+All four inactive, so nothing is sending, but the merchant sees two of each. Incidentally
+this is the flattening result sitting side by side in one store: 760 → 34 on the same
+source flow. Deleting the June pair is a merchant-visible call, not taken.
+
+Four more June-run flows are also present and untouched: `Abandoned Cart Reminder - LP`,
+`Back In Stock Flow - Standard`, `Perfect Match Sample Bundle Purchased`,
+`Customer Winback - LP`.
+
 ### `XWfahQ` — not a control after all
 Intended as the baseline. It has the same disease as `Sj5GSG`: six identical
 `profile-group-membership` re-checks against one list (`XXEwgb`), expanding 23 actions
@@ -284,6 +302,21 @@ The same commit fixes a latent hard-failure: every send-email step hardcoded
 `triggerSpecificFields.conditions` (`{property, operator: "equals", value}`) is the exact
 home for. Not wired yet: filling it requires knowing the property key the Okendo→Redo
 payload actually uses, which is downstream of the blocker below.
+
+**Shape verified against the reference flow.** Read back Piperblue's hand-built
+`Color Match Quiz Completed` (`6a7a1318f4e12088e8eaf6e1`, created 2026-08-10 18:06 by
+the Redo side). Its trigger step is:
+
+```json
+{ "type": "trigger", "id": "trigger", "schemaType": "custom_event",
+  "category": "Custom Event", "key": "custom_event",
+  "eventName": "Submitted Okendo Quiz", "shouldSkipSmartSending": false }
+```
+
+Two things confirmed, not inferred: `eventName` is the **Klaviyo metric name verbatim**
+(which is exactly what `parseFlow` now derives), and `triggerSpecificFields` is absent —
+the conditions array really is optional. All 12 of its `send_email` steps use
+`recipientNameFieldName: "customerFirstName"`, independently confirming the field fix.
 
 **BLOCKED — no event source.** Verified live 2026-08-10 against Piperblue
 (`68b1eaed06badabc590b9168`):
