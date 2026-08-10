@@ -51,6 +51,101 @@ function dropStepsByType(automation: any, dropType: string): number {
   return dropped.size;
 }
 
+// Dropping the emails leaves scaffolding that only existed to serve them: wait
+// chains that used to space out sends, and splits that used to choose between
+// emails. Neither is structure the merchant authored, and both look broken in
+// the flow builder (a 20-day wait chain ending in nothing; a branch whose two
+// sides do the same thing). The three passes below remove exactly that.
+const FLOW_END_ID = "flow_end";
+const DUP_SUFFIX = /__dup_\d+$/;
+const POINTER_FIELDS = ["nextId", "nextTrueId", "nextFalseId"] as const;
+const SEND_TYPES = new Set(["send_sms", "send_email"]);
+
+const stepMap = (automation: any) =>
+  new Map<string, any>((automation.steps ?? []).map((s: any) => [s.id, s]));
+
+const targetsOf = (step: any): string[] =>
+  POINTER_FIELDS.map((f) => step[f]).filter((v): v is string => typeof v === "string" && !!v);
+
+// Redirect to the shared End block any pointer whose subtree can no longer
+// reach a send. Returns the number of pointers cut.
+function pruneDeadTails(automation: any): number {
+  const byId = stepMap(automation);
+  if (!byId.has(FLOW_END_ID)) return 0;
+  const memo = new Map<string, boolean>();
+  const leadsToSend = (id: string, path = new Set<string>()): boolean => {
+    const cached = memo.get(id);
+    if (cached !== undefined) return cached;
+    if (path.has(id)) return false; // cycle guard
+    const s = byId.get(id);
+    if (!s) return false;
+    path.add(id);
+    const r = SEND_TYPES.has(s.type) || targetsOf(s).some((t) => leadsToSend(t, path));
+    path.delete(id);
+    memo.set(id, r);
+    return r;
+  };
+
+  let cut = 0;
+  for (const s of byId.values()) {
+    for (const f of POINTER_FIELDS) {
+      const t = s[f];
+      if (typeof t !== "string" || !t || t === FLOW_END_ID) continue;
+      if (byId.has(t) && !leadsToSend(t)) {
+        s[f] = FLOW_END_ID;
+        cut++;
+      }
+    }
+  }
+  return cut;
+}
+
+// Identity of a subtree, ignoring treeify's __dup_N clone suffix — two branches
+// with the same signature are the same branch cloned, so the split between them
+// no longer decides anything.
+function subtreeSignature(byId: Map<string, any>, id: unknown, path = new Set<string>()): string {
+  if (typeof id !== "string" || !id) return "-";
+  if (path.has(id)) return "…";
+  const s = byId.get(id);
+  if (!s) return "-";
+  path.add(id);
+  const kids = POINTER_FIELDS.filter((f) => f in s)
+    .map((f) => `${f}(${subtreeSignature(byId, s[f], path)})`)
+    .join(",");
+  path.delete(id);
+  return `${s.type}#${id.replace(DUP_SUFFIX, "")}[${kids}]`;
+}
+
+function collapseIdenticalBranches(automation: any): number {
+  const byId = stepMap(automation);
+  const gone = new Set<string>();
+  for (const s of byId.values()) {
+    if (s.type !== "condition" || gone.has(s.id)) continue;
+    if (subtreeSignature(byId, s.nextTrueId) !== subtreeSignature(byId, s.nextFalseId)) continue;
+    const survivor = s.nextTrueId ?? null;
+    for (const p of byId.values()) {
+      for (const f of POINTER_FIELDS) if (p[f] === s.id) p[f] = survivor;
+    }
+    gone.add(s.id);
+  }
+  automation.steps = automation.steps.filter((s: any) => !gone.has(s.id));
+  return gone.size;
+}
+
+function pruneUnreachable(automation: any): number {
+  const byId = stepMap(automation);
+  const live = new Set<string>();
+  const visit = (id: string | null | undefined) => {
+    if (typeof id !== "string" || !id || live.has(id) || !byId.has(id)) return;
+    live.add(id);
+    for (const t of targetsOf(byId.get(id))) visit(t);
+  };
+  visit(automation.steps.find((s: any) => s.type === "trigger")?.id);
+  const before = automation.steps.length;
+  automation.steps = automation.steps.filter((s: any) => live.has(s.id));
+  return before - automation.steps.length;
+}
+
 async function main() {
   const key = process.env.KLAVIYO_API_KEY;
   const jwt = process.env.REDO_JWT;
@@ -95,8 +190,21 @@ async function main() {
   const before = automation.steps.length;
   const removed = dropStepsByType(automation, "send_email");
   automation.name = `${automation.name} (SMS)`;
+  console.log(`      ${before} → ${automation.steps.length} steps (removed ${removed} email step(s))`);
+
+  if (automation.steps.filter((s: any) => s.type === "send_sms").length === 0) {
+    console.log(`\nno send_sms steps in this flow — nothing to build.`);
+    return;
+  }
+
+  const cutTails = pruneDeadTails(automation);
+  const collapsed = collapseIdenticalBranches(automation);
+  const orphaned = pruneUnreachable(automation);
   const smsCount = automation.steps.filter((s: any) => s.type === "send_sms").length;
-  console.log(`      ${before} → ${automation.steps.length} steps (removed ${removed} email step(s)); ${smsCount} send_sms kept`);
+  console.log(
+    `      simplify: ${cutTails} dead tail(s) cut, ${collapsed} no-op split(s) collapsed, ` +
+      `${orphaned} step(s) dropped → ${automation.steps.length} steps; ${smsCount} send_sms kept`,
+  );
 
   // Sanity: no surviving pointer references a removed/nonexistent step.
   const ids = new Set(automation.steps.map((s: any) => s.id));
@@ -110,10 +218,12 @@ async function main() {
   if (dangling.length) { console.error(`dangling pointers: ${dangling.join(", ")}`); process.exit(1); }
   console.log(`      graph clean (no dangling pointers)`);
 
-  if (smsCount === 0) {
-    console.log(`\nno send_sms steps in this flow — nothing to build.`);
-    return;
-  }
+  // Every placeholder becomes a real SmsTemplate in the merchant's account, so
+  // drop the ones whose send step didn't survive rather than leaving orphans.
+  const liveSentinels = new Set(
+    automation.steps.filter((s: any) => s.type === "send_sms").map((s: any) => s.templateId),
+  );
+  const smsTemplates = parsed.placeholderSmsTemplates.filter((t) => liveSentinels.has(t.sentinelId));
 
   if (diagnoseOnly) {
     const p = `/tmp/mime-sms-variant-${flowId}.json`;
@@ -133,7 +243,7 @@ async function main() {
       automation: automation as any, // AdvancedFlow lacks the bundle's index sig (same as import-one)
       warnings: parsed.warnings,
       placeholderTemplates: [], // email templates intentionally dropped
-      placeholderSmsTemplates: parsed.placeholderSmsTemplates,
+      placeholderSmsTemplates: smsTemplates,
     },
     { jwt: jwt!, serverBase: process.env.REDO_SERVER_BASE, account, onProgress },
   );
