@@ -6,6 +6,7 @@ import {
   translateTriggerSplitExpression,
 } from "./condition-mapping.js";
 import type { TemplateResolver } from "./template-resolver.js";
+import { collapseConsentSplits } from "./flatten.js";
 import { treeifyFlow } from "./treeify.js";
 import { resolveTrigger, summarizeTriggerFilter, type TriggerResolution } from "./trigger-mapping.js";
 import { rewriteKlaviyoLiquid } from "./variable-mapping.js";
@@ -918,10 +919,15 @@ export async function parseFlow(
     steps.push(terminal);
   }
 
+  // Drop the "can this profile receive SMS/email?" guards before treeifying —
+  // each one would otherwise double the subtree below it for no behavioural
+  // gain, since Redo suppresses sends to profiles without consent anyway.
+  const flattenedSteps = collapseConsentSplits(steps, warnings);
+
   // Klaviyo allows branch re-merging; Redo's advanced flows are trees. Clone
   // any step reachable from >1 parent so each incoming branch has its own
   // copy of the downstream subtree. flow_end stays shared.
-  const treeifiedSteps = treeifyFlow(steps, warnings);
+  const treeifiedSteps = treeifyFlow(flattenedSteps, warnings);
 
   // Always import as inactive so the merchant can review the flow in Redo
   // before it starts firing — even if the Klaviyo source was live. Original

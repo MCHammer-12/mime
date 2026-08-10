@@ -40,9 +40,30 @@ export function treeifyFlow(
   const dfsStack = new Set<string>();
   const out: Step[] = [];
 
+  // Predicates already decided on the current root-to-node path. Klaviyo
+  // re-tests the same predicate at every decision point; once a path has taken
+  // a branch, every downstream copy of that predicate is a foregone conclusion,
+  // so we descend straight into the known branch instead of cloning both sides.
+  // This is what keeps a re-tested predicate from doubling the tree each time.
+  const decided = new Map<string, boolean>();
+  const foldedIds = new Set<string>();
+  let foldedCount = 0;
+
   function nextClonedId(origId: string): string {
     const origStep = byId.get(origId);
     if (!origStep) return origId;
+
+    if (origStep.type === StepType.CONDITION) {
+      const known = decided.get(JSON.stringify(origStep.expression));
+      if (known !== undefined && !dfsStack.has(origId)) {
+        foldedCount++;
+        foldedIds.add(origId);
+        dfsStack.add(origId);
+        const target = nextClonedId(known ? origStep.nextTrueId : origStep.nextFalseId);
+        dfsStack.delete(origId);
+        return target;
+      }
+    }
 
     if (dfsStack.has(origId)) {
       warnings.push({
@@ -88,10 +109,17 @@ export function treeifyFlow(
       case StepType.MANAGE_STATIC_SEGMENT:
         if (step.nextId) step.nextId = nextClonedId(step.nextId);
         return;
-      case StepType.CONDITION:
+      case StepType.CONDITION: {
+        const key = JSON.stringify(step.expression);
+        const prior = decided.get(key);
+        decided.set(key, true);
         step.nextTrueId = nextClonedId(step.nextTrueId);
+        decided.set(key, false);
         step.nextFalseId = nextClonedId(step.nextFalseId);
+        if (prior === undefined) decided.delete(key);
+        else decided.set(key, prior);
         return;
+      }
       case StepType.AB_TEST:
         step.variants = step.variants.map(v => ({
           ...v,
@@ -108,6 +136,24 @@ export function treeifyFlow(
   triggerClone.nextId = nextClonedId(trigger.nextId);
   dfsStack.delete(TRIGGER_STEP_ID);
   out.unshift(triggerClone);
+
+  if (foldedCount > 0) {
+    // Folding removes conditions from the tree, and can strand others on
+    // branches that are no longer reachable. Either way the step never reaches
+    // Redo, so a per-action "configure this" note about it is stale — the
+    // surviving copy carries its own. Prune by presence in the final tree so
+    // the review list matches the splits that actually landed. Actions the
+    // parser dropped earlier aren't in `byId`, so their warnings are untouched.
+    const survived = new Set(out.map((s) => s.id.split("__dup_")[0]));
+    for (let i = warnings.length - 1; i >= 0; i--) {
+      const id = warnings[i]!.actionId;
+      if (id && byId.has(id) && !survived.has(id)) warnings.splice(i, 1);
+    }
+    warnings.push({
+      kind: "degraded-mapping",
+      message: `folded ${foldedCount} repeated condition(s) whose outcome was already decided earlier on the same path; the first split is kept and downstream copies inherit it`,
+    });
+  }
 
   const ratio = steps.length > 0 ? out.length / steps.length : 1;
   if (ratio > BLOWUP_RATIO_WARN) {
