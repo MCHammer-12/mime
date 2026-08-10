@@ -1,9 +1,11 @@
 import type { MetricLookup } from "../extract-metrics.js";
 import {
+  CustomEventTriggerKey,
   MarketingTriggerKey,
   OrderTrackingTriggerKey,
   ReviewsTriggerKey,
   SchemaType,
+  type CustomEventTriggerFields,
   type FlowCategory,
   type KlaviyoFlow,
   type KlaviyoTrigger,
@@ -26,9 +28,27 @@ export interface TriggerResolution {
   //   viewed-product   → skip if customer has NOT viewed-product in window
   //   active-on-site   → skip if customer HAS viewed-product in window
   klaviyoSource?: "viewed-product" | "active-on-site";
+  // Required by Redo for the custom_event trigger. Left unset on the picker
+  // option — parseFlow fills it from the flow's own Klaviyo metric name, which
+  // is the only place the event's identity actually lives.
+  eventName?: string;
   // Required by Redo for the marketing_date trigger (parseFlow writes it onto
   // the trigger step). Without it createAdvancedFlow 400s on a 50KB Zod wall.
-  triggerSpecificFields?: MarketingDateTriggerFields;
+  triggerSpecificFields?: MarketingDateTriggerFields | CustomEventTriggerFields;
+}
+
+// Redo's merchant-defined event trigger. Never auto-resolved from a Klaviyo
+// metric: per Michael's 2026-06-12 rule an unknown custom-event metric always
+// goes to the picker, because guessing the wrong Redo event name produces a
+// flow that looks configured and silently never fires. The operator picks this
+// explicitly; the event name then comes from the Klaviyo metric.
+export function customEventResolution(eventName?: string): TriggerResolution {
+  return {
+    key: CustomEventTriggerKey.CUSTOM_EVENT,
+    schemaType: SchemaType.CUSTOM_EVENT,
+    category: "Custom Event",
+    ...(eventName ? { eventName } : {}),
+  };
 }
 
 // Redo's marketing_date trigger only supports a birthday dimension firing on
@@ -278,7 +298,7 @@ function resolveMetricTrigger(
   if (!hit) {
     warnings.push({
       kind: "unsupported-trigger",
-      message: `metric "${m.name}" (${m.integration_name ?? "no integration"}) has no Redo trigger equivalent — flow "${flowName}" skipped`,
+      message: `metric "${m.name}" (${m.integration_name ?? "no integration"}) has no Redo trigger equivalent — flow "${flowName}" skipped. If the integration sends this event to Redo's custom-event API, pick "Custom event" in the trigger picker.`,
     });
     return null;
   }

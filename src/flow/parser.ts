@@ -175,6 +175,16 @@ export function phoneFieldForSchema(schemaType: SchemaType): string | null {
   return "customerPhone";
 }
 
+// Same story for the send-email recipient name. The marketing/order/reviews
+// schemas expose `customerFullName`; customEventSchema splits it into
+// customerFirstName + customerLastName and has no combined field. Redo's
+// validateStepFieldReferences rejects the whole createAdvancedFlow when a
+// *FieldName names a field the schema doesn't have.
+export function recipientNameFieldForSchema(schemaType: SchemaType): string {
+  if (schemaType === SchemaType.CUSTOM_EVENT) return "customerFirstName";
+  return "customerFullName";
+}
+
 // Per-action dispatcher. Emits exactly one Redo Step, drops the action with
 // re-stitching info, or returns null on hard skip.
 // Async because the send-email handler may need to resolve + parse the
@@ -316,7 +326,7 @@ async function convertAction(
         id,
         templateId: sentinelId,
         emailAddressFieldName: "customerEmail",
-        recipientNameFieldName: "customerFullName",
+        recipientNameFieldName: recipientNameFieldForSchema(flowSchemaType),
         nextId: terminate(next, state),
       };
       // Klaviyo's per-message smart-sending → Redo's flow-wide
@@ -812,6 +822,26 @@ export async function parseFlow(
     });
   }
 
+  // Redo's custom_event trigger keys off an exact `eventName`. The Klaviyo
+  // metric name is the only identity the event has on this side, so use it —
+  // the picker option deliberately ships without one. Always flagged for
+  // review: Redo fires this trigger only for events its public custom-event
+  // API has actually ingested under that exact name, so a mismatch (or an
+  // integration that doesn't send to Redo at all) yields a flow that looks
+  // configured and never runs.
+  let eventName: string | undefined;
+  if (resolution.schemaType === SchemaType.CUSTOM_EVENT) {
+    const metricId = triggers[0]?.id;
+    eventName =
+      resolution.eventName ??
+      (metricId ? metrics[metricId]?.name : undefined) ??
+      flow.data.attributes.name;
+    warnings.push({
+      kind: "requires-review",
+      message: `custom-event trigger set to eventName "${eventName}". Redo matches this string exactly against events delivered to its custom-event API — confirm the integration sends that event name to Redo (Redo's ingested event list is under the flow builder's custom-event trigger), or the flow will never fire.`,
+    });
+  }
+
   const triggerStep: TriggerStep = {
     type: StepType.TRIGGER,
     id: TRIGGER_STEP_ID,
@@ -819,6 +849,7 @@ export async function parseFlow(
     category: resolution.category,
     key: resolution.key,
     nextId: terminate(firstActionId, state),
+    ...(eventName ? { eventName } : {}),
     ...(skipConditions.length > 0
       ? { skipConditions: { conjunctionMode: "OR", conditions: skipConditions } }
       : {}),

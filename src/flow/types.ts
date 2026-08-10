@@ -35,6 +35,10 @@ export enum SchemaType {
   EXCHANGE_PROCESSED_WITH_CREDIT = "exchange_processed_with_credit",
   ORDER_TRACKING = "order_tracking",
   REVIEWS = "reviews",
+  // Merchant-defined event delivered to Redo via the public custom-event API.
+  // The trigger matches on `eventName`, so it only ever fires for events that
+  // integration actually ingests — see CustomEventTriggerKey below.
+  CUSTOM_EVENT = "custom_event",
   // Yotpo Integration triggers — `key` and `schemaType` strings happen to be
   // identical for every Yotpo trigger; defined once here and reused as both.
   // Source: redo/model/src/advanced-flow/integration-triggers.ts.
@@ -82,6 +86,13 @@ export enum ReviewsTriggerKey {
   REVIEW_SUBMITTED = "review_submitted",
 }
 
+// Mirrors redo/flows/common/src/triggers.ts CustomEventTriggerKey. One key for
+// the whole category — which event fires the flow is carried by the trigger
+// step's `eventName`, not by the key.
+export enum CustomEventTriggerKey {
+  CUSTOM_EVENT = "custom_event",
+}
+
 /**
  * Integration triggers — Yotpo Loyalty + Yotpo Reviews. Each Klaviyo flow
  * triggered by a Yotpo metric (when the merchant has Yotpo's Klaviyo
@@ -113,13 +124,15 @@ export type FlowCategory =
   | "Marketing"
   | "Order tracking"
   | "Integration"
-  | "Reviews";
+  | "Reviews"
+  | "Custom Event";
 
 export type TriggerKey =
   | MarketingTriggerKey
   | OrderTrackingTriggerKey
   | IntegrationTriggerKey
-  | ReviewsTriggerKey;
+  | ReviewsTriggerKey
+  | CustomEventTriggerKey;
 
 export enum MarketingTriggerKey {
   EMAIL_SIGNUP = "email_signup",
@@ -168,6 +181,18 @@ export interface MarketingDateTriggerFields {
       };
 }
 
+// Redo's `custom_event` trigger fires on an exact `eventName` match against
+// events ingested through the public custom-event API. `conditions` further
+// narrows on the event's own properties (redoapp customEventTriggerStepSchema /
+// customEventPropertyConditionSchema); optional, defaults to [].
+export interface CustomEventTriggerFields {
+  conditions: Array<{
+    property: string;
+    operator: "equals" | "contains" | "greater_than" | "less_than";
+    value: string | number | boolean;
+  }>;
+}
+
 export interface TriggerStep extends BaseStep {
   type: StepType.TRIGGER;
   schemaType: SchemaType;
@@ -179,8 +204,11 @@ export interface TriggerStep extends BaseStep {
     conditions: unknown[];
   };
   shouldSkipSmartSending?: boolean;
+  // Required by Redo for the custom_event trigger; omitted for others. Must
+  // match the event name the merchant's integration actually sends.
+  eventName?: string;
   // Required by Redo for the marketing_date trigger; omitted for others.
-  triggerSpecificFields?: MarketingDateTriggerFields;
+  triggerSpecificFields?: MarketingDateTriggerFields | CustomEventTriggerFields;
 }
 
 export interface WaitStep extends BaseStep {
