@@ -28,6 +28,17 @@ hand-finishes the rest.
   derived from what the run actually uses, not designed up front.
 - **Autonomy** — decide freely on mechanical choices; stop and ask on anything a
   merchant would notice. Flows continue to land inactive regardless.
+
+**Scope revised (2026-08-10):**
+- **Signup forms dropped.** Out of scope to keep the first loop small. Former S0/S5
+  removed; the spike findings are preserved in git history at `6eec10e` if they come back.
+- **Discount codes are not blocked and not an ask.** Re-checked: `createDiscount` is a
+  live merchant RPC (`POST /discounts-rpc/createDiscount`, input
+  `{ discountConfiguration: draftDiscount }`, output `redoDiscountSchema` → bind
+  `DiscountBlock.discountId`). Already scoped end-to-end in
+  [`plans/feedback/clusters/discount-codes.md`](feedback/clusters/discount-codes.md).
+  It becomes a **post-import second pass** (see S6), which is the better decomposition:
+  a discount ambiguity stops gating the flow that contains it.
 - **Deploy target** — `redoapp/redotech-internal-tools`, reachable over MCP. Confirmed
   it has two distinct doors: `.agents/skills/` (instructions, auto-live team-wide on
   merge to main — this is how `change-marketing-automation-trigger` reaches a session)
@@ -106,28 +117,6 @@ we don't design a tool contract against guesses. See Section 7.
 Ordered by readiness, not by the order the targets were named. They are not
 equal-effort and pretending otherwise would mis-sequence the work.
 
-### S0 — Spike: signup-form target *(blocking for S5)*
-Both halves turned out to already exist; the open question is which Redo surface to aim at.
-
-- **Klaviyo side — confirmed available.** `GET /api/forms/{id}` returns the encoded form
-  definition; `POST /api/forms` creates. Scope `forms:read`. Rate limit 3/s burst,
-  60/m steady. Documented workflow is GET → strip all `id`, `created_at`, `updated_at` →
-  modify → POST. That is a clean read path, better than assumed.
-- **Redo side — exists.** `redo/marketing/common/src/signup-form/signup-form-schema.ts`,
-  `signup-form.ts` (`LayoutType.POPUP` / `FULLSCREEN`), Mongoose `SignupForm.ts`,
-  `signup-form-repo.ts`, `get-signup-form.ts`. Signup forms are **not** a Redo gap.
-- **The actual open question:** `redo/marketing/common/src/signup-form-to-spotlight-migration.ts`
-  and `redo/marketing/manage/src/migrate-signup-forms-to-spotlights.ts` show an in-flight
-  migration from SignupForm → **Spotlight**. Building an importer against SignupForm may
-  target a deprecating surface.
-- **Also unconfirmed:** no `createSignupForm` RPC surfaced in the marketing RPC search.
-  Flows have `createAdvancedFlow`; forms may be repo-only (no merchant-facing create),
-  which would mean the same redoapp-side ask as discount codes.
-
-→ **Output:** a one-paragraph answer to "SignupForm or Spotlight, and is there a
-create RPC" — sourced from the marketing team, not inferred. Everything else in S5
-depends on it.
-
 ### S1 — Result contract + manifest
 Implement `MigrationResult`, `Question`, `ResumeToken`, manifest read/write. Retrofit the
 four existing one-shot primitives (`flow/import-one.ts`, `flow/import-template-one.ts`,
@@ -154,21 +143,88 @@ families, weight mismatches, and preflight blocks become `needs_input` with a pr
 substitution rather than a hard block. Substitution is `mechanical`; a brand's signature
 display face is `merchant_visible`.
 
-### S5 — Signup forms *(gated on S0)*
-Net-new. Shape depends entirely on S0's answer. If there is no create RPC this becomes a
-redoapp-side ask and drops to S6's category.
+### S6 — Discount codes *(post-import second pass)*
+Not blocked. `POST /discounts-rpc/createDiscount` exists and takes `draftDiscount`
+(`{ name, provider, codeGenerationStrategy: { strategy, code }, expiration,
+discountSettings, category? }`). Per-recipient codes = `strategy: "dynamic"`, which is
+what `{% coupon_code %}` means in Klaviyo.
 
-### S6 — Discount codes *(not a build — an ask)*
-Per `project_discount_codes_open_question`, the Klaviyo coupon → Redo discount block path
-likely needs a redoapp-side change to create and attach a code at import time. This is
-blocked on someone else's roadmap. Correct action now is to write the ask and get it
-queued, in parallel with S1–S4 — not to sequence build work behind it.
+Running it **after** the flow lands rather than inside the import is the point: today a
+coupon whose amount we can't determine can stall the whole flow. Split apart, the flow
+imports with the discount block unbound, and a second pass creates the discount and binds
+`discountId`. The unknown amount becomes one `merchant_visible` question against a landed
+flow instead of a blocker on it.
+
+Amount/type is **operator-supplied, not fetchable** — refuted against live Klaviyo
+2026-06-26: `GET /api/coupons` returns 0 objects and the coupon schema has no value field;
+the percentage lives in Shopify. So this is exactly one question per distinct coupon,
+prefilled from a copy heuristic ("15% OFF" in the body).
 
 ### S7 — MCP packaging
 Only after a full merchant migration has run agent-driven. Split by door:
 - **Skills** (`.agents/skills/`) — the judgment: how to read a transcript into a manifest,
   how to resolve a trigger question, how to pick a font substitution.
 - **MCP server** (`apps/` or `mcp/`) — the engine: parse, render, import primitives.
+
+## First run — Piperblue Makeup (2026-08-10)
+
+Three flows, chosen because each exercises a different failure class. Blocked on a
+Piperblue Klaviyo API key + a Redo JWT for their store; nothing local exists yet
+(`migrations/` has no Piperblue data).
+
+### `XWfahQ` — control
+No special notes. This is the baseline: what does the current pipeline do unassisted.
+
+### `Sj5GSG` — branch explosion *(flatten, don't reproduce)*
+Redo can't merge branches, so Klaviyo's conditional splits expand combinatorially through
+`treeify` (each merge point duplicates the downstream subtree, marked `__dup_`). This flow
+has enough splits that a faithful import is unusable.
+
+Michael's two flattening rules, which are semantic, not structural — they change what the
+flow *is*, so they need to be recorded as decisions, not silently applied:
+
+1. **Drop SMS-capability splits entirely.** Klaviyo checks "can this person receive SMS?"
+   before each SMS send. Redo doesn't need the branch — send the SMS, and anyone not
+   subscribed simply doesn't receive it. Every such split collapses to its send.
+2. **Hoist the repeat-customer check to a single branch at the top.** Klaviyo re-checks
+   "placed an order at least once over all time" at each decision point. Replace with one
+   split at the entry, producing two independent sides of the welcome flow. Everything
+   downstream inherits its side instead of re-testing.
+
+Rule 2 is the one that kills the exponent: N sequential re-checks of the same predicate
+become 1. Verify by comparing step count before/after on the same parse.
+
+### `S6ghDv` — Okendo custom-event trigger *(new capability)*
+Klaviyo triggers this on an Okendo metric. Reference implementation on the Redo side is
+the existing "color match quiz completed" trigger.
+
+**Redo side — the target exists.** `redo/flows/common/src/triggers.ts` has a first-class
+generic custom-event trigger: category `"Custom Event"`, `CustomEventTriggerKey.CUSTOM_EVENT`
+(`"custom_event"`). The step shape
+([`advanced-flow-db-parser.ts:848`](https://github.com/redoapp/redo/blob/main/redo/flows/common/src/advanced-flow-db-parser.ts#L848)) is:
+
+```ts
+{ category: "Custom Event", key: "custom_event",
+  eventName: string,
+  triggerSpecificFields?: { conditions?: CustomEventPropertyCondition[] } }
+```
+
+Matching is `triggerStep.eventName === schemaInstance.eventName`, plus optional
+property conditions evaluated against the event payload
+(`redo/flows/service/src/get-relevant-flows.ts:223`). That maps cleanly onto Klaviyo:
+metric name → `eventName`, `trigger_filter` → `conditions`.
+
+**mime side — the gap.** mime cannot emit this at all today. `custom_event` appears
+nowhere in `src/flow/`, and `MARKETING_TRIGGER_OPTIONS` has 46 entries, none of them a
+custom event. Unknown custom metrics currently resolve to NULL → trigger picker
+(the 2026-06-12 never-silent-default rule, guarded by
+[`survey-trigger.smoke.ts`](../src/flow/survey-trigger.smoke.ts)). That rule stays; this
+adds a real destination the picker can point at.
+
+**Genuinely open — needs Redo-side confirmation.** Whether Okendo events actually reach
+Redo's custom-event pipeline for this store, i.e. what populates `schemaInstance.eventName`.
+The trigger can be authored either way, but it won't fire without the event source. This
+is the piece Michael flagged as needing help from the Redo side.
 
 ## Verification
 
@@ -191,7 +247,8 @@ Felicity for triggers, Blackline for fonts.
 
 ## Open questions
 
-- **S0** — SignupForm vs Spotlight; create-RPC existence. Blocks S5.
+- **Okendo event source** — does Okendo deliver custom events into Redo for this store?
+  Blocks `S6ghDv` firing (not authoring). Redo-side question.
 - **Repo boundary** — mime is `MCHammer-12/mime` (personal), internal-tools is
   `redoapp/` (org). S7 either ports mime in or has internal-tools wrap it. Deferred
   until a real run tells us how much of mime the surface actually needs.
