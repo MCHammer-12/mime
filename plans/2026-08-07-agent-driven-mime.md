@@ -168,12 +168,30 @@ Only after a full merchant migration has run agent-driven. Split by door:
 
 ## First run — Piperblue Makeup (2026-08-10)
 
-Three flows, chosen because each exercises a different failure class. Blocked on a
-Piperblue Klaviyo API key + a Redo JWT for their store; nothing local exists yet
-(`migrations/` has no Piperblue data).
+Three flows, chosen because each exercises a different failure class. Klaviyo key
+received 2026-08-10; all three diagnosed. **Still blocked on a Redo JWT for
+Piperblue's store** — nothing can be imported, only diagnosed.
 
-### `XWfahQ` — control
-No special notes. This is the baseline: what does the current pipeline do unassisted.
+Diagnosis runs need no Redo credentials:
+
+```bash
+KLAVIYO_API_KEY=... DIAGNOSE_ONLY=1 SKIP_AI=1 FLOW_ID=Sj5GSG npx tsx src/flow/import-one.ts
+```
+
+| flow | steps before | steps after | status |
+|---|---|---|---|
+| `XWfahQ` | 52 (27 dup) | **17** (4 dup) | parses; 2 segment conditions need manual config |
+| `Sj5GSG` | 758 (727 dup, 24.5x) | **34** (9 dup) | parses; SMS dropped (trigger schema) |
+| `S6ghDv` | — | — | **fails**: no Redo trigger for the Okendo metric |
+
+### `XWfahQ` — not a control after all
+Intended as the baseline. It has the same disease as `Sj5GSG`: six identical
+`profile-group-membership` re-checks against one list (`XXEwgb`), expanding 23 actions
+into 52 steps. Michael's rule 2 is not repeat-customer-specific — it generalizes to *any*
+repeated identical predicate, and that generalization is what shipped.
+
+Residual: 2 `requires-review` warnings for the surviving membership splits. The list must
+exist as a Redo segment before import.
 
 ### `Sj5GSG` — branch explosion *(flatten, don't reproduce)*
 Redo can't merge branches, so Klaviyo's conditional splits expand combinatorially through
@@ -194,9 +212,44 @@ flow *is*, so they need to be recorded as decisions, not silently applied:
 Rule 2 is the one that kills the exponent: N sequential re-checks of the same predicate
 become 1. Verify by comparing step count before/after on the same parse.
 
+**SHIPPED 2026-08-10** — [`flatten.ts`](../src/flow/flatten.ts) +
+[`treeify.ts`](../src/flow/treeify.ts), covered by
+[`flatten.smoke.ts`](../src/flow/flatten.smoke.ts).
+
+Measured: **758 → 34 steps**. The flow is now literally one split at the top feeding two
+8-email tracks, which is what rule 2 asked for.
+
+Rule 2 is implemented as path-sensitive folding rather than a literal hoist: when a
+condition's outcome is already decided on the current root-to-node path, treeify descends
+only into the known branch. Same result, and it generalizes to any repeated predicate
+(which `XWfahQ` needed) without special-casing repeat-customer.
+
+Safety check — comparing root-to-leaf send sequences before vs. after: **0 gained, 62 of
+64 dropped.** Nobody receives a sequence they couldn't have before. The 62 dropped
+combinations were phantoms that required the customer to be a repeat buyer at one split
+and not at the next; only the all-yes and all-no tracks are reachable by a real profile.
+
+Two things rule 1 did *not* recover:
+- Piperblue's SMS is dropped anyway, for an unrelated reason: the flow's trigger schema is
+  `email_marketing_signup`, which has no phone field, so Redo can't send SMS from it at
+  all. Rule 1 collapses the consent split correctly, but the send it was guarding is gone.
+  Recreating this as a dedicated SMS flow is a separate decision.
+- 8 `delay_until_time` values (send at 10:00) are still lost — Redo's WAIT has no
+  time-of-day field.
+
 ### `S6ghDv` — Okendo custom-event trigger *(new capability)*
 Klaviyo triggers this on an Okendo metric. Reference implementation on the Redo side is
 the existing "color match quiz completed" trigger.
+
+**Confirmed 2026-08-10.** Parse fails outright — the flow is skipped, not degraded:
+
+```
+21 actions → unsupported-trigger: metric "Submitted Okendo Survey" (Okendo)
+has no Redo trigger equivalent — flow "Customer Survey" skipped
+```
+
+`"Submitted Okendo Survey"` is the literal string that becomes `eventName` on the Redo
+custom-event trigger step.
 
 **Redo side — the target exists.** `redo/flows/common/src/triggers.ts` has a first-class
 generic custom-event trigger: category `"Custom Event"`, `CustomEventTriggerKey.CUSTOM_EVENT`
