@@ -185,10 +185,9 @@ KLAVIYO_API_KEY=... DIAGNOSE_ONLY=1 SKIP_AI=1 FLOW_ID=Sj5GSG npx tsx src/flow/im
 | `S6ghDv` | — | **41** (18 dup) | **imported** `6a7a5983442ce8cc95b36548`, 9 templates — trigger has no event source yet |
 | `Sj5GSG` (SMS) | 36 | **3** | **imported** `6a7a5b6e54eff5fba6cc71c6`, 1 SMS template |
 
-Both imports ran with **AI transformations skipped** (`ANTHROPIC_API_KEY` unset in the
-run shell → `skipAi`). Image-as-button conversion, coupon rewrites, and the other AI
-passes did not run for those 24 templates. Re-run with a key before treating template
-fidelity as measured.
+All imports ran with **AI transformations skipped** (`ANTHROPIC_API_KEY` unset in the
+run shell → `skipAi`). Audited afterwards — see *The AI audit* below. Nothing was lost
+to `skipAi`; two parser bugs were lost to instead.
 
 All four landed **inactive** (`enabled: false`), per the standing rule.
 
@@ -289,6 +288,60 @@ exactly one SMS, fired immediately on signup — the other 17 steps were email s
 Imported as `6a7a5b6e54eff5fba6cc71c6`, inactive. Its one text carries a **static** code
 (`SMS5`, hardcoded in the body), not `{% coupon_code %}`, so it needs none of the
 discount-block work from S6.
+
+### The AI audit — what `skipAi` actually cost *(nothing; the parser cost 5 blocks)*
+
+Michael's instruction was to audit what the AI would have changed and do it by hand,
+rather than reach for an API key. The audit turned up something better than a rewrite.
+
+mime has exactly **one** AI-guarded transformation: `rewriteInlineCoupon`
+([`src/ai-rewrite.ts`](../src/ai-rewrite.ts)), called from
+[`transform.ts:116`](../src/transform.ts) for TEXT blocks where `hasInlineCoupon()` is
+true. Image-as-button conversion and font normalization are recorded as planned work,
+not shipped code paths — no AI runs on either today.
+
+Across the 30 templates behind Piperblue's three flows, **4 contain `{% coupon_code %}`**,
+all in `Sj5GSG`, all the same code (`Welcome_Series_Email`). **None of them is an inline
+coupon.** All four are Klaviyo's dedicated **Coupon block** (`td.kl-coupon`) — a dotted
+pill whose only content is the tag. So `rewriteInlineCoupon` would never have fired on a
+single one, with or without a key. *`skipAi` cost this migration nothing.*
+
+What it did cost was two silent drops, both now fixed
+([`2c37ed2`](../src/parser/index.ts)):
+
+1. **`kl-coupon` had no parser.** The wrapper carries no `kl-text`, so it reached neither
+   `tryParseDiscountFromText` nor the AI pass — it fell through the dispatcher to
+   *"Unknown block"* and the code vanished from the email. Now parsed into a Redo
+   `DiscountBlock` carrying the `<a>`'s font/weight/size/color and the pill's background.
+   The dotted border and the `<a href>` have no slot in `DiscountBlock`; they're named in
+   a warning rather than dropped quietly.
+2. **The section walker only visited wrappers under `kl-row > kl-column`.** Klaviyo
+   occasionally hangs a `component-wrapper` straight off a `kl-section`; those blocks were
+   dropped with **no warning at all**. Extracted the per-wrapper dispatch into
+   `parseWrapper` and walk strays in document order alongside the rows. Rare — 1 of 30
+   templates — but it was eating real copy.
+
+Regression across all 30: **26 byte-identical**, and the 4 that change are exactly the 4
+carrying a coupon.
+
+**The four live templates were repaired in place**, not re-imported — `updateEmailTemplate`
+`{emailTemplateId, updates}` with the recovered blocks spliced in by LCS, so every existing
+block and `blockId` is untouched. Read back after write:
+
+| Klaviyo | Redo template | subject | recovered |
+|---|---|---|---|
+| `QRviCU` | `6a7a52921b92fe5534c17af1` | Welcome to PiperBlue Makeup | discount @11 |
+| `X3XvJf` | `6a7a52932d19417fd800d45e` | A note from Jamie | discount @7, **text @8** |
+| `UrUPTT` | `6a7a529410daea3bd90759bf` | The skincare that changed my skin | discount @11 |
+| `TaccT8` | `6a7a529520ee9864b5e7fded` | Making your morning easier | discount @13 |
+
+`X3XvJf`'s recovered text is the email's closing paragraph — *"Thank you for letting us
+share our love for pure, high-performance beauty with you…"* — which had been missing
+outright from the imported email.
+
+The four discount blocks carry **no `discountId`**. That is the parked discount-codes
+question, and it stays parked: the block is the right destination, attaching a real code
+is the post-import second pass.
 
 ### `S6ghDv` — Okendo custom-event trigger *(new capability)*
 Klaviyo triggers this on an Okendo metric. Reference implementation on the Redo side is
@@ -431,14 +484,19 @@ Felicity for triggers, Blackline for fonts.
   Piperblue's trigger filter has nothing to key on — see the `S6ghDv` section.
 - ~~**Sj5GSG's dropped SMS**~~ — closed. Michael's call: recreate as a dedicated SMS flow.
   Imported as `6a7a5b6e54eff5fba6cc71c6`.
-- **AI transformations should be done by the agent, not an API key** *(Michael,
-  2026-08-10)*. Today `skipAi` is inferred from an unset `ANTHROPIC_API_KEY`, so imports
-  silently skip image-as-button conversion, coupon rewrites, and font normalization with
-  no signal. The decision is not "remember to set the key" — it's to **audit what the AI
-  pass would have changed and have the agent perform those edits directly**, then drop the
-  in-process LLM dependency. Two consequences for this plan: `skipAi` must appear in the
-  run manifest rather than being inferred, and S4/S6 become agent-executed passes rather
-  than API-backed ones.
+- ~~**AI transformations should be done by the agent, not an API key**~~ — *(Michael,
+  2026-08-10)*. Audited on Piperblue: the AI pass would have changed **nothing** (see
+  *The AI audit*), and the real damage was two parser bugs `skipAi` had nothing to do
+  with. Standing consequences for this plan:
+  - `skipAi` must appear in the run manifest rather than being inferred from an unset
+    `ANTHROPIC_API_KEY` — a silently-skipped pass is exactly how this went unnoticed.
+  - The handoff mechanism already exists: `AI_VIA_CLAUDE_CODE=1`
+    ([`src/ai-claude-code.ts`](../src/ai-claude-code.ts)) writes
+    `.ai-cache/<id>.request.md` and polls for `.ai-cache/<id>.response.md`. That is the
+    agent-executes-it path; it needs wiring into the run loop, not building.
+  - **An "Unknown block" warning is a coverage gap, not noise.** Both bugs were visible
+    in warnings nobody read — one of them emitted no warning at all. The run manifest
+    should surface unknown/dropped blocks as a first-class result, not a log line.
 - **Repo boundary** — mime is `MCHammer-12/mime` (personal), internal-tools is
   `redoapp/` (org). S7 either ports mime in or has internal-tools wrap it. Deferred
   until a real run tells us how much of mime the surface actually needs.
