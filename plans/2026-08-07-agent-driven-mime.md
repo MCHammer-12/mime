@@ -182,28 +182,29 @@ KLAVIYO_API_KEY=... DIAGNOSE_ONLY=1 SKIP_AI=1 FLOW_ID=Sj5GSG npx tsx src/flow/im
 |---|---|---|---|
 | `XWfahQ` | 52 (27 dup) | **17** (4 dup) | **imported** `6a7a52b68cc1bc50abdc5751`, 10 templates |
 | `Sj5GSG` | 758 (727 dup, 24.5x) | **34** (9 dup) | **imported** `6a7a5297adb058147586583e`, 14 templates |
-| `S6ghDv` | — | **41** (18 dup) | parses since `334ab61`; **not imported** — trigger has no event source |
+| `S6ghDv` | — | **41** (18 dup) | **imported** `6a7a5983442ce8cc95b36548`, 9 templates — trigger has no event source yet |
+| `Sj5GSG` (SMS) | 36 | **3** | **imported** `6a7a5b6e54eff5fba6cc71c6`, 1 SMS template |
 
 Both imports ran with **AI transformations skipped** (`ANTHROPIC_API_KEY` unset in the
 run shell → `skipAi`). Image-as-button conversion, coupon rewrites, and the other AI
 passes did not run for those 24 templates. Re-run with a key before treating template
 fidelity as measured.
 
-Both landed **inactive** (`enabled: false`), per the standing rule.
+All four landed **inactive** (`enabled: false`), per the standing rule.
 
-**Duplicates from a June run are still in the store.** A prior mime pass on 2026-06-22
-imported the same two flows un-flattened, and they were never cleaned up:
+**Duplicates from a June run — resolved.** A prior mime pass on 2026-06-22 had imported
+two of these flows un-flattened and never cleaned them up:
 
 | name | 2026-06-22 | 2026-08-10 |
 |---|---|---|
 | Piper Blue NEW Welcome Series | `6a397ced0b4abb7a4e08dcbb` — **760 steps** | `6a7a5297adb058147586583e` — **34 steps** |
 | Makeup Academy Email Flow | `6a397cd2fe54be008c009ee7` — 54 steps | `6a7a52b68cc1bc50abdc5751` — 17 steps |
 
-All four inactive, so nothing is sending, but the merchant sees two of each. Incidentally
-this is the flattening result sitting side by side in one store: 760 → 34 on the same
-source flow. Deleting the June pair is a merchant-visible call, not taken.
+Worth keeping as the flattening receipt: 760 → 34 on the same source flow, in one store.
+Michael approved deleting the June pair; both removed via `deleteAdvancedFlow` after
+snapshotting all 52 flows. Store now holds one copy of each.
 
-Four more June-run flows are also present and untouched: `Abandoned Cart Reminder - LP`,
+Four other June-run flows remain and were left alone: `Abandoned Cart Reminder - LP`,
 `Back In Stock Flow - Standard`, `Perfect Match Sample Bundle Purchased`,
 `Customer Winback - LP`.
 
@@ -256,9 +257,38 @@ Two things rule 1 did *not* recover:
 - Piperblue's SMS is dropped anyway, for an unrelated reason: the flow's trigger schema is
   `email_marketing_signup`, which has no phone field, so Redo can't send SMS from it at
   all. Rule 1 collapses the consent split correctly, but the send it was guarding is gone.
-  Recreating this as a dedicated SMS flow is a separate decision.
+  **Recreated as a dedicated SMS flow** — see below.
 - 8 `delay_until_time` values (send at 10:00) are still lost — Redo's WAIT has no
   time-of-day field.
+
+### `Sj5GSG (SMS)` — the dropped SMS, recreated
+Michael's call: recreate as a dedicated SMS flow rather than leave the send behind.
+[`build-sms-variant.ts`](../src/flow/build-sms-variant.ts) already did the core of this
+(keep SMS + timing + conditions, drop the emails, force the `sms_signup` trigger), but its
+first output was a flow that sends one text and then sits through **seven chained waits —
+20 days — doing nothing**, twice, once per side of a repeat-customer split whose two
+branches were byte-identical after the email drop.
+
+Both defects are artifacts of dropping the emails, not structure the merchant authored.
+Three passes added (commit `460350f`):
+
+- **`pruneDeadTails`** — any pointer whose subtree can no longer reach a send is
+  redirected to the shared `flow_end`. Kills wait chains that only ever spaced out emails.
+- **`collapseIdenticalBranches`** — a condition whose two branch signatures match
+  (ignoring treeify's `__dup_N` suffix) no longer decides anything; splice it out.
+- **`pruneUnreachable`** — sweep what the first two orphaned.
+
+Also filters `placeholderSmsTemplates` to sentinels a surviving step still references —
+every placeholder becomes a real `SmsTemplate` in the merchant's account, so a dropped
+send would otherwise leave an orphan template behind.
+
+**36 → 20 (email drop) → 3 steps.** Sends and their timing are untouched; only steps that
+provably do nothing were removed. The honest read is that Piperblue's welcome series had
+exactly one SMS, fired immediately on signup — the other 17 steps were email scaffolding.
+
+Imported as `6a7a5b6e54eff5fba6cc71c6`, inactive. Its one text carries a **static** code
+(`SMS5`, hardcoded in the body), not `{% coupon_code %}`, so it needs none of the
+discount-block work from S6.
 
 ### `S6ghDv` — Okendo custom-event trigger *(new capability)*
 Klaviyo triggers this on an Okendo metric. Reference implementation on the Redo side is
@@ -318,19 +348,60 @@ Two things confirmed, not inferred: `eventName` is the **Klaviyo metric name ver
 the conditions array really is optional. All 12 of its `send_email` steps use
 `recipientNameFieldName: "customerFirstName"`, independently confirming the field fix.
 
-**BLOCKED — no event source.** Verified live 2026-08-10 against Piperblue
-(`68b1eaed06badabc590b9168`):
+**No event source yet — imported anyway, on Michael's call.** Verified live 2026-08-10
+against Piperblue (`68b1eaed06badabc590b9168`):
 
 ```
 POST /marketing-rpc/getCustomEventNames  →  {"output":{"eventNames":[]}}
 ```
 
-That handler lists names Redo has actually *ingested*, and the only ingest path is the
-public custom-event API (`redo/public/common/src/custom-events/create-custom-event.ts`).
-Redo's Okendo integration is reviews-only — it has no bridge into the custom-event
-pipeline. So the trigger is authorable and correct, and would sit inert. **Not importing
-`S6ghDv` until Okendo → Redo custom-event ingestion exists for this store** — a
-syntactically valid flow that silently never fires is worse than an absent one.
+That handler lists names Redo has actually *ingested*. My recommendation was to hold;
+Michael's call was to import now and write down what's needed. Imported as
+`6a7a5983442ce8cc95b36548`, inactive. It is syntactically correct and will begin firing
+the moment ingestion exists — no re-import needed, no mime-side work outstanding.
+
+**Note this cuts both ways: the reference flow is inert too.** `Color Match Quiz Completed`
+(`6a7a1318f4e12088e8eaf6e1`), the Redo-authored flow Michael pointed at as the pattern,
+triggers on `Submitted Okendo Quiz` — also absent from `getCustomEventNames`. The pattern
+is authored correctly and is equally waiting on ingestion.
+
+#### What Redo needs to build (the ask from 2026-08-10)
+
+Nothing needs designing — it is already specced.
+[`docs/design/okendo-marketing-integration.md`](https://github.com/redoapp/redo/blob/main/docs/design/okendo-marketing-integration.md)
+(Draft, Michael Zinn) covers exactly this, and **`Submitted Okendo Survey` is a named row
+in its §4 trigger table**. The dependency chain:
+
+| phase | what it does | status |
+|---|---|---|
+| 1 — connect + loyalty balance | `OkendoMarketing` integration record (own `kind`), API-key card, credential probe | **partly built**, branch `michaelzinn/okendo-marketing-auth`, gated OFF by `OKENDO_MARKETING_INTEGRATION` |
+| 3 — marketing triggers | subscribe Okendo webhooks → map each to a custom event via the public endpoint | not started |
+| 4 — quiz & survey | **`Submitted Okendo Survey`** + `Submitted Okendo Quiz` with NPS/quiz payloads | not started |
+
+So both Piperblue flows are blocked on the same thing: **Phase 4**, which needs Phase 1
+shipped and Phase 3's webhook→custom-event bridge. The transport already exists —
+`POST /custom-events` on `redo/public/v2/server`, schema in
+[`create-custom-event.ts`](https://github.com/redoapp/redo/blob/main/redo/public/common/src/custom-events/create-custom-event.ts)
+(v2.3, `eventName` + `customer{id|email|phoneNumber}` + flat segmentable `data`, snake_case
+v2.2 aliases still accepted). Okendo's `survey_response.*` webhook is the missing producer.
+
+Two concrete things to raise with whoever picks this up:
+
+1. **The event name must match verbatim.** Redo matches on
+   `triggerStep.eventName === schemaInstance.eventName` with no normalization, so the
+   producer must emit the string `Submitted Okendo Survey` — which is what the design doc
+   already says, and what mime writes. Worth confirming it doesn't drift to
+   `okendo_survey_submitted` or similar during implementation.
+2. **The planned payload can't satisfy Piperblue's filter.** This flow's Klaviyo
+   `trigger_filter` is *"Survey Name equals Customer Survey"*, and the design doc's `data`
+   props for this event are `surveyId, npsScore, npsCategory` — **no survey name**. Redo's
+   `triggerSpecificFields.conditions` is the right home for the filter, but there'd be
+   nothing to key on. Either add a `surveyName` prop to the event, or the merchant accepts
+   the flow firing on *every* Okendo survey. Until then the condition is left unset, which
+   is the wider of the two behaviors.
+
+Set `uniqueId` to the Okendo event id (the design doc already calls for this) so webhook
+re-delivery doesn't re-trigger the flow.
 
 ## Verification
 
@@ -353,16 +424,21 @@ Felicity for triggers, Blackline for fonts.
 
 ## Open questions
 
-- **Okendo event source** — answered and it's a no: Piperblue has zero ingested custom
-  events, and Redo's Okendo integration doesn't feed the custom-event pipeline. Someone
-  has to POST `Submitted Okendo Survey` to the public custom-event API. Redo-side work,
-  blocking `S6ghDv`.
-- **Sj5GSG's dropped SMS** — the flow's `email_marketing_signup` trigger schema has no
-  phone field, so its SMS sends are gone. Recreating them as a dedicated SMS flow is a
-  merchant-visible decision, not a mechanical one.
-- **`ANTHROPIC_API_KEY` for run shells** — without it every import silently skips AI
-  transformations. `skipAi` should be surfaced in the run manifest rather than inferred
-  from an unset env var.
+- ~~**Okendo event source**~~ — closed. Not a mime question at all: it's Phase 4 of
+  [`okendo-marketing-integration.md`](https://github.com/redoapp/redo/blob/main/docs/design/okendo-marketing-integration.md),
+  which already names `Submitted Okendo Survey`. Flow imported and waiting. The one
+  substantive gap found is that the planned event payload carries no survey *name*, so
+  Piperblue's trigger filter has nothing to key on — see the `S6ghDv` section.
+- ~~**Sj5GSG's dropped SMS**~~ — closed. Michael's call: recreate as a dedicated SMS flow.
+  Imported as `6a7a5b6e54eff5fba6cc71c6`.
+- **AI transformations should be done by the agent, not an API key** *(Michael,
+  2026-08-10)*. Today `skipAi` is inferred from an unset `ANTHROPIC_API_KEY`, so imports
+  silently skip image-as-button conversion, coupon rewrites, and font normalization with
+  no signal. The decision is not "remember to set the key" — it's to **audit what the AI
+  pass would have changed and have the agent perform those edits directly**, then drop the
+  in-process LLM dependency. Two consequences for this plan: `skipAi` must appear in the
+  run manifest rather than being inferred, and S4/S6 become agent-executed passes rather
+  than API-backed ones.
 - **Repo boundary** — mime is `MCHammer-12/mime` (personal), internal-tools is
   `redoapp/` (org). S7 either ports mime in or has internal-tools wrap it. Deferred
   until a real run tells us how much of mime the surface actually needs.
