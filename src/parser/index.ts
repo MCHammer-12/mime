@@ -29,7 +29,7 @@ import {
   parseLineItemsUcbBlock,
   parseBrowseAbandonmentCardBlock,
 } from "./blocks/product.js";
-import { tryParseDiscountFromText } from "./blocks/discount.js";
+import { parseCouponBlock, tryParseDiscountFromText } from "./blocks/discount.js";
 import { tryParseKlaviyoSpecific } from "./blocks/klaviyo-specific.js";
 
 export interface UnsupportedFeature {
@@ -140,12 +140,22 @@ export function parseKlaviyoHtml(
     c: ParseContext,
   ) => parseColumnContent($, $col, c, bodyBackgroundColor);
 
-  // Walk all kl-row elements in document order
-  const rows = $(sel("kl-row"));
+  // Walk kl-rows and any stray component-wrapper in document order. Klaviyo
+  // usually nests every wrapper under kl-row > kl-column, but not always — a
+  // wrapper hanging straight off a kl-section used to be walked by nothing and
+  // its blocks disappeared without so much as a warning.
+  const units = $(`${sel("kl-row")}, .component-wrapper`).filter(
+    (_, e) => $(e).parent().closest(sel("kl-row")).length === 0,
+  );
 
-  rows.each((_, row) => {
-    const $row = $(row);
-    const $columns = $row.children(sel("kl-column"));
+  units.each((_, unit) => {
+    const $unit = $(unit);
+    if (!$unit.is(sel("kl-row"))) {
+      sections.push(...parseWrapper($, $unit, ctx, bodyBackgroundColor));
+      return;
+    }
+
+    const $columns = $unit.children(sel("kl-column"));
 
     if ($columns.length > 1) {
       const rowSections = parseColumnRow($, $columns, ctx, boundParseColumnContent);
@@ -240,162 +250,182 @@ function parseColumnContent(
   bodyBackgroundColor: string,
 ): Section[] {
   const blocks: Section[] = [];
-
   findCls($col, "component-wrapper").each((_, wrapper) => {
-    const $wrapper = $(wrapper);
-
-    // Skip MJML mobile/desktop variants hidden via inline display:none.
-    // Some Klaviyo templates (e.g. Charlie 1 Horse) ship paired
-    // `desktop-only` + `mobile-only` wrappers per row; the off-client
-    // variant carries `display:none` and a media query flips it at
-    // render time. Parsing both yields a duplicate of every block.
-    const wrapperStyle = ($wrapper.attr("style") || "")
-      .replace(/\s/g, "")
-      .toLowerCase();
-    if (wrapperStyle.includes("display:none")) return;
-
-    // Klaviyo-only blocks (video, preview quote, drop shadow) — check
-    // before kl-image matching so the drop-shadow img isn't treated as
-    // a plain image block.
-    const klaviyoSpecific = tryParseKlaviyoSpecific(
-      $,
-      $wrapper,
-      ctx,
-      bodyBackgroundColor,
-    );
-    if (klaviyoSpecific !== null) {
-      blocks.push(...klaviyoSpecific);
-      return;
-    }
-
-    // Header/Logo/Menu block
-    if (hasClass($wrapper, "hlb-wrapper")) {
-      const headerBlocks = parseHeaderLogoAsImage($, $wrapper, ctx);
-      blocks.push(...headerBlocks);
-      const menuBlock = parseMenuFromHeader($, $wrapper, ctx);
-      if (menuBlock) blocks.push(menuBlock);
-      return;
-    }
-
-    // Text block (or Discount split, when the kl-text holds special tokens)
-    const $textTd = findCls($wrapper, "kl-text");
-    if ($textTd.length > 0) {
-      const $first = $textTd.first();
-      const discountSplit = tryParseDiscountFromText($, $first, ctx);
-      if (discountSplit) {
-        blocks.push(...discountSplit);
-        return;
-      }
-      const block = parseTextBlock($, $first, ctx);
-      if (block) blocks.push(block);
-      return;
-    }
-
-    // Image block
-    const $imageTd = findCls($wrapper, "kl-image");
-    if ($imageTd.length > 0) {
-      const block = parseImageBlock($, $imageTd.first(), $wrapper, ctx);
-      if (block) blocks.push(block);
-      return;
-    }
-
-    // Button block
-    const $buttonTd = findCls($wrapper, "kl-button");
-    if ($buttonTd.length > 0) {
-      const block = parseButtonBlock($, $buttonTd.first(), ctx);
-      if (block) blocks.push(block);
-      return;
-    }
-
-    // Split block
-    const $splitTd = findCls($wrapper, "kl-split");
-    if ($splitTd.length > 0) {
-      const block = parseSplitBlock($, $splitTd.first(), ctx);
-      if (block) blocks.push(block);
-      return;
-    }
-
-    // Divider line
-    const $dividerP = $wrapper.find("p[style*='border-top']");
-    if ($dividerP.length > 0) {
-      const block = parseLineBlock($, $dividerP.first(), $wrapper, ctx);
-      if (block) blocks.push(block);
-      return;
-    }
-
-    // Social icons — match either Klaviyo-hosted stock icons OR wrappers
-    // where ≥2 <a href> targets point to known social-network domains
-    // (brands often upload custom-designed icons).
-    const $socialImgs = $wrapper.find(
-      "img[src*='d3k81ch9hvuctc.cloudfront.net/assets/email/buttons']",
-    );
-    const socialHrefCount = $wrapper
-      .find("a[href]")
-      .filter(
-        (_, a) =>
-          /(?:facebook|instagram|tiktok|twitter|x\.com|youtube|pinterest|linkedin|snapchat|threads|whatsapp)\.(?:com|net)/i.test(
-            $(a).attr("href") || "",
-          ),
-      ).length;
-    if ($socialImgs.length > 0 || socialHrefCount >= 2) {
-      const block = parseSocialsBlock($, $wrapper, ctx);
-      if (block) blocks.push(block);
-      return;
-    }
-
-    // Product grid — Klaviyo sometimes ships multiple `kl-product` divs
-    // inside a single component-wrapper (e.g. two product rows stacked).
-    // Process each one separately so we don't silently drop later ones.
-    // Static product blocks emit multiple sections (image row + title row).
-    const $productGrid = findCls($wrapper, "kl-product");
-    if ($productGrid.length > 0) {
-      $productGrid.each((_, p) => {
-        blocks.push(...parseProductBlock($, $(p), ctx));
-      });
-      return;
-    }
-
-    // Klaviyo universal content block: cart line_items loop. Must come
-    // before the spacer fallback (wrapper has content, just not in a
-    // shape any of the above parsers recognize).
-    const lineItemsBlock = parseLineItemsUcbBlock($, $wrapper, ctx);
-    if (lineItemsBlock) {
-      blocks.push(lineItemsBlock);
-      return;
-    }
-
-    // Browse-abandonment "product card": hand-built kl-table with inline
-    // {{ event.Name }} / {{ event.ImageURL }} variables (no Liquid loop).
-    // Best Sellers fallback until Redo's schema adds a viewed_products
-    // recommendation type — see parseBrowseAbandonmentCardBlock for
-    // context.
-    const baCardBlock = parseBrowseAbandonmentCardBlock($, $wrapper, ctx);
-    if (baCardBlock) {
-      blocks.push(baCardBlock);
-      return;
-    }
-
-    // Trust-bar / badge row: a kl-table whose cells are images. Without this
-    // it falls through to "Unknown block" below and every badge is dropped.
-    const tableImageRow = parseTableImageRow($, $wrapper, ctx);
-    if (tableImageRow) {
-      blocks.push(tableImageRow);
-      return;
-    }
-
-    // Fallback: spacer (empty wrapper with padding)
-    const text = $wrapper.text().trim();
-    if (!text && $wrapper.find("img").length === 0) {
-      const spacer = parseSpacerBlock($, $wrapper, ctx);
-      if (spacer) blocks.push(spacer);
-      return;
-    }
-
-    // Unknown block
-    ctx.warnings.push(
-      `Unknown block type in component-wrapper (text: "${text.slice(0, 60)}...")`,
-    );
+    blocks.push(...parseWrapper($, $(wrapper), ctx, bodyBackgroundColor));
   });
+  return blocks;
+}
+
+// One component-wrapper → the blocks it contains. Reached either through a
+// kl-column (the normal case) or directly off a kl-section (Klaviyo emits that
+// shape occasionally; before it was walked, those blocks vanished silently).
+function parseWrapper(
+  $: $,
+  $wrapper: cheerio.Cheerio<El>,
+  ctx: ParseContext,
+  bodyBackgroundColor: string,
+): Section[] {
+  const blocks: Section[] = [];
+
+  // Skip MJML mobile/desktop variants hidden via inline display:none.
+  // Some Klaviyo templates (e.g. Charlie 1 Horse) ship paired
+  // `desktop-only` + `mobile-only` wrappers per row; the off-client
+  // variant carries `display:none` and a media query flips it at
+  // render time. Parsing both yields a duplicate of every block.
+  const wrapperStyle = ($wrapper.attr("style") || "")
+    .replace(/\s/g, "")
+    .toLowerCase();
+  if (wrapperStyle.includes("display:none")) return blocks;
+
+  // Klaviyo-only blocks (video, preview quote, drop shadow) — check
+  // before kl-image matching so the drop-shadow img isn't treated as
+  // a plain image block.
+  const klaviyoSpecific = tryParseKlaviyoSpecific(
+    $,
+    $wrapper,
+    ctx,
+    bodyBackgroundColor,
+  );
+  if (klaviyoSpecific !== null) {
+    blocks.push(...klaviyoSpecific);
+    return blocks;
+  }
+
+  // Header/Logo/Menu block
+  if (hasClass($wrapper, "hlb-wrapper")) {
+    const headerBlocks = parseHeaderLogoAsImage($, $wrapper, ctx);
+    blocks.push(...headerBlocks);
+    const menuBlock = parseMenuFromHeader($, $wrapper, ctx);
+    if (menuBlock) blocks.push(menuBlock);
+    return blocks;
+  }
+
+  // Text block (or Discount split, when the kl-text holds special tokens)
+  const $textTd = findCls($wrapper, "kl-text");
+  if ($textTd.length > 0) {
+    const $first = $textTd.first();
+    const discountSplit = tryParseDiscountFromText($, $first, ctx);
+    if (discountSplit) {
+      blocks.push(...discountSplit);
+      return blocks;
+    }
+    const block = parseTextBlock($, $first, ctx);
+    if (block) blocks.push(block);
+    return blocks;
+  }
+
+  // Image block
+  const $imageTd = findCls($wrapper, "kl-image");
+  if ($imageTd.length > 0) {
+    const block = parseImageBlock($, $imageTd.first(), $wrapper, ctx);
+    if (block) blocks.push(block);
+    return blocks;
+  }
+
+  // Coupon block — a bare {% coupon_code %} pill, no kl-text to split.
+  const $couponTd = findCls($wrapper, "kl-coupon");
+  if ($couponTd.length > 0) {
+    const block = parseCouponBlock($, $couponTd.first(), ctx);
+    if (block) blocks.push(block);
+    return blocks;
+  }
+
+  // Button block
+  const $buttonTd = findCls($wrapper, "kl-button");
+  if ($buttonTd.length > 0) {
+    const block = parseButtonBlock($, $buttonTd.first(), ctx);
+    if (block) blocks.push(block);
+    return blocks;
+  }
+
+  // Split block
+  const $splitTd = findCls($wrapper, "kl-split");
+  if ($splitTd.length > 0) {
+    const block = parseSplitBlock($, $splitTd.first(), ctx);
+    if (block) blocks.push(block);
+    return blocks;
+  }
+
+  // Divider line
+  const $dividerP = $wrapper.find("p[style*='border-top']");
+  if ($dividerP.length > 0) {
+    const block = parseLineBlock($, $dividerP.first(), $wrapper, ctx);
+    if (block) blocks.push(block);
+    return blocks;
+  }
+
+  // Social icons — match either Klaviyo-hosted stock icons OR wrappers
+  // where ≥2 <a href> targets point to known social-network domains
+  // (brands often upload custom-designed icons).
+  const $socialImgs = $wrapper.find(
+    "img[src*='d3k81ch9hvuctc.cloudfront.net/assets/email/buttons']",
+  );
+  const socialHrefCount = $wrapper
+    .find("a[href]")
+    .filter(
+      (_, a) =>
+        /(?:facebook|instagram|tiktok|twitter|x\.com|youtube|pinterest|linkedin|snapchat|threads|whatsapp)\.(?:com|net)/i.test(
+          $(a).attr("href") || "",
+        ),
+    ).length;
+  if ($socialImgs.length > 0 || socialHrefCount >= 2) {
+    const block = parseSocialsBlock($, $wrapper, ctx);
+    if (block) blocks.push(block);
+    return blocks;
+  }
+
+  // Product grid — Klaviyo sometimes ships multiple `kl-product` divs
+  // inside a single component-wrapper (e.g. two product rows stacked).
+  // Process each one separately so we don't silently drop later ones.
+  // Static product blocks emit multiple sections (image row + title row).
+  const $productGrid = findCls($wrapper, "kl-product");
+  if ($productGrid.length > 0) {
+    $productGrid.each((_, p) => {
+      blocks.push(...parseProductBlock($, $(p), ctx));
+    });
+    return blocks;
+  }
+
+  // Klaviyo universal content block: cart line_items loop. Must come
+  // before the spacer fallback (wrapper has content, just not in a
+  // shape any of the above parsers recognize).
+  const lineItemsBlock = parseLineItemsUcbBlock($, $wrapper, ctx);
+  if (lineItemsBlock) {
+    blocks.push(lineItemsBlock);
+    return blocks;
+  }
+
+  // Browse-abandonment "product card": hand-built kl-table with inline
+  // {{ event.Name }} / {{ event.ImageURL }} variables (no Liquid loop).
+  // Best Sellers fallback until Redo's schema adds a viewed_products
+  // recommendation type — see parseBrowseAbandonmentCardBlock for
+  // context.
+  const baCardBlock = parseBrowseAbandonmentCardBlock($, $wrapper, ctx);
+  if (baCardBlock) {
+    blocks.push(baCardBlock);
+    return blocks;
+  }
+
+  // Trust-bar / badge row: a kl-table whose cells are images. Without this
+  // it falls through to "Unknown block" below and every badge is dropped.
+  const tableImageRow = parseTableImageRow($, $wrapper, ctx);
+  if (tableImageRow) {
+    blocks.push(tableImageRow);
+    return blocks;
+  }
+
+  // Fallback: spacer (empty wrapper with padding)
+  const text = $wrapper.text().trim();
+  if (!text && $wrapper.find("img").length === 0) {
+    const spacer = parseSpacerBlock($, $wrapper, ctx);
+    if (spacer) blocks.push(spacer);
+    return blocks;
+  }
+
+  // Unknown block
+  ctx.warnings.push(
+    `Unknown block type in component-wrapper (text: "${text.slice(0, 60)}...")`,
+  );
 
   return blocks;
 }
