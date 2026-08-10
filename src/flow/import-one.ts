@@ -56,8 +56,10 @@ async function main() {
   const flowId = process.env.FLOW_ID;
   const skipAi = process.env.SKIP_AI === "1" || !process.env.ANTHROPIC_API_KEY;
 
+  const diagnoseOnly = process.env.DIAGNOSE_ONLY === "1";
+
   if (!klaviyoKey) throw new Error("KLAVIYO_API_KEY not set");
-  if (!redoJwt) throw new Error("REDO_JWT not set");
+  if (!redoJwt && !diagnoseOnly) throw new Error("REDO_JWT not set");
   if (!flowId) throw new Error("FLOW_ID not set");
 
   // Optional: force a specific Redo trigger instead of auto-resolving from the
@@ -110,7 +112,7 @@ async function main() {
   });
 
   // Decode the JWT aud claim locally so we can show the store ID pre-import.
-  const audTeamId = decodeJwtAud(redoJwt);
+  const audTeamId = redoJwt ? decodeJwtAud(redoJwt) : null;
   if (audTeamId) console.log(`      target store: ${audTeamId}`);
 
   const parsed = await parseFlow(flow, metrics, {
@@ -140,11 +142,6 @@ async function main() {
   writeFileSync(dumpPath, JSON.stringify(parsed.automation, null, 2), "utf8");
   console.log(`      (dumped to ${dumpPath})`);
 
-  // If DIAGNOSE_ONLY=1, stop before the import call.
-  if (process.env.DIAGNOSE_ONLY === "1") {
-    console.log(`\nDIAGNOSE_ONLY=1 — stopping before import.`);
-    return;
-  }
   for (const w of parsed.warnings) {
     console.log(`      ${w.kind}: ${w.message}${w.actionId ? ` (action ${w.actionId})` : ""}`);
   }
@@ -155,6 +152,12 @@ async function main() {
     console.log(`      treeify: ${dupSteps.length} duplicated step(s) (merge branches expanded)`);
   } else {
     console.log(`      treeify: no merges detected`);
+  }
+
+  // Stop before the import call — the diagnosis above is the whole output.
+  if (diagnoseOnly) {
+    console.log(`\nDIAGNOSE_ONLY=1 — stopping before import.`);
+    return;
   }
 
   console.log(`[5/5] importing into Redo...`);
@@ -188,7 +191,9 @@ async function main() {
   };
 
   const options = {
-    jwt: redoJwt,
+    // Non-null past this point: the DIAGNOSE_ONLY return above is the only
+    // path that reaches here without a JWT.
+    jwt: redoJwt as string,
     serverBase: process.env.REDO_SERVER_BASE,
     account,
     onProgress,
