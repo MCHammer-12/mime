@@ -11,7 +11,7 @@
 import * as cheerio from "cheerio";
 import type { Section } from "../renderer/types.js";
 import { EmailBlockType } from "../renderer/types.js";
-import { parseInlineStyles } from "./style-utils.js";
+import { normalizeStyleAttrQuotes, parseInlineStyles } from "./style-utils.js";
 import { type $, type El, findCls, hasClass, resetBlockCounter, sel } from "./helpers.js";
 
 // Block parsers
@@ -83,6 +83,7 @@ export function parseKlaviyoHtml(
 ): ParseResult {
   resetBlockCounter();
   const $ = cheerio.load(html);
+  normalizeStyleAttrQuotes($);
   const ctx: ParseContext = {
     warnings: [],
     unsupportedFeatures: [],

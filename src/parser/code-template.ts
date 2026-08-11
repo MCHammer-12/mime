@@ -46,6 +46,7 @@ import {
 } from "../renderer/types.js";
 import {
   detectSocialIconColor,
+  normalizeStyleAttrQuotes,
   parseColor,
   parseFontFamily,
   parseFontSize,
@@ -75,6 +76,7 @@ export function parseCodeTemplateHtml(
   opts: { storeUrl?: string | null } = {},
 ): ParseResult {
   const $ = cheerio.load(html);
+  normalizeStyleAttrQuotes($);
   const ctx: ParseContext = {
     warnings: [],
     unsupportedFeatures: [],
