@@ -116,6 +116,8 @@ export async function exportTemplateFromHtml(
     allWarnings.push(...result.warnings);
   }
 
+  clampNegativePadding(sections, allWarnings);
+
   const fontPlan = await buildFontPlan(sections);
 
   // Apply org / shop / customer-profile substitutions to the subject line
@@ -184,6 +186,45 @@ export async function exportTemplateFromHtml(
     skippedBlocks,
     fontPlan,
   };
+}
+
+/**
+ * Redo's template schema rejects negative padding (`>= 0`), but Klaviyo emits
+ * it — every Diamond MMA footer pulls the social row up with
+ * `padding-top:-10px`, which 400s the whole import. Clamp to 0 and warn: the
+ * affected block lands that many pixels lower than it did in Klaviyo.
+ */
+function clampNegativePadding(sections: unknown, warnings: string[]): void {
+  const fixes: string[] = [];
+  const walk = (node: any, type: string): void => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const n of node) walk(n, type);
+      return;
+    }
+    const t = typeof node.type === "string" ? node.type : type;
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      if (/padding$/i.test(key)) {
+        for (const side of Object.keys(value)) {
+          if (typeof value[side] === "number" && value[side] < 0) {
+            fixes.push(`${t} ${key}.${side} ${value[side]}px`);
+            value[side] = 0;
+          }
+        }
+      }
+      walk(value, t);
+    }
+  };
+  walk(sections, "?");
+  if (fixes.length > 0) {
+    warnings.push(
+      `Clamped ${fixes.length} negative padding value(s) to 0 — Redo's schema ` +
+        `rejects them (${fixes.join(", ")}). Those blocks sit slightly lower ` +
+        `than in Klaviyo.`,
+    );
+  }
 }
 
 /**
