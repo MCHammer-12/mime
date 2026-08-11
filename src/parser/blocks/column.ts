@@ -23,8 +23,24 @@ import {
   sumAncestorPadding,
 } from "../style-utils.js";
 import { type $, type El, findCls, hasClass, nextId } from "../helpers.js";
+import { classifyKlaviyoUrl } from "../url-mapping.js";
 import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
+
+/**
+ * Links inside a split/column row used to bypass url-mapping entirely, so a
+ * Klaviyo checkout-URL variable survived into the emitted block instead of
+ * becoming `<storeUrl>/cart`, and unknown variables never reached reviewItems.
+ * Redo's createEmailTemplate rejects the whole template when it sees one.
+ */
+function mapSubblockHref(
+  href: string | undefined,
+  blockType: EmailBlockType,
+  ctx: ParseContext,
+): string | undefined {
+  if (!href) return href;
+  return classifyKlaviyoUrl(href, blockType, ctx).buttonLink;
+}
 
 const NESTABLE_TYPES = new Set<EmailBlockType>([
   EmailBlockType.TEXT,
@@ -399,7 +415,7 @@ export function parseTableImageRow(
 function parseSplitSubblock(
   $: $,
   $subblock: cheerio.Cheerio<El>,
-  _ctx: ParseContext,
+  ctx: ParseContext,
   sectionColor: string,
 ): NonRecursiveBlock | null {
   const subblockPadding = parsePaddingFromSpacer($subblock);
@@ -421,7 +437,7 @@ function parseSplitSubblock(
         cornerRadius: 0,
         buttonText: $a.text().trim(),
         padding,
-        buttonLink: $a.attr("href"),
+        buttonLink: mapSubblockHref($a.attr("href"), EmailBlockType.BUTTON, ctx),
         fillColor:
           buttonTdStyle["background-color"] ||
           aStyle["background-color"] ||
@@ -456,7 +472,10 @@ function parseSplitSubblock(
       sectionColor,
       imageUrl: $img.attr("src") || "",
       altText: $img.attr("alt") || undefined,
-      clickthroughUrl: $link.length > 0 ? $link.attr("href") : undefined,
+      clickthroughUrl:
+        $link.length > 0
+          ? mapSubblockHref($link.attr("href"), EmailBlockType.IMAGE, ctx)
+          : undefined,
       padding: imgPadding,
       horizontalPadding: Size.CUSTOM,
       verticalPadding: Size.CUSTOM,

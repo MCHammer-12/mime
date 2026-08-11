@@ -103,6 +103,34 @@ function stripFragmentNoise(html: string): string {
  * Only touches hrefs that contain Klaviyo Jinja-like syntax (`{{` or `{%`).
  * Static URLs pass through untouched.
  */
+/**
+ * Klaviyo merchants append `{{ email }}` to countdown-timer image URLs as a
+ * per-recipient cache-buster (countdownmail.com's documented trick, so Gmail's
+ * image proxy doesn't freeze one frame). Redo's Marketing email trigger has no
+ * such variable and rejects the whole template when it sees one.
+ *
+ * Only strip a variable that is a *fragment* of a longer `src` — a src that is
+ * entirely a variable is a real dynamic image, and blanking it would drop the
+ * image. The URL still resolves without the suffix; what's lost is the
+ * cache-busting, so warn.
+ */
+function stripVariableCacheBusters(html: string, ctx: ParseContext): string {
+  return html.replace(
+    /(<img\b[^>]*?\bsrc\s*=\s*)(["'])([^"']*)(\2)/gi,
+    (full, prefix, quote, src) => {
+      const stripped = src.replace(/\{\{[^}]*\}\}|\{%[^%]*%\}/g, "").trim();
+      if (stripped === src) return full;
+      if (!stripped || !/^(https?:|\/\/|\/|data:)/i.test(stripped)) return full;
+      ctx.warnings.push(
+        `Removed template variable(s) from an image URL (${src}) — Redo can't ` +
+          `resolve them. The image still loads; a per-recipient cache-buster ` +
+          `like this keeps animated countdown timers from freezing in Gmail.`,
+      );
+      return `${prefix}${quote}${stripped}${quote}`;
+    },
+  );
+}
+
 function rewriteAnchorHrefs(html: string, ctx: ParseContext): string {
   return html.replace(
     /(<a\b[^>]*?\bhref\s*=\s*)(["'])([^"']*)(\2)/gi,
@@ -492,6 +520,7 @@ export function parseTextBlock(
   // BEFORE the AI/coupon rewrites (when those land) for the same reason:
   // the AI pass should see the Redo URL, not the Klaviyo variable.
   textHtml = rewriteAnchorHrefs(textHtml, ctx);
+  textHtml = stripVariableCacheBusters(textHtml, ctx);
   textHtml = suppressUrlAutolink(textHtml);
   textHtml = substituteSystemFontsInHtml(textHtml);
   textHtml = rewriteWeightedCustomFontSpans(textHtml);

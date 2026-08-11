@@ -55,8 +55,13 @@ export function parseHeaderLogoAsImage(
     const logoTdStyle = parseInlineStyles($logo.attr("style"));
     const logoTdPadding = parsePadding(logoTdStyle);
 
-    const logoHref = $logoLink.attr("href") || undefined;
-    if (logoHref) classifyKlaviyoUrl(logoHref, EmailBlockType.IMAGE, ctx);
+    const rawLogoHref = $logoLink.attr("href") || undefined;
+    // Use the mapped link, not the raw href — classifyKlaviyoUrl rewrites
+    // Klaviyo's checkout-URL variables to `<storeUrl>/cart`, and Redo rejects
+    // any template that still carries an unresolvable `{{ event… }}`.
+    const logoHref = rawLogoHref
+      ? classifyKlaviyoUrl(rawLogoHref, EmailBlockType.IMAGE, ctx).buttonLink
+      : undefined;
 
     blocks.push({
       type: EmailBlockType.IMAGE,
