@@ -354,7 +354,7 @@ async function convertAction(
       // event vars → Redo schema-instance vars).
       const msg = action.data?.message ?? {};
       const rawBody = String(msg.body ?? "");
-      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id);
+      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id, flowSchemaType);
       const content = bodyResult.output;
 
       // No body at all is unusual but happens for Klaviyo AI-content templates
@@ -455,8 +455,8 @@ async function convertAction(
       // supports templating) and body. Rewriter returns the unmapped token
       // list; we use that to decide whether the webhook is an "enrichment"
       // payload that can't be salvaged vs. a simple integration webhook.
-      const urlResult = rewriteKlaviyoLiquid(rawUrl, warnings, id);
-      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id);
+      const urlResult = rewriteKlaviyoLiquid(rawUrl, warnings, id, flowSchemaType);
+      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id, flowSchemaType);
       const totalUnmapped =
         urlResult.unmappedTokens.length + bodyResult.unmappedTokens.length;
 
@@ -477,7 +477,7 @@ async function convertAction(
       const headers = Object.entries(headersObj).map(([key, value]) => {
         // Headers are also Liquid-templated in Redo. Rewrite them, but do
         // NOT add to the unmapped count (already counted url + body).
-        const hResult = rewriteKlaviyoLiquid(String(value), warnings, id);
+        const hResult = rewriteKlaviyoLiquid(String(value), warnings, id, flowSchemaType);
         return { key, value: hResult.output };
       });
       const step: SendWebhookStep = {
