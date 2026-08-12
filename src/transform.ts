@@ -282,6 +282,51 @@ const TEXT_VAR_MAP: Record<string, string> = {
   "person.id":           "redo_customer_id",
 };
 
+// Resolve one Liquid `{{ varPath|filters }}` token against TEXT_VAR_MAP.
+// Returns a replacement `token`, a replacement `literal`, or null meaning
+// "not ours — leave the source verbatim". Shared by the subject/preview path
+// (substituteStringVars) and the HTML-body path (mapProfileVars).
+function resolveTextVar(
+  varPath: string,
+  filters: string,
+): { token?: string; literal?: string; note: string } | null {
+  // Klaviyo's older `{{ person|lookup:"first_name" }}` dialect is the same as
+  // `{{ person.first_name }}` — normalize before the map lookup.
+  let path = varPath;
+  let rest = filters;
+  const lookup = /^\s*\|\s*lookup\s*:\s*["']\$?([\w.]+)["']/.exec(filters);
+  if (lookup && (varPath === "person" || varPath === "event")) {
+    path = `${varPath}.${lookup[1]}`;
+    rest = filters.slice(lookup[0].length).trim();
+  }
+
+  const mapped = TEXT_VAR_MAP[path];
+  if (mapped) {
+    return {
+      token: `{{ ${mapped}${rest ? " " + rest : ""} }}`,
+      note: `{{ ${varPath} }} → {{ ${mapped} }}`,
+    };
+  }
+
+  // An unmappable `person.*` is a Klaviyo-only profile attribute with no Redo
+  // equivalent. Left verbatim it takes the whole template down, not just the
+  // token: createEmailTemplate rejects any token whose root isn't a schema
+  // field ("Text block uses {{ person }}, which the Order tracking trigger
+  // doesn't provide"), so one stray attribute blanks the entire email. Resolve
+  // it to its own `default:` value — what Klaviyo itself renders for a profile
+  // that doesn't have the attribute set — or to empty when there is no default.
+  if (path === "person" || path.startsWith("person.")) {
+    const def = /\|\s*default\s*:\s*(['"])(.*?)\1/.exec(rest);
+    const literal = def ? def[2]! : "";
+    return {
+      literal,
+      note: `{{ ${varPath} }} → ${literal ? `"${literal}"` : "(empty)"} — no Redo equivalent`,
+    };
+  }
+
+  return null;
+}
+
 /**
  * Variable substitution for plain-text strings (subject lines, preview text).
  * Same org / shop / customer-profile substitutions as `substituteTextVars` but
@@ -323,11 +368,10 @@ export function substituteStringVars(
   result = result.replace(
     /\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*(\|[^}]*)?\}\}/g,
     (full, varPath: string, filters = "") => {
-      const mapped = TEXT_VAR_MAP[varPath];
-      if (!mapped) return full;
-      note(`{{ ${varPath} }} → {{ ${mapped} }}`);
-      const f = filters || "";
-      return `{{ ${mapped}${f ? " " + f : ""} }}`;
+      const r = resolveTextVar(varPath, filters);
+      if (!r) return full;
+      note(r.note);
+      return r.token ?? r.literal ?? "";
     },
   );
   return result;
@@ -491,11 +535,10 @@ function mapProfileVars(html: string, ctx: Ctx): string {
   return html.replace(
     /\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*(\|[^}]*)?\}\}/g,
     (full, varPath: string, filters = "") => {
-      const mapped = TEXT_VAR_MAP[varPath];
-      if (!mapped) return full;
-      ctx.subs.push(`{{ ${varPath} }} → {{ ${mapped} }}`);
-      const f = filters || "";
-      return `{{ ${mapped}${f ? " " + f : ""} }}`;
+      const r = resolveTextVar(varPath, filters);
+      if (!r) return full;
+      ctx.subs.push(r.note);
+      return r.token ?? r.literal ?? "";
     },
   );
 }
