@@ -225,6 +225,7 @@ async function main() {
         automation: parsed.automation,
         warnings: parsed.warnings,
         placeholderTemplates: parsed.placeholderTemplates,
+        placeholderSmsTemplates: parsed.placeholderSmsTemplates,
       },
       options,
     );
