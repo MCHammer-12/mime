@@ -162,15 +162,18 @@ function isDropResult(r: unknown): r is DropResult {
 }
 
 // The schema-instance field carrying the recipient phone depends on the flow's
-// schemaType. The SMS-native marketing schema (sms_marketing_signup) exposes
+// schemaType. The SMS-native marketing schema (sms_marketing_signup) and the
+// tracking family (order_tracking, via baseTrackingSchema) expose
 // `customerPhoneNumber`; the email-first schemas that also carry a phone
 // (abandonment, date, back-in-stock, low-inventory, segment) use `customerPhone`.
 // `email_marketing_signup` has NO phone field at all → returns null, so the
 // caller DROPS the SMS step (Redo's validateStepFieldReferences would otherwise
 // 400 the whole createAdvancedFlow). Verified against redoapp
-// redo/flows/common/src/schemas/marketing/marketing.ts.
+// redo/flows/common/src/schemas/marketing/marketing.ts and
+// redo/flows/common/src/schemas/tracking/base-tracking.ts.
 export function phoneFieldForSchema(schemaType: SchemaType): string | null {
   if (schemaType === SchemaType.SMS_MARKETING_SIGNUP) return "customerPhoneNumber";
+  if (schemaType === SchemaType.ORDER_TRACKING) return "customerPhoneNumber";
   if (schemaType === SchemaType.EMAIL_MARKETING_SIGNUP) return null;
   return "customerPhone";
 }
