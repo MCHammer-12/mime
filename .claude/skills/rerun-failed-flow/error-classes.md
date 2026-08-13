@@ -78,6 +78,31 @@ it (`translateMessageAdditionalFilters`, `src/flow/condition-mapping.ts`). When 
 filter can't be translated, no gate is spliced and a requires-review warning names
 the consequence. First case: Relay Goods `Y34myV`.
 
+## 6. Email imported near-empty — foreign email builder
+**Cause:** the merchant built the email in another tool (Stripo, Beefree, …) and
+pasted it into Klaviyo. mime has parsers for Klaviyo-native HTML and for generic
+coded HTML; a foreign builder's markup satisfies neither cleanly, and two things
+used to go wrong at once:
+- **Routing.** The old gate was "any `kl-*` class anywhere → kl parser". One
+  pasted Klaviyo product block flipped it, and the kl parser only walks
+  `kl-row` / `.component-wrapper`, so it emitted that single block and dropped
+  the other 60 tables. Now `klSkeletonCoverage()` in `src/export-template.ts`
+  measures how much of the document's text is inside walkable units — native
+  templates are 100%, foreign-with-a-pasted-block are 0-36%, gate at 70%.
+- **Container count.** `findContainers()` (`src/parser/code-template.ts`) used to
+  return only the FIRST 600px container. Stripo emits three siblings
+  (`es-header-body` / `es-content-body` / `es-footer-body`), so the CODE parser
+  parsed the logo and stopped. It now walks every outermost 600px container.
+
+**Detection:** `es-*` classes (Stripo) or another builder's prefix, a
+`.es-wrapper-color` / non-Klaviyo wrapper, and `kl-row` count 0 despite kl-*
+classes being present. Since 2026-08-13 a parse recovering <25% of the source
+text also raises a `recovered only N% of its text` warning at import.
+**Fix:** re-run on current `main`. First case: Relay Goods (6 of 10 emails).
+**Note:** the CODE parser is no longer reserved for `editor_type: CODE`/`SIMPLE`
+— any low-coverage document routes there, so CODE-parser changes now affect
+draggable templates too.
+
 ## Re-run mechanics
 - `src/flow/import-one.ts` re-fetches the flow from Klaviyo, re-parses with CURRENT
   code, re-creates templates, and posts `createAdvancedFlow`. `DIAGNOSE_ONLY=1`
