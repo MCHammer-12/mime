@@ -859,6 +859,53 @@ export function translateConditionalSplitExpression(
   };
 }
 
+// ---------- Klaviyo per-message `additional_filters` → Redo gate ----------
+//
+// A Klaviyo send-email action can carry `message.additional_filters`, which
+// gate that one message rather than flow entry: a profile that fails them
+// skips the send and continues down the flow. Redo has no per-step filter, so
+// the caller turns a translated expression into a CONDITION step in front of
+// the send (true → send, false → the send's own next).
+//
+// Same condition vocabulary as a conditional-split, so it reuses that
+// translator. Returns null when nothing translated — an empty inline segment
+// matches everyone, which would silently claim the filter was migrated.
+export function translateMessageAdditionalFilters(
+  additionalFilters: any,
+  metrics: MetricLookup,
+  warnings: ParseWarning[],
+  actionId: string,
+): unknown | null {
+  const groups = additionalFilters?.condition_groups ?? [];
+  if (groups.length === 0) return null;
+  if (groups.length > 1) {
+    warnings.push({
+      kind: "requires-review",
+      actionId,
+      message: `send-email additional_filters has ${groups.length} OR'd groups — V1 migrates only the first group; review in the Redo flow builder`,
+    });
+  }
+  const expression = translateConditionalSplitExpression(
+    {
+      id: actionId,
+      type: "conditional-split",
+      data: { profile_filter: { condition_groups: [groups[0]] } },
+    } as KlaviyoAction,
+    metrics,
+    warnings,
+  );
+  const conditions = (expression as any)?.inlineSegment?.conditions ?? [];
+  if (conditions.length === 0) {
+    warnings.push({
+      kind: "requires-review",
+      actionId,
+      message: `send-email has per-message additional_filters that V1 could not translate — in Redo this message will go to everyone who reaches this step. Rebuild the filter in the flow builder.`,
+    });
+    return null;
+  }
+  return expression;
+}
+
 // ---------- Klaviyo flow-level `definition.profile_filter` → Redo skip ----------
 //
 // Klaviyo flows can carry a top-level `profile_filter` that says "ONLY run

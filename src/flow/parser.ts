@@ -4,6 +4,7 @@ import {
   translateConditionalSplitExpression,
   translateFlowProfileFilter,
   translateFlowTriggerFilter,
+  translateMessageAdditionalFilters,
   translateTriggerSplitExpression,
 } from "./condition-mapping.js";
 import type { TemplateResolver } from "./template-resolver.js";
@@ -40,6 +41,9 @@ import {
 const TRIGGER_STEP_ID = "trigger";
 const FLOW_END_ID = "flow_end";
 const TRIGGER_FILTER_GATE_ID = "trigger_filter_gate";
+// Suffix for the SEND_EMAIL step behind a per-message additional_filters gate.
+// The gate takes the original Klaviyo action id; the send moves aside.
+const MESSAGE_GATE_SUFFIX = "__msg";
 
 // Branch pointer may be absent when a Klaviyo action is the last step on its
 // path ("end path" in Klaviyo's UI). Redo's mongoose schemas mark several
@@ -56,6 +60,10 @@ interface ParseState {
   // it (→ a mixed flow we can't represent per-message, so warn).
   smartSendingBypass?: boolean;
   smartSendingThrottled?: boolean;
+  // Klaviyo's per-message `additional_filters` gate one send, not flow entry.
+  // convertAction records the translated expression here; parseFlow splices a
+  // CONDITION step in front of the send once every action is converted.
+  messageGates?: Array<{ actionId: string; expression: unknown }>;
 }
 
 function terminate(
@@ -326,9 +334,20 @@ async function convertAction(
       // builder renders an End block; route orphan pointers to flow_end.
       // Leave `disabled` unset — flow-level `enabled` is the single on/off
       // knob the merchant flips after review.
+      // A gated message keeps its Klaviyo id on the CONDITION step parseFlow
+      // splices in front, so every inbound pointer still lands on the gate.
+      const messageGate = translateMessageAdditionalFilters(
+        msg.additional_filters,
+        metrics,
+        warnings,
+        id,
+      );
+      if (messageGate) {
+        (state.messageGates ??= []).push({ actionId: id, expression: messageGate });
+      }
       const step: SendEmailStep = {
         type: StepType.SEND_EMAIL,
-        id,
+        id: messageGate ? `${id}${MESSAGE_GATE_SUFFIX}` : id,
         templateId: sentinelId,
         emailAddressFieldName: "customerEmail",
         recipientNameFieldName: recipientNameFieldForSchema(flowSchemaType),
@@ -923,6 +942,26 @@ export async function parseFlow(
       continue;
     }
     steps.push(result);
+  }
+
+  // Klaviyo's per-message `additional_filters` gate the individual send, not
+  // flow entry: a profile that fails them skips the message and carries on.
+  // Redo has no per-step filter, so each gated send becomes CONDITION → send,
+  // with the false branch pointing past it at the send's own next. Spliced
+  // before the drop re-stitch below so nextFalseId follows dropped actions.
+  for (const gate of state.messageGates ?? []) {
+    const send = steps.find(
+      (s) => s.id === `${gate.actionId}${MESSAGE_GATE_SUFFIX}`,
+    ) as SendEmailStep | undefined;
+    if (!send) continue;
+    steps.push({
+      type: StepType.CONDITION,
+      id: gate.actionId,
+      customTitle: "Message filter (from Klaviyo)",
+      expression: gate.expression,
+      nextTrueId: send.id,
+      nextFalseId: terminate(send.nextId, state),
+    } satisfies ConditionStep);
   }
 
   // Klaviyo's per-message `smart_sending_enabled` → Redo's flow-wide
