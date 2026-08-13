@@ -3,6 +3,7 @@ import type { MetricLookup } from "../extract-metrics.js";
 import {
   translateConditionalSplitExpression,
   translateFlowProfileFilter,
+  translateFlowTriggerFilter,
   translateTriggerSplitExpression,
 } from "./condition-mapping.js";
 import type { TemplateResolver } from "./template-resolver.js";
@@ -38,6 +39,7 @@ import {
 
 const TRIGGER_STEP_ID = "trigger";
 const FLOW_END_ID = "flow_end";
+const TRIGGER_FILTER_GATE_ID = "trigger_filter_gate";
 
 // Branch pointer may be absent when a Klaviyo action is the last step on its
 // path ("end path" in Klaviyo's UI). Redo's mongoose schemas mark several
@@ -772,21 +774,43 @@ export async function parseFlow(
   }
 
   // Klaviyo's per-trigger `trigger_filter` (a product/event filter that
-  // gates which trigger events fire the flow). When present, surface it
-  // for manual review; mime doesn't yet translate it to a trigger-data
-  // schemaBooleanExpression at the flow level. Charlie 1 Horse's flows
-  // have trigger_filter: null, so this branch never fires for them.
+  // gates which trigger events fire the flow). A negative filter inverts
+  // into a skipCondition on the trigger; a positive one becomes a CONDITION
+  // step spliced in below the trigger (see translateFlowTriggerFilter).
+  // Anything with no Redo schema field behind it still falls through to a
+  // manual-review warning.
   const triggers = defn?.triggers ?? [];
+  let triggerFilterGate: unknown = null;
   for (const t of triggers) {
-    if (t.trigger_filter) {
-      const summary = summarizeTriggerFilter(t.trigger_filter);
+    if (!t.trigger_filter) continue;
+    const summary = summarizeTriggerFilter(t.trigger_filter);
+    const translated = translateFlowTriggerFilter(
+      t.trigger_filter,
+      resolution.schemaType,
+      warnings,
+    );
+    if (translated?.kind === "skip") {
+      skipConditions.push(translated.expression);
       warnings.push({
-        kind: "requires-review",
-        message: summary
-          ? `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter "${summary}" that mime doesn't yet translate at the flow level — re-create this condition manually in the Redo flow builder`
-          : `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter (product/event filter) that mime doesn't yet translate at the flow level — configure manually in the Redo flow builder`,
+        kind: "degraded-mapping",
+        message: `Klaviyo trigger_filter "${summary}" became a skip condition on the Redo trigger (Redo states it positively: skip when it matches). Same effect, inverted wording — confirm it reads right in the flow builder.`,
       });
+      continue;
     }
+    if (translated?.kind === "gate" && !triggerFilterGate) {
+      triggerFilterGate = translated.expression;
+      warnings.push({
+        kind: "degraded-mapping",
+        message: `Klaviyo trigger_filter "${summary}" became a condition step right below the Redo trigger — true continues the flow, false ends it. Redo can't gate a trigger on a positive event filter any other way.`,
+      });
+      continue;
+    }
+    warnings.push({
+      kind: "requires-review",
+      message: summary
+        ? `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter "${summary}" that mime can't translate — re-create this condition manually in the Redo flow builder`
+        : `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter (product/event filter) that mime can't translate — configure manually in the Redo flow builder`,
+    });
   }
 
   if (resolution.klaviyoSource) {
@@ -862,6 +886,20 @@ export async function parseFlow(
   };
 
   const steps: Step[] = [triggerStep];
+  // Splice the positive trigger_filter in as the flow's first real step. The
+  // generic pointer re-stitch below rewrites nextTrueId if the original first
+  // action later gets dropped.
+  if (triggerFilterGate) {
+    steps.push({
+      type: StepType.CONDITION,
+      id: TRIGGER_FILTER_GATE_ID,
+      customTitle: "Trigger filter (from Klaviyo)",
+      expression: triggerFilterGate,
+      nextTrueId: triggerStep.nextId,
+      nextFalseId: terminate(null, state),
+    } satisfies ConditionStep);
+    triggerStep.nextId = TRIGGER_FILTER_GATE_ID;
+  }
   // {droppedActionId → its replacement target} so we can re-stitch chain
   // pointers in a post-pass. Resolved transitively: if A drops to B and B
   // drops to C, references to A become C.

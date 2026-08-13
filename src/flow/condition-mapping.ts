@@ -227,10 +227,17 @@ function translateProfileMetricCondition(
 //
 // Klaviyo field names on the event differ from Redo schema instance fields;
 // map per trigger schemaType for the common cases.
+// `isArray` marks a Redo field whose dataType is "Multiple Text" — those can't
+// take a bare text_match and must be wrapped in an array_predicate.
+interface TriggerFieldRef {
+  field: string;
+  isArray: boolean;
+}
+
 function resolveTriggerField(
   klaviyoField: string,
   schemaType: SchemaType,
-): string | null {
+): TriggerFieldRef | null {
   const f = klaviyoField.toLowerCase();
   // "Name" = product name on Added to Cart / Viewed Product events.
   // "Items" = the cart's line items; an "added specific product" split keys
@@ -242,7 +249,13 @@ function resolveTriggerField(
       schemaType === SchemaType.MARKETING_CART_ABANDONMENT ||
       schemaType === SchemaType.MARKETING_COMMENTSOLD_CART_ABANDONMENT
     ) {
-      return "productInCartName";
+      return { field: "productInCartName", isArray: false };
+    }
+    // On a Placed Order / Fulfilled Order event both name the purchased
+    // products; `orderTrackingSchema` exposes them as `productNames`
+    // ("Multiple Text"), so the match runs inside an array_predicate.
+    if (schemaType === SchemaType.ORDER_TRACKING) {
+      return { field: "productNames", isArray: true };
     }
     // checkout / browse don't expose a simple product-name field in their schema.
     return null;
@@ -250,11 +263,60 @@ function resolveTriggerField(
   // "$value" = order/checkout total
   if (f === "$value" || f === "value") {
     if (schemaType === SchemaType.MARKETING_CHECKOUT_ABANDONMENT) {
-      return "cartSubtotal";
+      return { field: "cartSubtotal", isArray: false };
+    }
+    return null;
+  }
+  // "URL" = the page the customer was on. Only the browse-abandonment schemas
+  // carry it (`baseMarketingBrowseAbandonmentSchema.browsedPageUrl`).
+  if (f === "url") {
+    if (
+      schemaType === SchemaType.MARKETING_BROWSE_ABANDONMENT ||
+      schemaType === SchemaType.MARKETING_COMMENTSOLD_BROWSE_ABANDONMENT
+    ) {
+      return { field: "browsedPageUrl", isArray: false };
+    }
+    return null;
+  }
+  // "Source Name" = the sales channel (web / pos / shopify_draft_order).
+  if (f === "source name" || f === "source_name") {
+    if (
+      schemaType === SchemaType.MARKETING_CHECKOUT_ABANDONMENT ||
+      schemaType === SchemaType.MARKETING_COMMENTSOLD_CHECKOUT_ABANDONMENT
+    ) {
+      return { field: "sourceName", isArray: false };
+    }
+    if (schemaType === SchemaType.ORDER_TRACKING) {
+      return { field: "orderSource", isArray: false };
     }
     return null;
   }
   return null;
+}
+
+// Redo's SchemaBooleanExpression grammar has no negation node and text_match
+// has no negative operator, so a "Multiple Text" field can only ever be asked
+// "does SOME item match?" — `every` + a negated inner test isn't expressible.
+function buildTextMatch(
+  ref: TriggerFieldRef,
+  operator: string,
+  matchValues: string[],
+): unknown {
+  const match = {
+    type: "text_match",
+    field: ref.field,
+    operator,
+    matchValues,
+  };
+  if (!ref.isArray) return match;
+  // evaluateArrayPredicate re-keys each item as `{[condition.field]: item}`,
+  // so the inner condition reuses the outer field name.
+  return {
+    type: "array_predicate",
+    field: ref.field,
+    operator: "some",
+    condition: match,
+  };
 }
 
 const STRING_OP_TO_TEXT_MATCH: Record<string, string> = {
@@ -306,8 +368,8 @@ export function translateTriggerSplitExpression(
     return null;
   }
 
-  const redoField = resolveTriggerField(first.field, schemaType);
-  if (!redoField) {
+  const ref = resolveTriggerField(first.field, schemaType);
+  if (!ref) {
     warnings.push({
       kind: "requires-review",
       actionId: action.id,
@@ -342,12 +404,7 @@ export function translateTriggerSplitExpression(
     }
     return {
       dataSource: "trigger-data",
-      schemaBooleanExpression: {
-        type: "text_match",
-        field: redoField,
-        operator: op,
-        matchValues,
-      },
+      schemaBooleanExpression: buildTextMatch(ref, op, matchValues),
     };
   }
 
@@ -365,7 +422,7 @@ export function translateTriggerSplitExpression(
       dataSource: "trigger-data",
       schemaBooleanExpression: {
         type: "number_comparison",
-        field: redoField,
+        field: ref.field,
         operator: op,
         comparisonValue: Number(first.filter.value),
       },
@@ -377,10 +434,6 @@ export function translateTriggerSplitExpression(
   // collapses to a text_match `includes` on the product name. Collect all
   // values sharing field + operator (mirrors the string path).
   if (filterType === "list") {
-    const LIST_OP_TO_TEXT_MATCH: Record<string, string> = {
-      "contains": "includes",
-      "not-contains": "notIncludes",
-    };
     const op = LIST_OP_TO_TEXT_MATCH[opKey];
     if (!op) {
       warnings.push({
@@ -402,12 +455,7 @@ export function translateTriggerSplitExpression(
     }
     return {
       dataSource: "trigger-data",
-      schemaBooleanExpression: {
-        type: "text_match",
-        field: redoField,
-        operator: op,
-        matchValues,
-      },
+      schemaBooleanExpression: buildTextMatch(ref, op, matchValues),
     };
   }
 
@@ -417,6 +465,113 @@ export function translateTriggerSplitExpression(
     message: `trigger-split filter type "${filterType}" not supported`,
   });
   return null;
+}
+
+// ---------- Klaviyo flow-level trigger_filter → Redo trigger gating ----------
+
+// Klaviyo's flow-level `trigger_filter` reads "only enter the flow when the
+// triggering event matches X". Redo has two places to put that, and which one
+// applies comes down to polarity:
+//
+//   negative Klaviyo operator ("only enter when NOT Y")
+//     → a skipCondition on the trigger step, stated positively ("skip when Y").
+//   positive Klaviyo operator ("only enter when X")
+//     → a CONDITION step wired in right after the trigger, true continues,
+//       false ends the flow. Redo's expression grammar has no negation node
+//       and text_match has no negative operator, so inverting a positive
+//       filter into a skipCondition isn't expressible.
+export type TriggerFilterTranslation =
+  | { kind: "skip"; expression: unknown }
+  | { kind: "gate"; expression: unknown };
+
+// Klaviyo negative operator → the positive form it negates.
+const NEGATED_OP: Record<string, string> = {
+  "not-equals": "equals",
+  "not-contains": "contains",
+};
+
+const LIST_OP_TO_TEXT_MATCH: Record<string, string> = {
+  "contains": "includes",
+};
+
+export function translateFlowTriggerFilter(
+  triggerFilter: any,
+  schemaType: SchemaType,
+  warnings: ParseWarning[],
+): TriggerFilterTranslation | null {
+  const groups = triggerFilter?.condition_groups ?? [];
+  if (groups.length === 0) return null;
+  if (groups.length > 1) {
+    warnings.push({
+      kind: "requires-review",
+      message: `Klaviyo trigger_filter has ${groups.length} OR'd condition groups — mime translates the first group only; re-check the rest in the Redo flow builder`,
+    });
+  }
+  const conditions = groups[0].conditions ?? [];
+  if (conditions.length === 0) return null;
+
+  const first = conditions[0];
+  if (first.type !== "metric-property") return null;
+
+  const ref = resolveTriggerField(first.field, schemaType);
+  if (!ref) return null;
+
+  const filterType = first.filter?.type;
+  const rawOp = String(first.filter?.operator ?? "");
+  const negated = rawOp in NEGATED_OP;
+  const opKey = negated ? NEGATED_OP[rawOp] : rawOp;
+
+  // Conditions in a group are AND'd. mime builds one expression from the
+  // conditions sharing the first one's field + operator; anything else in the
+  // group is lost, so say so rather than silently narrowing the filter.
+  const matched = conditions.filter(
+    (c: any) =>
+      c.type === "metric-property" &&
+      c.field === first.field &&
+      c.filter?.operator === rawOp,
+  );
+  if (matched.length < conditions.length) {
+    warnings.push({
+      kind: "requires-review",
+      message: `Klaviyo trigger_filter AND's ${conditions.length} conditions; mime translated the ${matched.length} on "${first.field}" ${rawOp} — add the rest in the Redo flow builder`,
+    });
+  }
+
+  let expression: unknown;
+  if (filterType === "string" || filterType === "list") {
+    const op =
+      filterType === "string"
+        ? STRING_OP_TO_TEXT_MATCH[opKey]
+        : LIST_OP_TO_TEXT_MATCH[opKey];
+    if (!op) return null;
+    expression = buildTextMatch(
+      ref,
+      op,
+      matched.map((c: any) => String(c.filter.value)),
+    );
+  } else if (filterType === "numeric") {
+    // number_comparison has a real notEquals, so a negative numeric filter
+    // stays positive and gates like any other.
+    const op = NUMBER_OP_TO_COMPARISON[rawOp];
+    if (!op) return null;
+    expression = {
+      type: "number_comparison",
+      field: ref.field,
+      operator: op,
+      comparisonValue: Number(first.filter.value),
+    };
+    return {
+      kind: "gate",
+      expression: { dataSource: "trigger-data", schemaBooleanExpression: expression },
+    };
+  } else {
+    return null;
+  }
+
+  return {
+    kind: negated ? "skip" : "gate",
+    expression: { dataSource: "trigger-data", schemaBooleanExpression: expression },
+  };
 }
 
 // ---------- Klaviyo profile-property: phone-country-code → Redo country ----------
