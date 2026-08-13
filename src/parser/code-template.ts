@@ -88,8 +88,8 @@ export function parseCodeTemplateHtml(
   const bodyStyle = parseInlineStyles($("body").attr("style"));
   const bodyBackgroundColor = bodyStyle["background-color"] || "#ffffff";
 
-  const container = findContainer($);
-  if (!container) {
+  const containers = findContainers($);
+  if (containers.length === 0) {
     ctx.warnings.push(
       "CODE template: could not locate 600px container; deep-walking body",
     );
@@ -103,39 +103,41 @@ export function parseCodeTemplateHtml(
 
   const sections: Section[] = [];
 
-  if (container.kind === "table") {
-    // Direct child <tr> of the container <table> or its <tbody>
-    const $rows = directTrChildren(container.$el);
-    $rows.each((_, tr) => {
-      const $tr = $(tr);
-      const $tds = $tr.children("td");
-      if ($tds.length === 0) return;
+  for (const container of containers) {
+    if (container.kind === "table") {
+      // Direct child <tr> of the container <table> or its <tbody>
+      const $rows = directTrChildren(container.$el);
+      $rows.each((_, tr) => {
+        const $tr = $(tr);
+        const $tds = $tr.children("td");
+        if ($tds.length === 0) return;
 
-      if ($tds.length === 1) {
-        // Normal single-column row: the td may contain a nested container
-        // (wrapper emails sometimes double-nest) or a full section.
-        const $td = $tds.first();
-        const nested = tryNestedContainer($, $td);
-        if (nested) {
-          directTrChildren(nested).each((_, innerTr) => {
-            const $innerTds = $(innerTr).children("td");
-            if ($innerTds.length === 1) {
-              sections.push(...parseSectionTd($, $innerTds.first(), ctx));
-            } else if ($innerTds.length > 1) {
-              sections.push(...parseMultiColRow($, $innerTds, ctx));
-            }
-          });
+        if ($tds.length === 1) {
+          // Normal single-column row: the td may contain a nested container
+          // (wrapper emails sometimes double-nest) or a full section.
+          const $td = $tds.first();
+          const nested = tryNestedContainer($, $td);
+          if (nested) {
+            directTrChildren(nested).each((_, innerTr) => {
+              const $innerTds = $(innerTr).children("td");
+              if ($innerTds.length === 1) {
+                sections.push(...parseSectionTd($, $innerTds.first(), ctx));
+              } else if ($innerTds.length > 1) {
+                sections.push(...parseMultiColRow($, $innerTds, ctx));
+              }
+            });
+          } else {
+            sections.push(...parseSectionTd($, $td, ctx));
+          }
         } else {
-          sections.push(...parseSectionTd($, $td, ctx));
+          sections.push(...parseMultiColRow($, $tds, ctx));
         }
-      } else {
-        sections.push(...parseMultiColRow($, $tds, ctx));
-      }
-    });
-  } else {
-    // div-wrapped template (Hypermatic / Stripo / MSO-heavy): scan content
-    // depth-first, emitting blocks as structures are identified.
-    sections.push(...deepWalkContent($, container.$el, ctx));
+      });
+    } else {
+      // div-wrapped template (Hypermatic / MSO-heavy): scan content
+      // depth-first, emitting blocks as structures are identified.
+      sections.push(...deepWalkContent($, container.$el, ctx));
+    }
   }
 
   return {
@@ -238,14 +240,17 @@ type ContainerKind = "table" | "div";
  * normally inside `<!--[if mso]>` blocks and hence stripped as comments by
  * cheerio, but the filter guards the cases where MSO comment parsing diverges.
  */
-function findContainer($: $): { kind: ContainerKind; $el: $El } | null {
-  // 1. Zaymo / Stripo root marker — single canonical email body.
+function findContainers($: $): { kind: ContainerKind; $el: $El }[] {
+  // 1. Zaymo root marker — single canonical email body.
   const root = $("div#bodyTable, div.root-container").first();
   if (root.length > 0) {
-    return { kind: "div", $el: root };
+    return [{ kind: "div", $el: root }];
   }
 
-  // 2. Inner table constrained to email width.
+  // 2. Inner table constrained to email width. Builders that split an email
+  // into stacked 600px siblings (Stripo: es-header-body / es-content-body /
+  // es-footer-body) get every one of them — taking only the first parsed the
+  // logo and silently discarded the entire body and footer.
   const tableCandidates = $("table")
     .toArray()
     .map((el) => $(el))
@@ -259,11 +264,12 @@ function findContainer($: $): { kind: ContainerKind; $el: $El } | null {
         widthAttr === "600"
       );
     });
-  if (tableCandidates.length > 0) {
-    return { kind: "table", $el: tableCandidates[0]! };
+  const topTables = outermostOnly(tableCandidates);
+  if (topTables.length > 0) {
+    return topTables.map(($el) => ({ kind: "table" as const, $el }));
   }
 
-  // 3. Div-wrapped templates (Hypermatic / Stripo / MSO-heavy).
+  // 3. Div-wrapped templates (Hypermatic / MSO-heavy).
   const divCandidates = $("div")
     .toArray()
     .map((el) => $(el))
@@ -272,11 +278,23 @@ function findContainer($: $): { kind: ContainerKind; $el: $El } | null {
       const style = parseInlineStyles($d.attr("style"));
       return is600(style["max-width"]) || is600(style["width"]);
     });
-  if (divCandidates.length > 0) {
-    return { kind: "div", $el: divCandidates[0]! };
+  const topDivs = outermostOnly(divCandidates);
+  if (topDivs.length > 0) {
+    return topDivs.map(($el) => ({ kind: "div" as const, $el }));
   }
 
-  return null;
+  return [];
+}
+
+/**
+ * Drop any candidate nested inside another candidate, so a double-wrapped
+ * 600px table is parsed once rather than once per nesting level.
+ */
+function outermostOnly(candidates: $El[]): $El[] {
+  const nodes = candidates.map(($c) => $c.get(0));
+  return candidates.filter(($c, i) =>
+    $c.parents().toArray().every((p) => !nodes.some((n, j) => j !== i && n === p)),
+  );
 }
 
 /** True if the CSS value starts with "600" (e.g. "600px", "600"). */
