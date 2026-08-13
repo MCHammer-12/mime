@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync } from "fs";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ObjectId } from "bson";
+import * as cheerio from "cheerio";
 import { parseKlaviyoHtml } from "./parser/index.js";
 import { parseCodeTemplateHtml } from "./parser/code-template.js";
 import { fetchAccount, type KlaviyoAccount } from "./fetch-account.js";
@@ -46,6 +47,68 @@ export interface TemplateMetadata {
   editorType?: string;
 }
 
+/** The units parseKlaviyoHtml walks — everything outside them is invisible to it. */
+const KL_SKELETON =
+  ".kl-row, .gxp-kl-row, .component-wrapper, .root-container, #bodyTable";
+
+/**
+ * Fraction of the document's visible text that sits inside Klaviyo's own
+ * skeleton — i.e. how much of the email the kl parser can even see.
+ *
+ * Testing for kl-* classes anywhere is not enough. Merchants routinely build in
+ * another tool (Stripo, Beefree) and paste a single Klaviyo product block into
+ * the result. That document has kl-* classes but no skeleton around the rest of
+ * it, so the kl parser walks the one pasted block and drops the other 60-odd
+ * tables on the floor. Six of Relay Goods' ten emails imported all but empty
+ * this way, and they measure 0-36% here against 100% for a native document.
+ */
+function klSkeletonCoverage(html: string): number {
+  const $ = cheerio.load(html);
+  $("script,style,head").remove();
+  const len = (s: string) =>
+    s.replace(/&nbsp;|[​‌­͏]/g, " ").replace(/\s+/g, " ").trim().length;
+  const total = len($("body").text());
+  if (total === 0) return 1;
+  let inside = 0;
+  $(KL_SKELETON)
+    .filter((_, e) => $(e).parents(KL_SKELETON).length === 0)
+    .each((_, e) => {
+      inside += len($(e).text());
+    });
+  return inside / total;
+}
+
+/**
+ * Visible text length of the source document, for parser coverage checks.
+ * Product-feed markup is excluded: its Liquid (`{% for item in feeds… %}`,
+ * `{{ Title }}`) becomes a single dynamic-products block rather than literal
+ * text, so counting it would make a correct parse of a product email look like
+ * it lost 90% of its content.
+ */
+function sourceTextLength(html: string): number {
+  const $ = cheerio.load(html);
+  $("script,style,head,[class*='kl-product']").remove();
+  return $("body")
+    .text()
+    .replace(/&nbsp;|[​‌­͏]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim().length;
+}
+
+/** Visible text length recovered into parsed sections. */
+function recoveredTextLength(sections: unknown): number {
+  let total = 0;
+  const walk = (o: any): void => {
+    if (!o || typeof o !== "object") return;
+    if (Array.isArray(o)) return void o.forEach(walk);
+    if (typeof o.text === "string")
+      total += o.text.replace(/<[^>]*>/g, "").trim().length;
+    for (const v of Object.values(o)) walk(v);
+  };
+  walk(sections);
+  return total;
+}
+
 export interface ExportFromHtmlResult
   extends Omit<ExportResult, "outPath"> {
   template: Record<string, any>;
@@ -70,11 +133,10 @@ export async function exportTemplateFromHtml(
   // from arbitrary HTML. Belt-and-braces: ANY zero-kl-class HTML routes there
   // too — the kl parser can only ever yield 0 sections (a blank email) on it,
   // which is exactly the silent-blank bug (2 of Jack Henry's 8 emails).
-  const hasKlClasses = /class="[^"]*(?:kl-|gxp-kl-)/.test(html);
   const useCodeParser =
     meta.editorType === "CODE" ||
     meta.editorType === "SIMPLE" ||
-    !hasKlClasses;
+    klSkeletonCoverage(html) < 0.7;
   const {
     sections: rawSections,
     warnings,
@@ -93,6 +155,17 @@ export async function exportTemplateFromHtml(
     warnings.push(
       `Template parsed to 0 sections (editor_type=${meta.editorType ?? "unknown"}, ${useCodeParser ? "code" : "kl"} parser) — the imported email will be blank. Review the source template.`,
     );
+  } else {
+    // A near-empty parse is the same failure as a blank one but slips through
+    // silently — the email imports, looks like a success, and only a human
+    // eyeballing it in Redo notices the body is gone. Flag it at import.
+    const srcLen = sourceTextLength(html);
+    const gotLen = recoveredTextLength(rawSections);
+    if (srcLen >= 400 && gotLen < srcLen * 0.25) {
+      warnings.push(
+        `Template recovered only ${Math.round((100 * gotLen) / srcLen)}% of its text (${gotLen}/${srcLen} chars, editor_type=${meta.editorType ?? "unknown"}, ${useCodeParser ? "code" : "kl"} parser) — the imported email is probably missing most of its content. Review it before enabling.`,
+      );
+    }
   }
 
   let sections = rawSections;
