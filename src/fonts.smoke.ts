@@ -10,6 +10,7 @@
  * fontFamily to the brand-kit name.
  */
 import {
+  fontFamilyKey,
   matchFontToBrandKit,
   normalizeForFontMatch,
   rewriteTemplateFontFamilies,
@@ -140,6 +141,65 @@ console.log("✓ normalizeForFontMatch strips weight/foundry/case/punct");
   const n = rewriteTemplateFontFamilies(tmpl, new Map());
   assert(n === 0 && (tmpl.sections[0] as any).fontFamily === "Futura", "empty mapping → no-op");
   console.log("✓ empty mapping → no rewrite");
+}
+
+// ─── fontFamilyKey: base-family dedup key ──────────────────────────────────
+{
+  // The kit stores server-derived weighted names; we upload the base family.
+  assert(fontFamilyKey("Montserrat Thin") === "montserrat", `Montserrat Thin → ${fontFamilyKey("Montserrat Thin")}`);
+  assert(fontFamilyKey("Montserrat SemiBold") === "montserrat", `Montserrat SemiBold → ${fontFamilyKey("Montserrat SemiBold")}`);
+  assert(fontFamilyKey("Ubuntu Light") === "ubuntu", `Ubuntu Light → ${fontFamilyKey("Ubuntu Light")}`);
+  assert(fontFamilyKey("Ubuntu Medium") === "ubuntu", `Ubuntu Medium → ${fontFamilyKey("Ubuntu Medium")}`);
+  assert(fontFamilyKey("Roboto") === "roboto", `Roboto → ${fontFamilyKey("Roboto")}`);
+  // CamelCase spellings collapse the same way collectFonts collapses them.
+  assert(fontFamilyKey("MontserratThin") === "montserrat", `MontserratThin → ${fontFamilyKey("MontserratThin")}`);
+  // Distinct families must NOT collide.
+  assert(fontFamilyKey("Poppins") !== fontFamilyKey("Roboto"), "distinct families must not collide");
+  console.log("✓ fontFamilyKey maps weighted variants onto their base family");
+}
+
+// ─── the Brickloot duplicate-upload regression ─────────────────────────────
+{
+  // Reproduces the real failure: flows import one font pass each, so a base
+  // family referenced by N flows ran N upload passes. Pass 1 uploads
+  // "Montserrat"; processFontFiles registers it as "Montserrat Thin". Pass 2
+  // re-fetches the kit and must recognize that as already-registered.
+  //
+  // Mirrors the guard in uploadFontsForTemplates (import-rpc.ts).
+  const wouldUpload = (planFamily: string, brandKitFamilies: string[]): boolean => {
+    const existing = new Set(brandKitFamilies.map(fontFamilyKey));
+    return !existing.has(fontFamilyKey(planFamily));
+  };
+
+  // Brickloot's kit after pass 1 for each family (names as Redo stored them).
+  const kitAfterFirstPass = ["Montserrat Thin", "Roboto", "Ubuntu Light", "Ubuntu", "Ubuntu Medium"];
+
+  assert(!wouldUpload("Montserrat", kitAfterFirstPass), "Montserrat must NOT re-upload (kit holds 'Montserrat Thin')");
+  assert(!wouldUpload("Roboto", kitAfterFirstPass), "Roboto must NOT re-upload");
+  assert(!wouldUpload("Ubuntu", kitAfterFirstPass), "Ubuntu must NOT re-upload (kit holds weighted variants)");
+  // A genuinely new family still uploads.
+  assert(wouldUpload("Poppins", kitAfterFirstPass), "an unregistered family must still upload");
+  // Empty kit → first pass uploads.
+  assert(wouldUpload("Montserrat", []), "empty brand kit → first pass uploads");
+  console.log("✓ weighted kit names suppress re-upload (Brickloot duplicate-fonts regression)");
+}
+
+// ─── fallback override reconciliation ──────────────────────────────────────
+{
+  // Same key mismatch silently skipped the fallback override, which is why the
+  // duplicated families all read "Fall back to sans-serif" while Roboto (whose
+  // registered name matched) correctly read "Fall back to Arial".
+  const uploads = [
+    { family: "Montserrat", fallback: "Arial" },
+    { family: "Ubuntu", fallback: "Verdana" },
+  ];
+  const findFallback = (registeredName: string): string | undefined =>
+    uploads.find((u) => fontFamilyKey(u.family) === fontFamilyKey(registeredName))?.fallback;
+
+  assert(findFallback("Montserrat Thin") === "Arial", `Montserrat Thin fallback → ${findFallback("Montserrat Thin")}`);
+  assert(findFallback("Ubuntu Medium") === "Verdana", `Ubuntu Medium fallback → ${findFallback("Ubuntu Medium")}`);
+  assert(findFallback("Lora") === undefined, "unrelated family gets no fallback override");
+  console.log("✓ fallback override reaches weighted family names");
 }
 
 console.log("fonts.smoke.ts: all assertions passed");
