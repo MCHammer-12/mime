@@ -26,6 +26,7 @@
 
 import type { KlaviyoAccount } from "../fetch-account.js";
 import type { FontPlan, FontPlanEntry, FontFileSpec } from "../fonts.js";
+import { fontFamilyKey } from "../fonts.js";
 
 export const DEFAULT_SERVER_BASE = "https://app-server.getredo.com";
 
@@ -456,8 +457,11 @@ export async function uploadFontsForTemplates(
   const currentFamilies: any[] = Array.isArray(currentBrandKit.customFontFamilies)
     ? currentBrandKit.customFontFamilies
     : [];
-  const existingFamilyNames = new Set(
-    currentFamilies.map((f) => String(f.fontFamily ?? "").toLowerCase()),
+  // Keyed by base family (see fontFamilyKey): the kit stores server-derived
+  // weighted names ("Montserrat Thin") for the base family we uploaded
+  // ("Montserrat"), so a raw-name compare never matches and re-uploads.
+  const existingFamilyKeys = new Set(
+    currentFamilies.map((f) => fontFamilyKey(String(f.fontFamily ?? ""))),
   );
 
   // 2. For each resolved family NOT already in the brand kit, upload each
@@ -468,7 +472,7 @@ export async function uploadFontsForTemplates(
   const uploads: Array<{ url: string; name: string; family: string; fallback: string }> = [];
 
   for (const entry of resolved) {
-    if (existingFamilyNames.has(entry.family.toLowerCase())) {
+    if (existingFamilyKeys.has(fontFamilyKey(entry.family))) {
       skippedFamilies++;
       continue;
     }
@@ -516,9 +520,13 @@ export async function uploadFontsForTemplates(
 
   // Server may pick a different fallback than we'd prefer; if entry.fallback is
   // set and the returned family's fallback is "sans-serif" (default), override.
+  // Matched on the base-family key for the same reason as the skip guard above:
+  // the returned name is often weighted ("Montserrat Thin") while our upload
+  // records the base ("Montserrat"), and a raw compare leaves the merchant's
+  // brand font falling back to a generic sans-serif.
   for (const fam of newFamilies) {
     const localEntry = uploads.find(
-      (u) => u.family.toLowerCase() === String(fam.fontFamily ?? "").toLowerCase(),
+      (u) => fontFamilyKey(u.family) === fontFamilyKey(String(fam.fontFamily ?? "")),
     );
     if (localEntry?.fallback) fam.fallbackFont = localEntry.fallback;
     options.onProgress?.({ kind: "font_registered", family: String(fam.fontFamily ?? "") });
