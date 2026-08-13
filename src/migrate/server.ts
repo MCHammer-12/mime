@@ -2336,7 +2336,7 @@ async function requireFullAdmin(
   res.writeHead(401, { "content-type": "application/json" });
   res.end(JSON.stringify({
     error: "admin claim required",
-    detail: "pick your identity first (or both slots are taken)",
+    detail: "pick your identity first (or all slots are taken)",
   }));
   return false;
 }
@@ -2366,7 +2366,7 @@ async function handleAdminIdentitySet(req: IncomingMessage, res: ServerResponse)
   const body = await readJsonBody(req);
   const user = typeof body.user === "string" ? body.user.trim() : "";
   if (!isAllowedAdminUser(user)) {
-    return json(res, 400, { error: "user must be Austin or Michael" });
+    return json(res, 400, { error: "user must be Austin, Michael, Bailey, or Milo" });
   }
   const existingToken = getAdminClaimToken(req);
   const outcome = await tryClaim(user, existingToken);

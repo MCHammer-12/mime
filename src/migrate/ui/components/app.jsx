@@ -1167,19 +1167,18 @@ function IdentityModal({ onPick, claimedUsers }) {
       setError(`${name} is already claimed by another browser.`);
     }
   };
-  const allClaimed =
-    claimedUsers.includes("Austin") && claimedUsers.includes("Michael");
+  const allClaimed = ADMIN_USERS.every((u) => claimedUsers.includes(u));
   return (
     <div className="fixed inset-0 z-[55] bg-[#010409cc] backdrop-blur-sm flex items-center justify-center px-4">
       <div className="w-full max-w-[400px] bg-[#0d1117] border border-[#30363d] rounded-[6px] shadow-2xl px-6 py-5">
         <h2 className="font-serif text-[22px] leading-none text-[#e6edf3] mb-1">Who's using this?</h2>
         <p className="text-[12px] text-[#8b949e] mb-5 leading-relaxed">
           {allClaimed
-            ? "Both slots are claimed. If one of them is yours, sign in from the original browser. Otherwise this dashboard is locked."
+            ? "All slots are claimed. If one of them is yours, sign in from the original browser. Otherwise this dashboard is locked."
             : "Pick once. Notes you save and stores you create get attributed to your name. Each name can only be claimed by one browser."}
         </p>
-        <div className="flex gap-2">
-          {["Austin", "Michael"].map((name) => {
+        <div className="flex flex-wrap gap-2">
+          {ADMIN_USERS.map((name) => {
             const taken = claimedUsers.includes(name);
             const disabled = taken || picking !== null;
             return (
@@ -1207,6 +1206,11 @@ function IdentityModal({ onPick, claimedUsers }) {
     </div>
   );
 }
+
+// Allowed admin identities shown in the first-visit identity modal. Must
+// stay in sync with ALLOWED_ADMIN_USERS in server-side auth.ts — the
+// server is the real gate; this list only drives which buttons render.
+const ADMIN_USERS = ["Austin", "Michael", "Bailey", "Milo"];
 
 // Per-assistant assist URLs. Update here when new assistants are added.
 const ASSISTANTS = ["Dennis", "Toby"];

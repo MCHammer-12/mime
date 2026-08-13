@@ -29,7 +29,7 @@ const CLAIM_COOKIE_NAME = "admin_claim";
 
 /** Allowed admin identities. Anything else is rejected. Loose validation
  *  is intentional — adding a new admin means editing this list. */
-const ALLOWED_ADMIN_USERS = ["Austin", "Michael"];
+const ALLOWED_ADMIN_USERS = ["Austin", "Michael", "Bailey", "Milo"];
 export function isAllowedAdminUser(name: string): boolean {
   return ALLOWED_ADMIN_USERS.includes(name);
 }

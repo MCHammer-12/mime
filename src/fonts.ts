@@ -207,6 +207,32 @@ export function stripWeightSuffix(family: string): string {
 }
 
 /**
+ * Dedup key for reconciling a font family we uploaded against the family
+ * names the brand kit actually stores.
+ *
+ * `processFontFiles` names each registered CustomFontFamily from the font
+ * FILE's internal name, which is routinely a weighted variant of the base
+ * family mime uploaded: we upload the six "Montserrat" weight files and the
+ * kit comes back holding "Montserrat Thin"; "Ubuntu" comes back as three
+ * families ("Ubuntu", "Ubuntu Light", "Ubuntu Medium"). Comparing raw names
+ * therefore never matches the base family, so the "already registered, skip
+ * it" guard misses and every import re-uploads the same font — that's the
+ * duplicate-families bug.
+ *
+ * Keying both sides through the same base-family normalization (the one
+ * `collectFonts` already applies) makes the guard match.
+ *
+ * Known, accepted imprecision: a family whose real name ends in a weight word
+ * ("Archivo Black") keys to its base ("archivo"), so a kit holding Archivo
+ * Black suppresses an Archivo upload. Rare, and it degrades to a fallback
+ * font rather than corrupting anything — versus duplication, which fires on
+ * every import today.
+ */
+export function fontFamilyKey(family: string): string {
+  return stripWeightSuffix(normalizeFontFamilyName(family)).trim().toLowerCase();
+}
+
+/**
  * Klaviyo source templates routinely contain inline font stacks where
  * the same family appears in two spellings, e.g.
  *   "brandon-grotesque, 'Century Gothic', CenturyGothic, AppleGothic"
