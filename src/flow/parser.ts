@@ -3,9 +3,12 @@ import type { MetricLookup } from "../extract-metrics.js";
 import {
   translateConditionalSplitExpression,
   translateFlowProfileFilter,
+  translateFlowTriggerFilter,
+  translateMessageAdditionalFilters,
   translateTriggerSplitExpression,
 } from "./condition-mapping.js";
 import type { TemplateResolver } from "./template-resolver.js";
+import { collapseConsentSplits } from "./flatten.js";
 import { treeifyFlow } from "./treeify.js";
 import { resolveTrigger, summarizeTriggerFilter, type TriggerResolution } from "./trigger-mapping.js";
 import { rewriteKlaviyoLiquid } from "./variable-mapping.js";
@@ -37,6 +40,10 @@ import {
 
 const TRIGGER_STEP_ID = "trigger";
 const FLOW_END_ID = "flow_end";
+const TRIGGER_FILTER_GATE_ID = "trigger_filter_gate";
+// Suffix for the SEND_EMAIL step behind a per-message additional_filters gate.
+// The gate takes the original Klaviyo action id; the send moves aside.
+const MESSAGE_GATE_SUFFIX = "__msg";
 
 // Branch pointer may be absent when a Klaviyo action is the last step on its
 // path ("end path" in Klaviyo's UI). Redo's mongoose schemas mark several
@@ -53,6 +60,10 @@ interface ParseState {
   // it (→ a mixed flow we can't represent per-message, so warn).
   smartSendingBypass?: boolean;
   smartSendingThrottled?: boolean;
+  // Klaviyo's per-message `additional_filters` gate one send, not flow entry.
+  // convertAction records the translated expression here; parseFlow splices a
+  // CONDITION step in front of the send once every action is converted.
+  messageGates?: Array<{ actionId: string; expression: unknown }>;
 }
 
 function terminate(
@@ -161,17 +172,30 @@ function isDropResult(r: unknown): r is DropResult {
 }
 
 // The schema-instance field carrying the recipient phone depends on the flow's
-// schemaType. The SMS-native marketing schema (sms_marketing_signup) exposes
+// schemaType. The SMS-native marketing schema (sms_marketing_signup) and the
+// tracking family (order_tracking, via baseTrackingSchema) expose
 // `customerPhoneNumber`; the email-first schemas that also carry a phone
 // (abandonment, date, back-in-stock, low-inventory, segment) use `customerPhone`.
 // `email_marketing_signup` has NO phone field at all → returns null, so the
 // caller DROPS the SMS step (Redo's validateStepFieldReferences would otherwise
 // 400 the whole createAdvancedFlow). Verified against redoapp
-// redo/flows/common/src/schemas/marketing/marketing.ts.
+// redo/flows/common/src/schemas/marketing/marketing.ts and
+// redo/flows/common/src/schemas/tracking/base-tracking.ts.
 export function phoneFieldForSchema(schemaType: SchemaType): string | null {
   if (schemaType === SchemaType.SMS_MARKETING_SIGNUP) return "customerPhoneNumber";
+  if (schemaType === SchemaType.ORDER_TRACKING) return "customerPhoneNumber";
   if (schemaType === SchemaType.EMAIL_MARKETING_SIGNUP) return null;
   return "customerPhone";
+}
+
+// Same story for the send-email recipient name. The marketing/order/reviews
+// schemas expose `customerFullName`; customEventSchema splits it into
+// customerFirstName + customerLastName and has no combined field. Redo's
+// validateStepFieldReferences rejects the whole createAdvancedFlow when a
+// *FieldName names a field the schema doesn't have.
+export function recipientNameFieldForSchema(schemaType: SchemaType): string {
+  if (schemaType === SchemaType.CUSTOM_EVENT) return "customerFirstName";
+  return "customerFullName";
 }
 
 // Per-action dispatcher. Emits exactly one Redo Step, drops the action with
@@ -310,12 +334,23 @@ async function convertAction(
       // builder renders an End block; route orphan pointers to flow_end.
       // Leave `disabled` unset — flow-level `enabled` is the single on/off
       // knob the merchant flips after review.
+      // A gated message keeps its Klaviyo id on the CONDITION step parseFlow
+      // splices in front, so every inbound pointer still lands on the gate.
+      const messageGate = translateMessageAdditionalFilters(
+        msg.additional_filters,
+        metrics,
+        warnings,
+        id,
+      );
+      if (messageGate) {
+        (state.messageGates ??= []).push({ actionId: id, expression: messageGate });
+      }
       const step: SendEmailStep = {
         type: StepType.SEND_EMAIL,
-        id,
+        id: messageGate ? `${id}${MESSAGE_GATE_SUFFIX}` : id,
         templateId: sentinelId,
         emailAddressFieldName: "customerEmail",
-        recipientNameFieldName: "customerFullName",
+        recipientNameFieldName: recipientNameFieldForSchema(flowSchemaType),
         nextId: terminate(next, state),
       };
       // Klaviyo's per-message smart-sending → Redo's flow-wide
@@ -340,7 +375,7 @@ async function convertAction(
       // event vars → Redo schema-instance vars).
       const msg = action.data?.message ?? {};
       const rawBody = String(msg.body ?? "");
-      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id);
+      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id, flowSchemaType);
       const content = bodyResult.output;
 
       // No body at all is unusual but happens for Klaviyo AI-content templates
@@ -441,8 +476,8 @@ async function convertAction(
       // supports templating) and body. Rewriter returns the unmapped token
       // list; we use that to decide whether the webhook is an "enrichment"
       // payload that can't be salvaged vs. a simple integration webhook.
-      const urlResult = rewriteKlaviyoLiquid(rawUrl, warnings, id);
-      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id);
+      const urlResult = rewriteKlaviyoLiquid(rawUrl, warnings, id, flowSchemaType);
+      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id, flowSchemaType);
       const totalUnmapped =
         urlResult.unmappedTokens.length + bodyResult.unmappedTokens.length;
 
@@ -463,7 +498,7 @@ async function convertAction(
       const headers = Object.entries(headersObj).map(([key, value]) => {
         // Headers are also Liquid-templated in Redo. Rewrite them, but do
         // NOT add to the unmapped count (already counted url + body).
-        const hResult = rewriteKlaviyoLiquid(String(value), warnings, id);
+        const hResult = rewriteKlaviyoLiquid(String(value), warnings, id, flowSchemaType);
         return { key, value: hResult.output };
       });
       const step: SendWebhookStep = {
@@ -758,21 +793,43 @@ export async function parseFlow(
   }
 
   // Klaviyo's per-trigger `trigger_filter` (a product/event filter that
-  // gates which trigger events fire the flow). When present, surface it
-  // for manual review; mime doesn't yet translate it to a trigger-data
-  // schemaBooleanExpression at the flow level. Charlie 1 Horse's flows
-  // have trigger_filter: null, so this branch never fires for them.
+  // gates which trigger events fire the flow). A negative filter inverts
+  // into a skipCondition on the trigger; a positive one becomes a CONDITION
+  // step spliced in below the trigger (see translateFlowTriggerFilter).
+  // Anything with no Redo schema field behind it still falls through to a
+  // manual-review warning.
   const triggers = defn?.triggers ?? [];
+  let triggerFilterGate: unknown = null;
   for (const t of triggers) {
-    if (t.trigger_filter) {
-      const summary = summarizeTriggerFilter(t.trigger_filter);
+    if (!t.trigger_filter) continue;
+    const summary = summarizeTriggerFilter(t.trigger_filter);
+    const translated = translateFlowTriggerFilter(
+      t.trigger_filter,
+      resolution.schemaType,
+      warnings,
+    );
+    if (translated?.kind === "skip") {
+      skipConditions.push(translated.expression);
       warnings.push({
-        kind: "requires-review",
-        message: summary
-          ? `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter "${summary}" that mime doesn't yet translate at the flow level — re-create this condition manually in the Redo flow builder`
-          : `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter (product/event filter) that mime doesn't yet translate at the flow level — configure manually in the Redo flow builder`,
+        kind: "degraded-mapping",
+        message: `Klaviyo trigger_filter "${summary}" became a skip condition on the Redo trigger (Redo states it positively: skip when it matches). Same effect, inverted wording — confirm it reads right in the flow builder.`,
       });
+      continue;
     }
+    if (translated?.kind === "gate" && !triggerFilterGate) {
+      triggerFilterGate = translated.expression;
+      warnings.push({
+        kind: "degraded-mapping",
+        message: `Klaviyo trigger_filter "${summary}" became a condition step right below the Redo trigger — true continues the flow, false ends it. Redo can't gate a trigger on a positive event filter any other way.`,
+      });
+      continue;
+    }
+    warnings.push({
+      kind: "requires-review",
+      message: summary
+        ? `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter "${summary}" that mime can't translate — re-create this condition manually in the Redo flow builder`
+        : `Klaviyo trigger ${t.id ?? "?"} has a trigger_filter (product/event filter) that mime can't translate — configure manually in the Redo flow builder`,
+    });
   }
 
   if (resolution.klaviyoSource) {
@@ -811,6 +868,26 @@ export async function parseFlow(
     });
   }
 
+  // Redo's custom_event trigger keys off an exact `eventName`. The Klaviyo
+  // metric name is the only identity the event has on this side, so use it —
+  // the picker option deliberately ships without one. Always flagged for
+  // review: Redo fires this trigger only for events its public custom-event
+  // API has actually ingested under that exact name, so a mismatch (or an
+  // integration that doesn't send to Redo at all) yields a flow that looks
+  // configured and never runs.
+  let eventName: string | undefined;
+  if (resolution.schemaType === SchemaType.CUSTOM_EVENT) {
+    const metricId = triggers[0]?.id;
+    eventName =
+      resolution.eventName ??
+      (metricId ? metrics[metricId]?.name : undefined) ??
+      flow.data.attributes.name;
+    warnings.push({
+      kind: "requires-review",
+      message: `custom-event trigger set to eventName "${eventName}". Redo matches this string exactly against events delivered to its custom-event API — confirm the integration sends that event name to Redo (Redo's ingested event list is under the flow builder's custom-event trigger), or the flow will never fire.`,
+    });
+  }
+
   const triggerStep: TriggerStep = {
     type: StepType.TRIGGER,
     id: TRIGGER_STEP_ID,
@@ -818,6 +895,7 @@ export async function parseFlow(
     category: resolution.category,
     key: resolution.key,
     nextId: terminate(firstActionId, state),
+    ...(eventName ? { eventName } : {}),
     ...(skipConditions.length > 0
       ? { skipConditions: { conjunctionMode: "OR", conditions: skipConditions } }
       : {}),
@@ -827,6 +905,20 @@ export async function parseFlow(
   };
 
   const steps: Step[] = [triggerStep];
+  // Splice the positive trigger_filter in as the flow's first real step. The
+  // generic pointer re-stitch below rewrites nextTrueId if the original first
+  // action later gets dropped.
+  if (triggerFilterGate) {
+    steps.push({
+      type: StepType.CONDITION,
+      id: TRIGGER_FILTER_GATE_ID,
+      customTitle: "Trigger filter (from Klaviyo)",
+      expression: triggerFilterGate,
+      nextTrueId: triggerStep.nextId,
+      nextFalseId: terminate(null, state),
+    } satisfies ConditionStep);
+    triggerStep.nextId = TRIGGER_FILTER_GATE_ID;
+  }
   // {droppedActionId → its replacement target} so we can re-stitch chain
   // pointers in a post-pass. Resolved transitively: if A drops to B and B
   // drops to C, references to A become C.
@@ -850,6 +942,26 @@ export async function parseFlow(
       continue;
     }
     steps.push(result);
+  }
+
+  // Klaviyo's per-message `additional_filters` gate the individual send, not
+  // flow entry: a profile that fails them skips the message and carries on.
+  // Redo has no per-step filter, so each gated send becomes CONDITION → send,
+  // with the false branch pointing past it at the send's own next. Spliced
+  // before the drop re-stitch below so nextFalseId follows dropped actions.
+  for (const gate of state.messageGates ?? []) {
+    const send = steps.find(
+      (s) => s.id === `${gate.actionId}${MESSAGE_GATE_SUFFIX}`,
+    ) as SendEmailStep | undefined;
+    if (!send) continue;
+    steps.push({
+      type: StepType.CONDITION,
+      id: gate.actionId,
+      customTitle: "Message filter (from Klaviyo)",
+      expression: gate.expression,
+      nextTrueId: send.id,
+      nextFalseId: terminate(send.nextId, state),
+    } satisfies ConditionStep);
   }
 
   // Klaviyo's per-message `smart_sending_enabled` → Redo's flow-wide
@@ -918,10 +1030,15 @@ export async function parseFlow(
     steps.push(terminal);
   }
 
+  // Drop the "can this profile receive SMS/email?" guards before treeifying —
+  // each one would otherwise double the subtree below it for no behavioural
+  // gain, since Redo suppresses sends to profiles without consent anyway.
+  const flattenedSteps = collapseConsentSplits(steps, warnings);
+
   // Klaviyo allows branch re-merging; Redo's advanced flows are trees. Clone
   // any step reachable from >1 parent so each incoming branch has its own
   // copy of the downstream subtree. flow_end stays shared.
-  const treeifiedSteps = treeifyFlow(steps, warnings);
+  const treeifiedSteps = treeifyFlow(flattenedSteps, warnings);
 
   // Always import as inactive so the merchant can review the flow in Redo
   // before it starts firing — even if the Klaviyo source was live. Original

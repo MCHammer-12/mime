@@ -11,7 +11,7 @@ whole flow fails. The phone field is **per-schema**:
 - `sms_marketing_signup` → `customerPhoneNumber`
 - `email_marketing_signup` → **no phone field at all** (it only has `customerEmail`)
 
-**Fix (shipped):** `smsPhoneFieldForSchema()` in `src/flow/parser.ts` picks the
+**Fix (shipped):** `phoneFieldForSchema()` in `src/flow/parser.ts` picks the
 right field, and for `email_marketing_signup` **drops the send_sms step** (SMS can't
 send from an email-only trigger) and re-stitches via `dropAction`. First case:
 Felicity Worldwide `Xx9sgd` (email welcome flow with 2 SMS steps).
@@ -48,6 +48,60 @@ mime block parser (mirror `mapPlatformToRedo` / `mapIconColor`).
 `blankTemplateCount` with no reason. Usually class #2 (an enum) on a template.
 **Fast repro:** parse the template + call `importTemplateRpc(parsed, {jwt})` with a
 live JWT — the exact 400 prints immediately. Then fix as #2.
+**Read `blankedTemplates[].reason` in `parse-result.json` first** — since 2026-08-13
+the bundle carries the per-email reason, which distinguishes "resolver never got the
+HTML" (Klaviyo-side) from "create rejected it" (class #2). Bundles from before that
+date only have the count; those need a re-parse with the merchant's Klaviyo key.
+
+## 4. The bundle has no `error.txt` — nothing actually failed
+**Cause:** not an error class. `POST /api/jobs/:id/bundle` takes an operator-selected
+`{items:[{id,type}]}` list, so a bundle contains whatever the operator ticked, not the
+failures. `bundle.ts` writes `error.txt` **only** on the `flow_failed` path — so a
+folder with no `error.txt` and a `redoFlowId` in `parse-result.json` imported fine.
+**Method:** when every folder is clean, "it didn't work" means fidelity, not failure.
+Read back what's in Redo (`rpc/getAdvancedFlowById` + `marketing-rpc/getEmailTemplates`)
+and diff against `klaviyo-flow.json`. Check the job's completion time against
+`git log` — a Replit-deployed run can predate fixes that are already on `main`.
+**Caution:** if the team rebuilt the flow by hand, they edited mime's templates
+**in place** (`sections` overwritten, images now `data.getredo.com/redo/Screenshot_*`).
+mime never re-hosts images — only `import-rpc.ts` uploads, and only fonts — so a
+`getredo.com` image URL is a reliable tell that live Redo no longer shows mime's output.
+
+## 5. Silently dropped Klaviyo field
+**Cause:** mime ignores a field it never learned to read, so a merchant-visible
+behavior vanishes with no warning. Distinct from a 400: the import "succeeds".
+**Detection:** `grep -rn '<klaviyo_field>' src/ --include='*.ts'` against the raw
+`klaviyo-flow.json`. No hit = the field is being dropped on the floor.
+**Case (fixed):** `message.additional_filters` on a send-email — gates that one
+message, not flow entry. Now becomes a CONDITION → send with the false branch past
+it (`translateMessageAdditionalFilters`, `src/flow/condition-mapping.ts`). When the
+filter can't be translated, no gate is spliced and a requires-review warning names
+the consequence. First case: Relay Goods `Y34myV`.
+
+## 6. Email imported near-empty — foreign email builder
+**Cause:** the merchant built the email in another tool (Stripo, Beefree, …) and
+pasted it into Klaviyo. mime has parsers for Klaviyo-native HTML and for generic
+coded HTML; a foreign builder's markup satisfies neither cleanly, and two things
+used to go wrong at once:
+- **Routing.** The old gate was "any `kl-*` class anywhere → kl parser". One
+  pasted Klaviyo product block flipped it, and the kl parser only walks
+  `kl-row` / `.component-wrapper`, so it emitted that single block and dropped
+  the other 60 tables. Now `klSkeletonCoverage()` in `src/export-template.ts`
+  measures how much of the document's text is inside walkable units — native
+  templates are 100%, foreign-with-a-pasted-block are 0-36%, gate at 70%.
+- **Container count.** `findContainers()` (`src/parser/code-template.ts`) used to
+  return only the FIRST 600px container. Stripo emits three siblings
+  (`es-header-body` / `es-content-body` / `es-footer-body`), so the CODE parser
+  parsed the logo and stopped. It now walks every outermost 600px container.
+
+**Detection:** `es-*` classes (Stripo) or another builder's prefix, a
+`.es-wrapper-color` / non-Klaviyo wrapper, and `kl-row` count 0 despite kl-*
+classes being present. Since 2026-08-13 a parse recovering <25% of the source
+text also raises a `recovered only N% of its text` warning at import.
+**Fix:** re-run on current `main`. First case: Relay Goods (6 of 10 emails).
+**Note:** the CODE parser is no longer reserved for `editor_type: CODE`/`SIMPLE`
+— any low-coverage document routes there, so CODE-parser changes now affect
+draggable templates too.
 
 ## Re-run mechanics
 - `src/flow/import-one.ts` re-fetches the flow from Klaviyo, re-parses with CURRENT

@@ -17,7 +17,7 @@ import {
   ReviewsTriggerKey,
   SchemaType,
 } from "./types.js";
-import type { TriggerResolution } from "./trigger-mapping.js";
+import { customEventResolution, type TriggerResolution } from "./trigger-mapping.js";
 
 export interface MarketingTriggerOption {
   /** Stable identifier — sent to/from the UI as the answer value. */
@@ -293,6 +293,17 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
       schemaType: SchemaType.REVIEWS,
       category: "Reviews",
     },
+  },
+
+  // ─── Custom event ────────────────────────────────────────────────
+  // The landing spot for a Klaviyo metric with no Redo equivalent, when the
+  // merchant's integration already POSTs that event to Redo's custom-event
+  // API. `eventName` is deliberately absent — parseFlow fills it from the
+  // flow's own Klaviyo metric name.
+  {
+    value: "custom_event",
+    label: "Custom event (matches the Klaviyo metric name)",
+    resolution: customEventResolution(),
   },
 
   // ─── Order tracking — full set ───────────────────────────────────

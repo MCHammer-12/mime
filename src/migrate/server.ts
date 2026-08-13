@@ -1668,6 +1668,10 @@ async function runImport(
               flowId: result.flowId,
               createdTemplateCount: result.createdTemplateCount,
               blankTemplateCount: result.blankTemplateCount,
+              // Why each blank was blank. importFlowRpc works this out at
+              // import time; without carrying it here the troubleshoot bundle
+              // shows only a count and the reason is gone.
+              blankedTemplates: result.blankedTemplates,
               warningCount: parsed.warnings.length,
               // Surfaced for the UI's "imported as draft / live" badge and
               // to make the Klaviyo-status → Redo-enabled mapping visible

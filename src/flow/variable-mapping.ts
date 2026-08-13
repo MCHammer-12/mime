@@ -1,4 +1,4 @@
-import type { ParseWarning } from "./types.js";
+import { SchemaType, type ParseWarning } from "./types.js";
 
 // Klaviyo Liquid variable path → Redo schema-instance field name.
 // Redo auto-snake-cases schema fields before Liquid render, so both
@@ -23,6 +23,25 @@ export const KLAVIYO_TO_REDO_VAR_MAP: Record<string, string> = {
   "event.extra.responsive_checkout_url": "checkout_url",
   "event.extra.checkout_url":        "checkout_url",
   "event.timestamp":                 "time",
+};
+
+// Fields that only exist on some trigger schemas. Redo rejects a template whose
+// tokens reference fields the flow's trigger doesn't provide, so these can't go
+// in the base map — mapping event.URL globally would swap one rejected token for
+// another on every non-browse flow. Layered over KLAVIYO_TO_REDO_VAR_MAP when
+// the caller knows the schemaType.
+//
+// Source: redo/flows/common/src/schemas/marketing/marketing.ts —
+// baseMarketingBrowseAbandonmentSchema and its CS twin both expose
+// `browsedPageUrl: Maybe Url` ("The URL of the page the customer was browsing"),
+// which is exactly Klaviyo's Viewed Product / Active on Site `event.URL`.
+const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string>>> = {
+  [SchemaType.MARKETING_BROWSE_ABANDONMENT]: {
+    "event.URL": "browsed_page_url",
+  },
+  [SchemaType.MARKETING_COMMENTSOLD_BROWSE_ABANDONMENT]: {
+    "event.URL": "browsed_page_url",
+  },
 };
 
 interface LiquidToken {
@@ -52,9 +71,14 @@ export function rewriteKlaviyoLiquid(
   input: string,
   warnings: ParseWarning[],
   actionId: string,
+  schemaType?: SchemaType,
 ): { output: string; unmappedTokens: string[] } {
   if (!input) return { output: input, unmappedTokens: [] };
 
+  const varMap = {
+    ...KLAVIYO_TO_REDO_VAR_MAP,
+    ...(schemaType ? SCHEMA_VAR_MAP[schemaType] : undefined),
+  };
   const unmappedTokens: string[] = [];
   const output = input.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (full, inside: string) => {
     const parsed = parseLiquidVar(inside);
@@ -73,7 +97,7 @@ export function rewriteKlaviyoLiquid(
       if (lookupMatch) {
         const field = lookupMatch[1]!;
         const remaining = parsed.filters.slice(lookupMatch[0].length);
-        const mapped = KLAVIYO_TO_REDO_VAR_MAP[`${parsed.varPath}.${field}`];
+        const mapped = varMap[`${parsed.varPath}.${field}`];
         if (mapped) {
           return `{{ ${mapped}${remaining} }}`;
         }
@@ -85,7 +109,7 @@ export function rewriteKlaviyoLiquid(
       }
     }
 
-    const mapped = KLAVIYO_TO_REDO_VAR_MAP[parsed.varPath];
+    const mapped = varMap[parsed.varPath];
     if (mapped) {
       return `{{ ${mapped}${parsed.filters} }}`;
     }

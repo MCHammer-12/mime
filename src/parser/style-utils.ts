@@ -2,8 +2,26 @@
  * Utilities for parsing inline CSS styles from Klaviyo HTML elements.
  */
 
+import type * as cheerio from "cheerio";
 import { Padding } from "../renderer/types.js";
 import { substituteSystemFont } from "../fonts.js";
+
+/**
+ * cheerio escapes `"` inside an attribute value as `&quot;` whenever it
+ * re-serializes a subtree (`.html()`). Every downstream pass that scans that
+ * serialized HTML for CSS splits declarations on `;` — and `&quot;` contains
+ * one, so `font-family:"Helvetica Neue",Arial` truncates to `font-family:&quot`.
+ * Single and double quotes are interchangeable in CSS, so normalize style
+ * attributes to single quotes up front and the entity never appears.
+ */
+export function normalizeStyleAttrQuotes($: cheerio.CheerioAPI): void {
+  $("[style]").each((_, el) => {
+    const value = $(el).attr("style");
+    if (value && value.includes('"')) {
+      $(el).attr("style", value.replace(/"/g, "'"));
+    }
+  });
+}
 
 export function parseInlineStyles(
   style: string | undefined,

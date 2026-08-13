@@ -97,6 +97,64 @@ export function tryParseDiscountFromText(
   return blocks;
 }
 
+/**
+ * Klaviyo's dedicated Coupon block (`td.kl-coupon`): a pill whose only content
+ * is `{% coupon_code 'Name' %}` inside an <a>. It never reaches the text parser
+ * — the wrapper carries no kl-text — so before this existed it fell through the
+ * dispatcher to "Unknown block" and the code vanished from the email.
+ *
+ * Redo's DiscountBlock renders the chip itself, so the <a> href, the pill
+ * border and its corner radius have nowhere to go. Warned, not silently lost.
+ */
+export function parseCouponBlock(
+  $: $,
+  $td: cheerio.Cheerio<El>,
+  ctx: ParseContext,
+): Section | null {
+  const $a = $td.find("a").first();
+  if ($a.length === 0) return null;
+
+  const name = ($a.text().match(/\{%\s*coupon_code\s*'([^']*)'?\s*%\}/) ?? [])[1] ?? "";
+  const aStyle = parseInlineStyles($a.attr("style"));
+  const $bgTd = $td.find("td[bgcolor]").first();
+  const bgTdStyle = parseInlineStyles($bgTd.attr("style"));
+
+  const $outerTd = $td.closest("table").parent("td");
+  const outerStyle = parseInlineStyles($outerTd.attr("style"));
+
+  const border = ["border", "border-top", "border-right", "border-bottom", "border-left"]
+    .map((p) => bgTdStyle[p])
+    .find((v) => v && v !== "none");
+  const href = $a.attr("href") || "";
+  const lost = [border && `border (${border})`, href && `link (${href})`].filter(Boolean);
+  ctx.warnings.push(
+    `Klaviyo coupon block "${name}" → Redo discount block` +
+      (lost.length ? ` — ${lost.join(" and ")} not carried over` : ""),
+  );
+
+  return {
+    type: EmailBlockType.DISCOUNT,
+    blockId: nextId(),
+    sectionPadding: parsePaddingFromTd(outerStyle),
+    sectionColor:
+      outerStyle["background-color"] ||
+      findAncestorBackgroundColor($outerTd.length ? $outerTd : $td) ||
+      "#ffffff",
+    alignment: normalizeAlignment($td.attr("align") || $bgTd.attr("align")),
+    fontFamily: parseFontFamily(aStyle["font-family"]),
+    fontWeight: normalizeFontWeight(aStyle["font-weight"]),
+    fontSize: parseFontSize(aStyle["font-size"]),
+    textColor: parseColor(aStyle["color"]),
+    blockBackgroundColor:
+      $bgTd.attr("bgcolor") ||
+      bgTdStyle["background-color"] ||
+      bgTdStyle["background"] ||
+      aStyle["background-color"] ||
+      aStyle["background"] ||
+      "#ffffff",
+  };
+}
+
 function hasVisibleContent(html: string): boolean {
   return html.replace(/<[^>]+>/g, "").replace(/&nbsp;|\s/g, "").length > 0;
 }

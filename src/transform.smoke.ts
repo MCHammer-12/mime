@@ -73,6 +73,28 @@ function assert(cond: boolean, msg: string): void {
   );
 }
 
+// ─── {{ person|lookup:"first_name" }} legacy dialect rewrites too ───────
+{
+  const out = substituteStringVars(`Welcome, {{ person|lookup:"first_name" }}`, orgCtx);
+  assert(
+    out === "Welcome, {{ customer_first_name }}",
+    `person|lookup rewrites, got: ${JSON.stringify(out)}`,
+  );
+}
+
+// ─── Unmappable person.X collapses to its default, not verbatim ─────────
+// Verbatim it would 400 the whole createEmailTemplate call and blank the email.
+{
+  const out = substituteStringVars("Hi {{ person.organization|default:'' }}there", orgCtx);
+  assert(out === "Hi there", `unmappable person.X → default, got: ${JSON.stringify(out)}`);
+
+  const withDefault = substituteStringVars("Hi {{ person.nickname|default:'friend' }}", orgCtx);
+  assert(
+    withDefault === "Hi friend",
+    `unmappable person.X keeps its default text, got: ${JSON.stringify(withDefault)}`,
+  );
+}
+
 // ─── Unknown variable left unchanged (no map entry) ─────────────────────
 {
   const out = substituteStringVars("Hi {{ unknown_var }}!", orgCtx);

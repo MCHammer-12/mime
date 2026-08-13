@@ -54,6 +54,10 @@ interface FlowImportedEventPayload {
   flowId?: string;
   createdTemplateCount?: number;
   blankTemplateCount?: number;
+  // Per-email reason each blank was blank. Without it the bundle reports
+  // "blankTemplateCount: 1" and nothing else, and diagnosing why needs the
+  // merchant's Klaviyo key to re-parse. Populated since 2026-08-13.
+  blankedTemplates?: unknown[];
   warningCount?: number;
   warningList?: unknown[];
   parsedAutomation?: unknown;
@@ -338,6 +342,7 @@ function addFlowToBundle(
     const parseResult = {
       createdTemplateCount: flowEvent.createdTemplateCount ?? null,
       blankTemplateCount: flowEvent.blankTemplateCount ?? null,
+      blankedTemplates: flowEvent.blankedTemplates ?? [],
       warnings: flowEvent.warningList ?? [],
       redoFlowId: flowEvent.flowId ?? null,
       parsedAutomation: flowEvent.parsedAutomation ?? null,
