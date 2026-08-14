@@ -48,7 +48,7 @@ import {
   uploadFontsForTemplates,
   type ImportProgressEvent,
 } from "../migrate/import-rpc.js";
-import type { KlaviyoFlow } from "./types.js";
+import { SchemaType, StepType, type KlaviyoFlow } from "./types.js";
 
 async function main() {
   const klaviyoKey = process.env.KLAVIYO_API_KEY;
@@ -145,6 +145,47 @@ async function main() {
   }
 
   console.log(`      parsed ${parsed.automation.steps.length} steps, ${parsed.placeholderTemplates.length} template(s)`);
+
+  // A Klaviyo segment trigger names the segment it watches; Redo's
+  // marketing_segment_membership_change fires on *every* segment. Without a
+  // gate right after the trigger the flow sends to anyone entering any
+  // segment. Pin it to the Redo segment that mirrors the Klaviyo one.
+  const segmentId = process.env.SEGMENT_ID;
+  if (segmentId) {
+    if (parsed.automation.schemaType !== SchemaType.MARKETING_SEGMENT_MEMBERSHIP_CHANGE) {
+      console.error(
+        `SEGMENT_ID is only meaningful for a segment-membership trigger; this flow is ${parsed.automation.schemaType}`,
+      );
+      process.exit(1);
+    }
+    const trigger = parsed.automation.steps.find((s) => s.type === StepType.TRIGGER);
+    if (!trigger || !("nextId" in trigger) || !trigger.nextId) {
+      console.error(`SEGMENT_ID set but the parsed flow has no trigger to gate`);
+      process.exit(1);
+    }
+    const gateId = `segment_gate`;
+    const missId = `segment_gate_miss`;
+    parsed.automation.steps.push(
+      {
+        type: StepType.CONDITION,
+        id: gateId,
+        expression: {
+          dataSource: "trigger-data",
+          schemaBooleanExpression: {
+            type: "text_match",
+            field: "segment",
+            operator: "equals",
+            matchValues: [segmentId],
+          },
+        },
+        nextTrueId: trigger.nextId,
+        nextFalseId: missId,
+      },
+      { type: StepType.DO_NOTHING, id: missId },
+    );
+    trigger.nextId = gateId;
+    console.log(`      gated on segment ${segmentId}`);
+  }
 
   // Dump the parsed automation to disk for offline inspection + diagnostics.
   const dumpPath = `/tmp/mime-parsed-flow-${flowId}.json`;
