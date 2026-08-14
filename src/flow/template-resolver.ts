@@ -52,6 +52,10 @@ export interface TemplateResolver {
    */
   resolve(
     klaviyoTemplateId: string,
+    opts?: {
+      /** Flow trigger is Redo's custom_event — see TransformOptions. */
+      customEvent?: boolean;
+    },
   ): Promise<ResolvedTemplate | { failure: ResolveFailure }>;
 }
 
@@ -200,6 +204,7 @@ export function createTemplateResolver(opts: {
 
   async function resolveUncached(
     klaviyoTemplateId: string,
+    customEvent: boolean,
   ): Promise<ResolverResult> {
     // Disk first (fast, offline, deterministic), Klaviyo API fallback for
     // flow-embedded templates that don't appear in the /templates/ listing.
@@ -221,18 +226,22 @@ export function createTemplateResolver(opts: {
             },
           };
         }
-        return await parseSource(apiResult);
+        return await parseSource(apiResult, customEvent);
       }
       return sourceResult;
     }
-    return await parseSource(sourceResult);
+    return await parseSource(sourceResult, customEvent);
   }
 
-  async function parseSource(source: Source): Promise<ResolverResult> {
+  async function parseSource(
+    source: Source,
+    customEvent: boolean,
+  ): Promise<ResolverResult> {
     try {
       const result = await exportTemplateFromHtml(source.html, source.meta, {
         account: opts.account,
         skipAi: opts.skipAi,
+        customEvent,
       });
       return { template: result.template, warnings: result.warnings };
     } catch (e: any) {
@@ -246,7 +255,7 @@ export function createTemplateResolver(opts: {
   }
 
   return {
-    async resolve(klaviyoTemplateId: string) {
+    async resolve(klaviyoTemplateId: string, resolveOpts = {}) {
       if (!klaviyoTemplateId) {
         return {
           failure: {
@@ -255,10 +264,16 @@ export function createTemplateResolver(opts: {
           },
         };
       }
-      if (!cache.has(klaviyoTemplateId)) {
-        cache.set(klaviyoTemplateId, resolveUncached(klaviyoTemplateId));
+      // The trigger changes what the parse produces (custom_event drops the
+      // view-in-browser link and swaps the footer), so it's part of the key —
+      // one resolver shared across flows must not hand back another flow's
+      // shape.
+      const customEvent = resolveOpts.customEvent === true;
+      const key = `${klaviyoTemplateId}|${customEvent ? "ce" : "std"}`;
+      if (!cache.has(key)) {
+        cache.set(key, resolveUncached(klaviyoTemplateId, customEvent));
       }
-      return cache.get(klaviyoTemplateId)!;
+      return cache.get(key)!;
     },
   };
 }

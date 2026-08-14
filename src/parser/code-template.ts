@@ -948,7 +948,11 @@ function parseMultiColRow(
     (blocks) => {
       const b = blocks[0];
       if (!b) return null;
-      if (b.type === EmailBlockType.COLUMN || b.type === EmailBlockType.PRODUCTS) {
+      if (
+        b.type === EmailBlockType.COLUMN ||
+        b.type === EmailBlockType.PRODUCTS ||
+        b.type === EmailBlockType.FOOTER
+      ) {
         return null;
       }
       return b;

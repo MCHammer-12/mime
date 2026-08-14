@@ -78,6 +78,16 @@ async function main() {
     }
     forcedTrigger = opt.resolution;
     console.log(`      forcing trigger: ${opt.label} (${opt.resolution.schemaType})`);
+    // Redo matches the custom event name exactly, and its ingested names rarely
+    // equal Klaviyo's metric name (Okendo sends "Okendo Loyalty Points Redeemed"
+    // to Klaviyo but okendo_loyalty_points_redeemed to Redo). Without this the
+    // parser falls back to the Klaviyo name and the flow silently never fires.
+    // Read the team's real names from marketing-rpc/getCustomEventNames.
+    const eventName = process.env.EVENT_NAME;
+    if (eventName) {
+      forcedTrigger = { ...forcedTrigger, eventName };
+      console.log(`      event name: ${eventName}`);
+    }
   }
 
   console.log(`[1/5] fetching metrics...`);

@@ -123,7 +123,12 @@ export interface ExportFromHtmlResult
 export async function exportTemplateFromHtml(
   html: string,
   meta: TemplateMetadata,
-  opts: { account: KlaviyoAccount | null; skipAi: boolean },
+  opts: {
+    account: KlaviyoAccount | null;
+    skipAi: boolean;
+    /** Flow trigger is Redo's custom_event — see TransformOptions. */
+    customEvent?: boolean;
+  },
 ): Promise<ExportFromHtmlResult> {
   // Route to the appropriate parser. The default parser keys entirely on
   // kl-*/gxp-kl-* block classes. CODE and SIMPLE templates have none — CODE is
@@ -181,6 +186,7 @@ export async function exportTemplateFromHtml(
   {
     const result = await transformSections(rawSections, opts.account, {
       skipAi: opts.skipAi,
+      customEvent: opts.customEvent,
     });
     sections = result.sections;
     substitutions = result.substitutions;
@@ -201,6 +207,7 @@ export async function exportTemplateFromHtml(
     orgName: opts.account?.organizationName ?? "",
     orgAddress: opts.account ? formatAddress(opts.account) : "",
     orgUrl: opts.account?.websiteUrl ?? "",
+    customEvent: opts.customEvent,
   };
   const transformedSubject = meta.subject
     ? substituteStringVars(meta.subject, subVarCtx, substitutions)

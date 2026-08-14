@@ -265,8 +265,15 @@ async function convertAction(
       const sentinelId = `__PLACEHOLDER_${msg.template_id ?? id}__`;
       let fullTemplate: Record<string, any> | null = null;
       const templateWarnings: string[] = [];
+      // Redo's custom_event schema doesn't expose the shared email fields, so
+      // the template parse has to route around {{ unsubscribe_link }} /
+      // {{ view_in_browser_link }} and any {{ event|lookup:'…' }} that only
+      // Klaviyo can resolve. See TransformOptions.customEvent.
+      const customEvent = flowSchemaType === SchemaType.CUSTOM_EVENT;
       if (templateResolver && msg.template_id) {
-        const resolved = await templateResolver.resolve(msg.template_id);
+        const resolved = await templateResolver.resolve(msg.template_id, {
+          customEvent,
+        });
         if ("failure" in resolved) {
           // Surface the specific reason instead of a generic "not found".
           // Six identical "not found" warnings on a flow that really hit
@@ -294,6 +301,7 @@ async function convertAction(
             orgName: account?.organizationName ?? "",
             orgAddress: account ? formatAddress(account) : "",
             orgUrl: account?.websiteUrl ?? "",
+            customEvent,
           };
           if (msg.subject_line) {
             fullTemplate.subject = substituteStringVars(msg.subject_line, subVarCtx);
@@ -313,6 +321,7 @@ async function convertAction(
         orgName: account?.organizationName ?? "",
         orgAddress: account ? formatAddress(account) : "",
         orgUrl: account?.websiteUrl ?? "",
+        customEvent,
       };
       const phSubject = msg.subject_line
         ? substituteStringVars(msg.subject_line, phSubVarCtx)
