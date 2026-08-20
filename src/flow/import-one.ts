@@ -49,6 +49,7 @@ import {
   type ImportProgressEvent,
 } from "../migrate/import-rpc.js";
 import { SchemaType, StepType, type KlaviyoFlow } from "./types.js";
+import { findVacuousConditions } from "./vacuous-conditions.js";
 
 async function main() {
   const klaviyoKey = process.env.KLAVIYO_API_KEY;
@@ -205,10 +206,30 @@ async function main() {
     console.log(`      treeify: no merges detected`);
   }
 
+  // An inline-segment condition with no conditions matches everyone, so the
+  // branch silently always takes the true path. See vacuous-conditions.ts.
+  const vacuous = findVacuousConditions(parsed.automation.steps);
+  for (const v of vacuous) {
+    console.log(
+      `      vacuous condition: step ${v.id} matches everyone — always takes true ` +
+        `(${v.nextTrueId}); false branch (${v.falseBranchType} ${v.nextFalseId}) never runs`,
+    );
+  }
+
   // Stop before the import call — the diagnosis above is the whole output.
   if (diagnoseOnly) {
     console.log(`\nDIAGNOSE_ONLY=1 — stopping before import.`);
     return;
+  }
+
+  if (vacuous.length > 0 && !process.env.ALLOW_VACUOUS_CONDITIONS) {
+    console.error(
+      `\nRefusing to import: ${vacuous.length} condition step(s) carry no translatable ` +
+        `filter, so Redo would match every customer and silently take the true branch. ` +
+        `Resolve the filter (see the warnings above) or re-run with ` +
+        `ALLOW_VACUOUS_CONDITIONS=1 to import as-is.`,
+    );
+    process.exit(1);
   }
 
   console.log(`[5/5] importing into Redo...`);
