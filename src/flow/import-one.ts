@@ -50,8 +50,11 @@ import {
 } from "../migrate/import-rpc.js";
 import { SchemaType, StepType, type KlaviyoFlow } from "./types.js";
 import { findVacuousConditions } from "./vacuous-conditions.js";
+import { assertUpToDate } from "../git-freshness.js";
 
 async function main() {
+  assertUpToDate();
+
   const klaviyoKey = process.env.KLAVIYO_API_KEY;
   const redoJwt = process.env.REDO_JWT;
   const flowId = process.env.FLOW_ID;
