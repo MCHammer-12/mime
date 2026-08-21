@@ -48,9 +48,13 @@ import {
   uploadFontsForTemplates,
   type ImportProgressEvent,
 } from "../migrate/import-rpc.js";
-import type { KlaviyoFlow } from "./types.js";
+import { SchemaType, StepType, type KlaviyoFlow } from "./types.js";
+import { findVacuousConditions } from "./vacuous-conditions.js";
+import { assertUpToDate } from "../git-freshness.js";
 
 async function main() {
+  assertUpToDate();
+
   const klaviyoKey = process.env.KLAVIYO_API_KEY;
   const redoJwt = process.env.REDO_JWT;
   const flowId = process.env.FLOW_ID;
@@ -78,6 +82,16 @@ async function main() {
     }
     forcedTrigger = opt.resolution;
     console.log(`      forcing trigger: ${opt.label} (${opt.resolution.schemaType})`);
+    // Redo matches the custom event name exactly, and its ingested names rarely
+    // equal Klaviyo's metric name (Okendo sends "Okendo Loyalty Points Redeemed"
+    // to Klaviyo but okendo_loyalty_points_redeemed to Redo). Without this the
+    // parser falls back to the Klaviyo name and the flow silently never fires.
+    // Read the team's real names from marketing-rpc/getCustomEventNames.
+    const eventName = process.env.EVENT_NAME;
+    if (eventName) {
+      forcedTrigger = { ...forcedTrigger, eventName };
+      console.log(`      event name: ${eventName}`);
+    }
   }
 
   console.log(`[1/5] fetching metrics...`);
@@ -136,6 +150,47 @@ async function main() {
 
   console.log(`      parsed ${parsed.automation.steps.length} steps, ${parsed.placeholderTemplates.length} template(s)`);
 
+  // A Klaviyo segment trigger names the segment it watches; Redo's
+  // marketing_segment_membership_change fires on *every* segment. Without a
+  // gate right after the trigger the flow sends to anyone entering any
+  // segment. Pin it to the Redo segment that mirrors the Klaviyo one.
+  const segmentId = process.env.SEGMENT_ID;
+  if (segmentId) {
+    if (parsed.automation.schemaType !== SchemaType.MARKETING_SEGMENT_MEMBERSHIP_CHANGE) {
+      console.error(
+        `SEGMENT_ID is only meaningful for a segment-membership trigger; this flow is ${parsed.automation.schemaType}`,
+      );
+      process.exit(1);
+    }
+    const trigger = parsed.automation.steps.find((s) => s.type === StepType.TRIGGER);
+    if (!trigger || !("nextId" in trigger) || !trigger.nextId) {
+      console.error(`SEGMENT_ID set but the parsed flow has no trigger to gate`);
+      process.exit(1);
+    }
+    const gateId = `segment_gate`;
+    const missId = `segment_gate_miss`;
+    parsed.automation.steps.push(
+      {
+        type: StepType.CONDITION,
+        id: gateId,
+        expression: {
+          dataSource: "trigger-data",
+          schemaBooleanExpression: {
+            type: "text_match",
+            field: "segment",
+            operator: "equals",
+            matchValues: [segmentId],
+          },
+        },
+        nextTrueId: trigger.nextId,
+        nextFalseId: missId,
+      },
+      { type: StepType.DO_NOTHING, id: missId },
+    );
+    trigger.nextId = gateId;
+    console.log(`      gated on segment ${segmentId}`);
+  }
+
   // Dump the parsed automation to disk for offline inspection + diagnostics.
   const dumpPath = `/tmp/mime-parsed-flow-${flowId}.json`;
   const { writeFileSync } = await import("node:fs");
@@ -154,10 +209,30 @@ async function main() {
     console.log(`      treeify: no merges detected`);
   }
 
+  // An inline-segment condition with no conditions matches everyone, so the
+  // branch silently always takes the true path. See vacuous-conditions.ts.
+  const vacuous = findVacuousConditions(parsed.automation.steps);
+  for (const v of vacuous) {
+    console.log(
+      `      vacuous condition: step ${v.id} matches everyone — always takes true ` +
+        `(${v.nextTrueId}); false branch (${v.falseBranchType} ${v.nextFalseId}) never runs`,
+    );
+  }
+
   // Stop before the import call — the diagnosis above is the whole output.
   if (diagnoseOnly) {
     console.log(`\nDIAGNOSE_ONLY=1 — stopping before import.`);
     return;
+  }
+
+  if (vacuous.length > 0 && !process.env.ALLOW_VACUOUS_CONDITIONS) {
+    console.error(
+      `\nRefusing to import: ${vacuous.length} condition step(s) carry no translatable ` +
+        `filter, so Redo would match every customer and silently take the true branch. ` +
+        `Resolve the filter (see the warnings above) or re-run with ` +
+        `ALLOW_VACUOUS_CONDITIONS=1 to import as-is.`,
+    );
+    process.exit(1);
   }
 
   console.log(`[5/5] importing into Redo...`);

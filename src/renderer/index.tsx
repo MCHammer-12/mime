@@ -5,6 +5,7 @@ import React from "react";
 import { EmailButton } from "./blocks/button.js";
 import { EmailColumn } from "./blocks/column.js";
 import { EmailDiscount } from "./blocks/discount.js";
+import { EmailFooter } from "./blocks/footer.js";
 import { EmailHeader } from "./blocks/header.js";
 import { EmailImage } from "./blocks/image.js";
 import { EmailLine } from "./blocks/line.js";
@@ -34,6 +35,7 @@ const componentMap: Record<EmailBlockType, React.NamedExoticComponent<any>> = {
   [EmailBlockType.SOCIALS]: EmailSocials,
   [EmailBlockType.DISCOUNT]: EmailDiscount,
   [EmailBlockType.PRODUCTS]: EmailProducts,
+  [EmailBlockType.FOOTER]: EmailFooter,
 };
 
 const defaultRenderContext: EmailRenderContextType = {

@@ -5,6 +5,7 @@
 //   KLAVIYO_API_KEY=... REDO_JWT=... TEMPLATE_ID=RBksgU \
 //     npx tsx src/flow/import-template-one.ts
 
+import { assertUpToDate } from "../git-freshness.js";
 import { fetchAccount } from "../fetch-account.js";
 import { klaviyo } from "../klaviyo.js";
 import { exportTemplateFromHtml } from "../export-template.js";
@@ -15,6 +16,8 @@ import {
 } from "../migrate/import-rpc.js";
 
 async function main() {
+  assertUpToDate();
+
   const klaviyoKey = process.env.KLAVIYO_API_KEY;
   const redoJwt = process.env.REDO_JWT;
   const templateId = process.env.TEMPLATE_ID;

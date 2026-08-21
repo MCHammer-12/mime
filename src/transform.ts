@@ -11,6 +11,7 @@ import type { KlaviyoAccount } from "./fetch-account.js";
 import { formatAddress } from "./fetch-account.js";
 import type {
   DiscountBlock,
+  FooterBlock,
   Section,
   TextBlock,
 } from "./renderer/types.js";
@@ -18,6 +19,7 @@ import {
   Alignment,
   EmailBlockType,
   EmailBuilderFontWeight,
+  Size,
 } from "./renderer/types.js";
 import { nextId } from "./parser/helpers.js";
 import { hasInlineCoupon, rewriteInlineCoupon } from "./ai-rewrite.js";
@@ -39,6 +41,15 @@ export interface TransformResult {
 export interface TransformOptions {
   /** Skip AI rewrites (for dev/testing without an API key). */
   skipAi?: boolean;
+  /**
+   * The flow's trigger is Redo's `custom_event`. That schema exposes only
+   * the customer fields plus `eventName` / `eventTimestamp` / `properties` —
+   * it does NOT spread the shared email fields, so `{{ unsubscribe_link }}`
+   * and `{{ view_in_browser_link }}` are rejected by createEmailTemplate
+   * even though they render fine at send time. Set this so the transform
+   * routes around the gap instead of shipping a template that 400s.
+   */
+  customEvent?: boolean;
 }
 
 export async function transformSections(
@@ -74,6 +85,8 @@ export async function transformSections(
       subs,
       warnings,
       skipAi: opts.skipAi === true,
+      customEvent: opts.customEvent === true,
+      canSwapFooter: true,
       usage,
       onRewrite: () => aiRewrites++,
     });
@@ -90,6 +103,9 @@ interface Ctx {
   subs: string[];
   warnings: string[];
   skipAi: boolean;
+  customEvent: boolean;
+  /** False inside a column cell — a FooterBlock is top-level only. */
+  canSwapFooter: boolean;
   usage: TransformResult["aiUsage"];
   onRewrite: () => void;
 }
@@ -102,6 +118,36 @@ async function transformBlock(
   if (block.type === EmailBlockType.TEXT) {
     const tb = block as TextBlock;
     const substitutedText = substituteTextVars(tb.text, ctx);
+    // Klaviyo's footer is a text block holding the unsubscribe sentence and
+    // the postal address. Under custom_event neither can ship as-is: the
+    // trigger schema doesn't expose {{ unsubscribe_link }} to the template
+    // validator. Redo's FOOTER block is the native equivalent — it reads the
+    // link off the schema instance (no Liquid, so nothing to validate) and
+    // regenerates the address from the team record.
+    if (
+      ctx.customEvent &&
+      ctx.canSwapFooter &&
+      /\{\{\s*unsubscribe_link\s*\}\}/.test(substitutedText)
+    ) {
+      ctx.warnings.push(
+        "replaced the Klaviyo unsubscribe/address text block with a Redo footer block (custom event trigger doesn't expose {{ unsubscribe_link }}); address now comes from the team record",
+      );
+      return [buildFooterFromTextBlock(tb)];
+    }
+    // Dropping the view-in-browser link leaves its lead-in behind
+    // ("Can't see this email? "), which reads as broken copy without the
+    // link it introduced. Only the lead-in is ever this short, so a text
+    // block that held the link and has almost nothing else goes with it.
+    if (
+      ctx.customEvent &&
+      hadViewInBrowserLink(tb.text) &&
+      visibleTextLength(substitutedText) < 60
+    ) {
+      ctx.warnings.push(
+        "dropped the view-in-browser text block (custom event trigger doesn't provide the link)",
+      );
+      return [];
+    }
     // If the substitution stripped a {% web_view %} (or similar) and the
     // host text block has nothing else, drop the block entirely so we don't
     // emit an empty Text block in Redo.
@@ -144,6 +190,33 @@ async function transformBlock(
     return [withSubs];
   }
 
+  // Image blocks under custom_event: Klaviyo builds product-recommendation
+  // and star-rating images out of `{{ product|lookup:'Image Url' }}` and
+  // `{% with %}` locals, none of which the trigger provides. A liquid URL
+  // that can't resolve renders as a broken image, so the block goes rather
+  // than shipping empty — the merchant rebuilds it against Redo's own
+  // product data.
+  if (ctx.customEvent && block.type === EmailBlockType.IMAGE) {
+    const img: any = { ...block };
+    const urlRoots = unresolvableCustomEventRoots(String(img.imageUrl ?? ""));
+    if (urlRoots.length > 0) {
+      ctx.warnings.push(
+        `dropped image block — its URL is built from {{ ${urlRoots.join(" }}, {{ ")} }}, which the custom event trigger doesn't provide`,
+      );
+      return [];
+    }
+    for (const field of ["altText", "clickthroughUrl"] as const) {
+      if (typeof img[field] !== "string") continue;
+      const roots = unresolvableCustomEventRoots(img[field]);
+      if (roots.length === 0) continue;
+      ctx.warnings.push(
+        `cleared image ${field} — referenced {{ ${roots.join(" }}, {{ ")} }}, not provided by the custom event trigger`,
+      );
+      img[field] = "";
+    }
+    return [img];
+  }
+
   // Button blocks: substitute {{ organization.url }} in link
   if (block.type === EmailBlockType.BUTTON) {
     const out: any = { ...block };
@@ -166,9 +239,11 @@ async function transformBlock(
     const out: any = { ...block };
     if (Array.isArray(out.columns)) {
       const newCols: any[] = [];
+      let hadContent = false;
       for (const col of out.columns) {
         if (!col) { newCols.push(null); continue; }
-        const transformed = await transformBlock(col, ctx);
+        hadContent = true;
+        const transformed = await transformBlock(col, { ...ctx, canSwapFooter: false });
         // Column cells can't hold multiple blocks; keep the first (the rewritten
         // text) and drop any inserted discount block with a console warning.
         if (transformed.length > 1) {
@@ -177,6 +252,14 @@ async function transformBlock(
           );
         }
         newCols.push(transformed[0] ?? null);
+      }
+      // Every cell dropped (Klaviyo's product-recommendation row under
+      // custom_event) — the wrapper is an empty grid, not a layout.
+      if (ctx.customEvent && hadContent && newCols.every((c) => c === null)) {
+        ctx.warnings.push(
+          "dropped a column block whose cells were all unresolvable under the custom event trigger",
+        );
+        return [];
       }
       out.columns = newCols;
     }
@@ -234,6 +317,23 @@ function buildDiscountFromTextBlock(tb: TextBlock): DiscountBlock {
   };
 }
 
+function buildFooterFromTextBlock(tb: TextBlock): FooterBlock {
+  return {
+    type: EmailBlockType.FOOTER,
+    blockId: nextId(),
+    sectionPadding: tb.sectionPadding,
+    sectionColor: tb.sectionColor,
+    horizontalPadding: Size.MEDIUM,
+    verticalPadding: Size.MEDIUM,
+    padding: tb.sectionPadding,
+    textColor: tb.textColor,
+    alignment: Alignment.CENTER,
+    fontSize: tb.fontSize,
+    fontFamily: tb.fontFamily,
+    schemaFieldName: "unsubscribeLink",
+  };
+}
+
 // ─── Text variable substitution (E1) ──────────────────────────────
 //
 // Order of operations matters:
@@ -261,6 +361,18 @@ const DROP_BLOCK_TAGS = [
   { name: "manage_preferences", re: /\{%\s*manage_preferences(?:\s+'[^']*')?\s*%\}/gi },
 ];
 
+// "View in browser" in each of the three forms Klaviyo emits it. Normally
+// these rewrite to {{ view_in_browser_link }}, but the custom_event schema
+// omits the shared email fields, so under that trigger the link is dropped
+// outright rather than rewritten into a variable createEmailTemplate rejects.
+const VIEW_IN_BROWSER_ANCHORS = [
+  { name: "web_view_link", body: "\\{%\\s*web_view_link\\s*%\\}" },
+  { name: "view_in_browser_link", body: "\\{\\{\\s*view_in_browser_link\\s*\\}\\}" },
+];
+const VIEW_IN_BROWSER_TAGS = [
+  { name: "web_view", re: /\{%\s*web_view(?:\s+'[^']*')?\s*%\}/gi },
+];
+
 // Pipe / dot / "or" separators between footer links. After dropping a
 // flanking link we strip ONE adjacent separator (prefer leading) so the
 // remaining footer reads cleanly.
@@ -282,6 +394,48 @@ const TEXT_VAR_MAP: Record<string, string> = {
   "person.id":           "redo_customer_id",
 };
 
+// The only roots Redo's custom_event trigger schema provides
+// (redo/flows/common/src/schemas/custom-events/custom-event.ts). Anything
+// else in a template body is a Klaviyo-only variable: left verbatim it
+// doesn't just render empty, it fails createEmailTemplate and blanks the
+// whole email — same failure mode as the `person.*` case below.
+const CUSTOM_EVENT_ROOTS = new Set([
+  "redo_customer_id",
+  "customer_email",
+  "customer_phone",
+  "customer_first_name",
+  "customer_last_name",
+  "event_name",
+  "event_timestamp",
+  "properties",
+  "cart_context",
+]);
+
+// Klaviyo event keys whose Redo property name isn't just the snake_case of
+// the Klaviyo label. Redo's Okendo webhook writes an earning transaction's
+// amount to `points` (the event name already carries the direction), so the
+// obvious `points_earned` would silently render empty. `First Name` is on
+// the schema proper, not in the properties bag.
+const EVENT_KEY_OVERRIDES: Record<string, string> = {
+  "points earned": "properties.points",
+  "first name": "customer_first_name",
+  "last name": "customer_last_name",
+  "email": "customer_email",
+};
+
+// Collect the roots in `s` that the custom_event trigger can't provide.
+// Used to decide whether an image URL / alt text is salvageable.
+function unresolvableCustomEventRoots(s: string): string[] {
+  const found = new Set<string>();
+  for (const m of s.matchAll(
+    /\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*(?:\|[^}]*)?\}\}/g,
+  )) {
+    const root = m[1]!.split(".")[0]!;
+    if (!CUSTOM_EVENT_ROOTS.has(root)) found.add(root);
+  }
+  return [...found];
+}
+
 // Resolve one Liquid `{{ varPath|filters }}` token against TEXT_VAR_MAP.
 // Returns a replacement `token`, a replacement `literal`, or null meaning
 // "not ours — leave the source verbatim". Shared by the subject/preview path
@@ -289,14 +443,19 @@ const TEXT_VAR_MAP: Record<string, string> = {
 function resolveTextVar(
   varPath: string,
   filters: string,
+  customEvent = false,
 ): { token?: string; literal?: string; note: string } | null {
   // Klaviyo's older `{{ person|lookup:"first_name" }}` dialect is the same as
-  // `{{ person.first_name }}` — normalize before the map lookup.
+  // `{{ person.first_name }}` — normalize before the map lookup. The key can
+  // be any Klaviyo property label, including one with spaces
+  // (`{{ event|lookup:'Coupon Code' }}`), so match anything but the quote.
   let path = varPath;
   let rest = filters;
-  const lookup = /^\s*\|\s*lookup\s*:\s*["']\$?([\w.]+)["']/.exec(filters);
+  let lookupKey: string | null = null;
+  const lookup = /^\s*\|\s*lookup\s*:\s*["']\$?([^"']+)["']/.exec(filters);
   if (lookup && (varPath === "person" || varPath === "event")) {
-    path = `${varPath}.${lookup[1]}`;
+    lookupKey = lookup[1]!;
+    path = `${varPath}.${lookupKey}`;
     rest = filters.slice(lookup[0].length).trim();
   }
 
@@ -305,6 +464,21 @@ function resolveTextVar(
     return {
       token: `{{ ${mapped}${rest ? " " + rest : ""} }}`,
       note: `{{ ${varPath} }} → {{ ${mapped} }}`,
+    };
+  }
+
+  // Klaviyo event properties. Redo puts the whole event payload under
+  // `properties`, addressed with dot notation, so `{{ event|lookup:'Points
+  // Spent' }}` becomes `{{ properties.points_spent }}`. Only meaningful
+  // under the custom_event trigger — every other schema exposes its event
+  // data as first-class fields instead.
+  if (customEvent && lookupKey && varPath === "event") {
+    const key = lookupKey.trim().toLowerCase();
+    const target =
+      EVENT_KEY_OVERRIDES[key] ?? `properties.${key.replace(/\W+/g, "_")}`;
+    return {
+      token: `{{ ${target}${rest ? " " + rest : ""} }}`,
+      note: `{{ event|lookup:'${lookupKey}' }} → {{ ${target} }}`,
     };
   }
 
@@ -324,6 +498,24 @@ function resolveTextVar(
     };
   }
 
+  // Same reasoning one schema wider: under custom_event anything outside
+  // CUSTOM_EVENT_ROOTS fails createEmailTemplate, so resolve it to its own
+  // `default:` value rather than losing the entire email over one token.
+  // `unsubscribe_link` is the deliberate exception — transformBlock swaps
+  // its host text block for a Redo FOOTER block, and needs the token intact
+  // to find it.
+  if (customEvent && varPath !== "unsubscribe_link") {
+    const root = path.split(".")[0]!;
+    if (!CUSTOM_EVENT_ROOTS.has(root)) {
+      const def = /\|\s*default\s*:\s*(['"])(.*?)\1/.exec(rest);
+      const literal = def ? def[2]! : "";
+      return {
+        literal,
+        note: `{{ ${varPath} }} → ${literal ? `"${literal}"` : "(empty)"} — not provided by the custom event trigger`,
+      };
+    }
+  }
+
   return null;
 }
 
@@ -335,7 +527,12 @@ function resolveTextVar(
  */
 export function substituteStringVars(
   text: string,
-  ctx: { orgName: string; orgAddress: string; orgUrl: string },
+  ctx: {
+    orgName: string;
+    orgAddress: string;
+    orgUrl: string;
+    customEvent?: boolean;
+  },
   subs?: string[],
 ): string {
   let result = text;
@@ -368,7 +565,7 @@ export function substituteStringVars(
   result = result.replace(
     /\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*(\|[^}]*)?\}\}/g,
     (full, varPath: string, filters = "") => {
-      const r = resolveTextVar(varPath, filters);
+      const r = resolveTextVar(varPath, filters, ctx.customEvent === true);
       if (!r) return full;
       note(r.note);
       return r.token ?? r.literal ?? "";
@@ -481,7 +678,10 @@ function substituteTextVars(html: string, ctx: Ctx): string {
 
 function dropUnsupportedAnchors(html: string, ctx: Ctx): string {
   let result = html;
-  for (const { name, body } of DROP_ANCHOR_PATTERNS) {
+  const patterns = ctx.customEvent
+    ? [...DROP_ANCHOR_PATTERNS, ...VIEW_IN_BROWSER_ANCHORS]
+    : DROP_ANCHOR_PATTERNS;
+  for (const { name, body } of patterns) {
     const anchor = `<a\\s[^>]*href="[^"]*${body}[^"]*"[^>]*>[^<]*</a>`;
     let count = 0;
     // Leading separator + anchor (e.g. "Unsubscribe | Update Preferences")
@@ -516,7 +716,10 @@ function dropUnsupportedAnchors(html: string, ctx: Ctx): string {
 
 function dropUnsupportedBlockTags(html: string, ctx: Ctx): string {
   let result = html;
-  for (const { name, re } of DROP_BLOCK_TAGS) {
+  const tags = ctx.customEvent
+    ? [...DROP_BLOCK_TAGS, ...VIEW_IN_BROWSER_TAGS]
+    : DROP_BLOCK_TAGS;
+  for (const { name, re } of tags) {
     let count = 0;
     result = result.replace(re, () => {
       count++;
@@ -535,7 +738,7 @@ function mapProfileVars(html: string, ctx: Ctx): string {
   return html.replace(
     /\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*(\|[^}]*)?\}\}/g,
     (full, varPath: string, filters = "") => {
-      const r = resolveTextVar(varPath, filters);
+      const r = resolveTextVar(varPath, filters, ctx.customEvent);
       if (!r) return full;
       ctx.subs.push(r.note);
       return r.token ?? r.literal ?? "";
@@ -561,12 +764,23 @@ function cleanupAfterDrops(html: string): string {
 }
 
 function isEffectivelyEmpty(html: string): boolean {
-  const stripped = html
+  return visibleTextLength(html) === 0;
+}
+
+function visibleTextLength(html: string): number {
+  return html
     .replace(/<[^>]+>/g, "")
     .replace(/&nbsp;/gi, "")
     .replace(/\s+/g, "")
-    .trim();
-  return stripped.length === 0;
+    .trim().length;
+}
+
+function hadViewInBrowserLink(html: string): boolean {
+  return (
+    /\{%\s*web_view/i.test(html) ||
+    /\{%\s*web_view_link\s*%\}/i.test(html) ||
+    /\{\{\s*view_in_browser_link\s*\}\}/i.test(html)
+  );
 }
 
 function substituteOrgUrlInHtml(html: string, ctx: Ctx): string {

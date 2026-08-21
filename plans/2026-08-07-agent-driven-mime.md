@@ -45,6 +45,22 @@ hand-finishes the rest.
   and `apps/` + `mcp/` (real compute). mime's engine needs the second; the judgment
   layer belongs in the first.
 
+**Model revised (2026-08-20, after Michael/Matt conversation):**
+- **Distribution** — Tobot 2.0 becomes a **shared git repo each Redo operator runs
+  locally**, not a Replit app. The agency never runs it; they get a shared Notion doc
+  as the feedback surface, and that feedback enters a run the same way a call
+  transcript does (S2).
+- **This collapses S7.** The MCP server existed to bridge a gap that no longer exists:
+  the tool lived on Replit, away from the agent. Local repo + Claude Code means the
+  agent already has the code, the shell, and the filesystem. What survives of S7 is the
+  **skills** door (judgment, shared team-wide via `.agents/skills/`) — the engine door
+  does not need building. Revisit only if a non-Claude-Code caller appears.
+- **Credentials** — merchant Klaviyo keys likely resolve from **Beacon** rather than
+  per-run env. Unverified; see Open questions.
+- **The loop is self-optimizing (S8).** Every ambiguity Claude resolves with a human is
+  written back into the deterministic code, so the next merchant never asks it again.
+  This is the point of the whole design, and it is new — see S8.
+
 ## Approach
 
 Three layers, in dependency order.
@@ -165,6 +181,48 @@ Only after a full merchant migration has run agent-driven. Split by door:
 - **Skills** (`.agents/skills/`) — the judgment: how to read a transcript into a manifest,
   how to resolve a trigger question, how to pick a font substitution.
 - **MCP server** (`apps/` or `mcp/`) — the engine: parse, render, import primitives.
+
+### S8 — Write-back loop *(the self-optimizing part)*
+
+A resolved question must not stay resolved only for this merchant. Each one closes
+twice: **import it**, then **teach the deterministic code**, so coverage ratchets up and
+`needs_input` volume trends down without anyone maintaining a backlog.
+
+**The rule that keeps this from poisoning the codebase.** Two things look identical at
+the moment of asking and must never be written back the same way:
+
+| | Example | Where it goes |
+|---|---|---|
+| **Mapping** — a Klaviyo construct → Redo construct fact, true for every merchant | `{% unsubscribe %}` → `FOOTER` block; Klaviyo segment trigger → gate step | **the code**, plus a smoke case |
+| **Merchant fact** — true for this store only | which Redo segment mirrors the Klaviyo one; discount prefix `RE`; store id | **the run manifest**, never the code |
+
+Getting this backwards is the main way the design fails: one merchant's specifics
+harden into everyone's parser. Note this is a *different* axis from
+`mechanical | merchant_visible` — that one decides whether to **ask**, this one decides
+whether to **write back**.
+
+**Definition of done for a write-back:** the mapping lands in a keyed registry (not a
+`switch` — five operators committing mappings from local clones will conflict on a
+switch and won't on a keyed literal), *and* a `*.smoke.ts` case pins it. The repo
+convention already supports this; `EVENT_KEY_OVERRIDES` in
+[`src/transform.ts`](../src/transform.ts) is roughly the right shape to generalize.
+
+**The scoreboard.** "99% of cases" is only a claim if it's counted. The manifest records
+per item whether it was `auto | agent_resolved | human_asked`; the trend in
+`human_asked` across merchants is the measurement, and it falls out of the S1 result
+contract for free.
+
+**Precedent — the loop already ran three times (2026-08-12 → 08-20, Relay Goods):**
+- ✅ custom_event templates 400'd on unavailable variables → resolved with Michael, written
+  back as the FOOTER block + view-in-browser drop (`711e482`). Mapping.
+- ✅ Klaviyo segment trigger has no Redo equivalent that names a segment → written back as
+  the `SEGMENT_ID` gate (`49704b5`), with the segment id kept as a per-run **input**.
+  Correct split: mechanism to code, merchant fact to manifest.
+- ❌ An untranslatable Klaviyo profile-property filter emitted an **empty** inline-segment
+  condition, which Redo evaluates as vacuously true — silently taking the wrong branch and
+  killing a downstream email with no error. Patched in the merchant's data, **not** in the
+  code. Still open, and it is the dangerous class: wrong output, no warning. Highest-value
+  first write-back.
 
 ## First run — Piperblue Makeup (2026-08-10)
 
@@ -497,9 +555,15 @@ Felicity for triggers, Blackline for fonts.
   - **An "Unknown block" warning is a coverage gap, not noise.** Both bugs were visible
     in warnings nobody read — one of them emitted no warning at all. The run manifest
     should surface unknown/dropped blocks as a first-class result, not a log line.
-- **Repo boundary** — mime is `MCHammer-12/mime` (personal), internal-tools is
-  `redoapp/` (org). S7 either ports mime in or has internal-tools wrap it. Deferred
-  until a real run tells us how much of mime the surface actually needs.
-- **Credential handling** — merchant Klaviyo keys and Redo JWTs are per-run inputs. Once
-  this runs from internal-tools rather than a local shell, they need somewhere real to
-  live. Not urgent while local; blocking before S7.
+- ~~**Repo boundary**~~ — closed *(2026-08-20)*. Stays a standalone shared repo that
+  operators clone and run locally; no port into internal-tools, no MCP server. Skills
+  are the only piece that ships through `.agents/skills/`.
+- **Credential handling** — Michael expects merchant Klaviyo keys to live in **Beacon**.
+  Unverified: whether Beacon exposes a read path an operator's local run can call, and
+  whether Redo JWTs belong there too or stay minted per-run via jwt-bandit. Answer before
+  the repo goes multi-operator — today keys are pasted into a shell, and merchant keys
+  have leaked into transcripts once already this year.
+- **Feedback surface** — a shared Notion doc is the agency's channel. Open: who converts
+  a Notion entry into a run, and whether the resolution log lives in Notion (visible to
+  the agency) or in the repo next to the mapping (where it becomes a test case). These
+  want different homes; probably both, with the repo as source of truth.

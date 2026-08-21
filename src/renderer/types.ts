@@ -22,6 +22,7 @@ export enum EmailBlockType {
   SOCIALS = "socials",
   DISCOUNT = "discount",
   PRODUCTS = "interactive-cart",
+  FOOTER = "footer",
 }
 
 export enum Size {
@@ -281,6 +282,26 @@ export interface DiscountBlock extends BaseBlock {
   discountId?: string;
 }
 
+/**
+ * Redo's native unsubscribe element. It reads the link off the schema
+ * instance (`schemaFieldName`) instead of a Liquid token, and pulls the
+ * postal address from the team record — so it survives triggers whose
+ * schema doesn't expose `{{ unsubscribe_link }}` to the template-variable
+ * validator. Top-level only; not valid inside a column.
+ */
+export interface FooterBlock extends BaseBlock {
+  type: EmailBlockType.FOOTER;
+  horizontalPadding: Size;
+  verticalPadding: Size;
+  padding: Padding;
+  textColor: string;
+  alignment: Alignment;
+  fontSize?: number;
+  fontFamily?: string;
+  schemaFieldName?: string;
+  useTemplateAddress?: boolean;
+}
+
 // ---------------------------- Products block ----------------------------
 
 export interface InlineButton {
@@ -383,7 +404,11 @@ export interface ColumnBlock extends BaseBlock {
   columnWidths?: number[] | null;
 }
 
-export type Section = NonRecursiveBlock | ColumnBlock | ProductsBlock;
+export type Section =
+  | NonRecursiveBlock
+  | ColumnBlock
+  | ProductsBlock
+  | FooterBlock;
 
 // ---------------------------- Hydrated types ----------------------------
 
@@ -420,6 +445,7 @@ export namespace Section {
   export type Socials = SocialsBlock;
   export type Discount = DiscountBlock;
   export type Products = ProductsBlock;
+  export type Footer = FooterBlock;
 }
 
 export type HttpsUrl = `https://${string}`;

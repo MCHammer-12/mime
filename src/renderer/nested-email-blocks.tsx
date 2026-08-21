@@ -39,4 +39,6 @@ export const nestedEmailBlocks: Record<
     useMjmlTextWrapper: true,
   },
   [EmailBlockType.PRODUCTS]: undefined,
+  // Footer is top-level only — never nested inside a column.
+  [EmailBlockType.FOOTER]: undefined,
 };
