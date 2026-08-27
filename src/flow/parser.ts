@@ -11,7 +11,7 @@ import type { TemplateResolver } from "./template-resolver.js";
 import { collapseConsentSplits } from "./flatten.js";
 import { treeifyFlow } from "./treeify.js";
 import { resolveTrigger, summarizeTriggerFilter, type TriggerResolution } from "./trigger-mapping.js";
-import { rewriteKlaviyoLiquid } from "./variable-mapping.js";
+import { rewriteKlaviyoLiquid, sanitizeTemplateLiquid } from "./variable-mapping.js";
 import { substituteStringVars } from "../transform.js";
 import { formatAddress, type KlaviyoAccount } from "../fetch-account.js";
 import {
@@ -291,6 +291,21 @@ async function convertAction(
         } else {
           fullTemplate = resolved.template;
           templateWarnings.push(...resolved.warnings);
+          // Klaviyo Liquid that survived the HTML parse (logo clickthroughs,
+          // hand-rolled cart cards) 400s createEmailTemplate and takes the
+          // whole flow with it. Resolve what we can, drop what we can't.
+          const sanitized = sanitizeTemplateLiquid(
+            fullTemplate.sections,
+            id,
+            warnings,
+            flowSchemaType,
+            account,
+          );
+          if (sanitized.unmappedTokens.length > 0 || sanitized.unresolvableTags.length > 0) {
+            templateWarnings.push(
+              `Dropped Klaviyo-only Liquid: ${[...sanitized.unmappedTokens, ...sanitized.unresolvableTags].join(", ")}`,
+            );
+          }
           // Carry through per-step metadata onto the template so the
           // importer uses Klaviyo's subject/from/preview instead of the
           // HTML parser's defaults. Run org / shop / customer-profile
@@ -384,7 +399,7 @@ async function convertAction(
       // event vars → Redo schema-instance vars).
       const msg = action.data?.message ?? {};
       const rawBody = String(msg.body ?? "");
-      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id, flowSchemaType);
+      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id, flowSchemaType, account);
       const content = bodyResult.output;
 
       // No body at all is unusual but happens for Klaviyo AI-content templates
@@ -485,8 +500,8 @@ async function convertAction(
       // supports templating) and body. Rewriter returns the unmapped token
       // list; we use that to decide whether the webhook is an "enrichment"
       // payload that can't be salvaged vs. a simple integration webhook.
-      const urlResult = rewriteKlaviyoLiquid(rawUrl, warnings, id, flowSchemaType);
-      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id, flowSchemaType);
+      const urlResult = rewriteKlaviyoLiquid(rawUrl, warnings, id, flowSchemaType, account);
+      const bodyResult = rewriteKlaviyoLiquid(rawBody, warnings, id, flowSchemaType, account);
       const totalUnmapped =
         urlResult.unmappedTokens.length + bodyResult.unmappedTokens.length;
 
@@ -507,7 +522,7 @@ async function convertAction(
       const headers = Object.entries(headersObj).map(([key, value]) => {
         // Headers are also Liquid-templated in Redo. Rewrite them, but do
         // NOT add to the unmapped count (already counted url + body).
-        const hResult = rewriteKlaviyoLiquid(String(value), warnings, id, flowSchemaType);
+        const hResult = rewriteKlaviyoLiquid(String(value), warnings, id, flowSchemaType, account);
         return { key, value: hResult.output };
       });
       const step: SendWebhookStep = {

@@ -197,6 +197,21 @@ async function main() {
   writeFileSync(dumpPath, JSON.stringify(parsed.automation, null, 2), "utf8");
   console.log(`      (dumped to ${dumpPath})`);
 
+  // Placeholder templates carry the rewritten email/SMS bodies — the payloads
+  // createEmailTemplate/createSmsTemplate reject when a Liquid token survives
+  // the rewrite. They're not part of `automation`, so dump them alongside it.
+  const tplDumpPath = `/tmp/mime-parsed-templates-${flowId}.json`;
+  writeFileSync(
+    tplDumpPath,
+    JSON.stringify(
+      { email: parsed.placeholderTemplates, sms: parsed.placeholderSmsTemplates },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  console.log(`      (templates dumped to ${tplDumpPath})`);
+
   for (const w of parsed.warnings) {
     console.log(`      ${w.kind}: ${w.message}${w.actionId ? ` (action ${w.actionId})` : ""}`);
   }
