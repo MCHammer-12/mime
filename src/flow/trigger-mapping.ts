@@ -92,6 +92,17 @@ const METRIC_NAME_MAP: Record<
   "placed order":       { key: OrderTrackingTriggerKey.ORDER_CREATED,  schemaType: SchemaType.ORDER_TRACKING,                 category: "Order tracking" },
   "ordered product":    { key: OrderTrackingTriggerKey.ORDER_CREATED,  schemaType: SchemaType.ORDER_TRACKING,                 category: "Order tracking" },
 
+  // ─── Marketing consent (metric-triggered signup flows) ────────────
+  // Klaviyo can trigger a welcome flow two ways: "Added to List" (handled by
+  // resolveListTrigger) or directly off the consent metric. Only the MARKETING
+  // consent metrics map — "Text Messaging Transactional" is transactional
+  // consent, and a bare "Subscribed to List" doesn't say which list, so both
+  // stay unmapped rather than guess.
+  "subscribed to text messaging marketing": { key: MarketingTriggerKey.SMS_SIGNUP,   schemaType: SchemaType.SMS_MARKETING_SIGNUP,   category: "Marketing" },
+  "consented to receive sms":               { key: MarketingTriggerKey.SMS_SIGNUP,   schemaType: SchemaType.SMS_MARKETING_SIGNUP,   category: "Marketing" },
+  "subscribed to sms marketing":            { key: MarketingTriggerKey.SMS_SIGNUP,   schemaType: SchemaType.SMS_MARKETING_SIGNUP,   category: "Marketing" },
+  "subscribed to email marketing":          { key: MarketingTriggerKey.EMAIL_SIGNUP, schemaType: SchemaType.EMAIL_MARKETING_SIGNUP, category: "Marketing" },
+
   // ─── Order Tracking — full set ────────────────────────────────────
   // Klaviyo's shipment events vary by source (Shopify Klaviyo integration,
   // Aftership, ShipBob, etc.). The names here cover the common patterns;
