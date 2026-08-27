@@ -103,6 +103,46 @@ text also raises a `recovered only N% of its text` warning at import.
 — any low-coverage document routes there, so CODE-parser changes now affect
 draggable templates too.
 
+## 7. `X uses {{ organization }} / {{ event }}, which the <T> trigger doesn't provide`
+**Cause:** a Klaviyo Liquid token survived the rewrite and reached Redo verbatim.
+Redo validates every token in a template against the flow's trigger schema and
+rejects the **whole template** on one unknown root — so a single leaked token
+kills the entire flow import. The error names only the root (`event`,
+`organization`), never the full path.
+**Where it leaks:** `rewriteKlaviyoLiquid` (`src/flow/variable-mapping.ts`) used to
+return unmapped tokens verbatim; email templates never went through it at all, so
+logo `clickthroughUrl`s and hand-rolled product cards passed straight through.
+**Fixed 2026-08-27:**
+- `organization.*` are merchant constants → resolved to literals from the Klaviyo
+  account at parse time (`resolveOrgToken`).
+- `event.URL` on a cart-abandonment trigger → `checkout_url`.
+- Anything else under `person` / `event` / `organization` → dropped to empty +
+  warned, rather than passed through.
+- Email templates get the same pass via `sanitizeTemplateLiquid`, which deep-walks
+  `fullTemplate.sections`; Klaviyo-only *output* tags (`{% currency_format %}`) are
+  dropped, control tags left alone so their closers aren't orphaned.
+First cases: Bailey's Blossoms `SUC5Sq`, `VrGhTY`, `X4gqFj`.
+
+**Finding out what a trigger actually provides:** probe `createSmsTemplate` with a
+content string of candidate tokens plus one deliberate junk token
+(`{{ zzz_probe_bad }}`) so the call always 400s and never creates anything. The
+error enumerates every rejected root, so one request maps the whole surface:
+```
+curl -sS -X POST https://app-server.getredo.com/marketing-rpc/createSmsTemplate \
+  -H "Authorization: $JWT" -H 'Content-Type: application/json' \
+  -d '{"input":{"template":{"team":"<id>","name":"zz-probe","content":"{{ a }} {{ b }} {{ zzz_probe_bad }}","templateType":"marketing","category":"Marketing","schemaType":"<schema>"}}}'
+```
+
+**Known remaining gap:** a product card the merchant hand-built out of raw
+`event.*` Liquid (image URL + name + price) has no deterministic mapping. The
+tokens are dropped so the flow imports, and the warning names them — the operator
+rebuilds it as a Redo products block.
+
+**Orphan cleanup after a failed run:** `createEmailTemplate` failures fall back to
+a `[Placeholder] …` template that IS created, so a retry duplicates them. Delete
+them first — `POST /marketing-rpc/deleteEmailTemplate {"input":{"emailTemplateId":"<id>"}}`
+(SMS: `deleteSmsTemplate {"input":{"id":"<id>"}}`). SMS failures create nothing.
+
 ## Re-run mechanics
 - `src/flow/import-one.ts` re-fetches the flow from Klaviyo, re-parses with CURRENT
   code, re-creates templates, and posts `createAdvancedFlow`. `DIAGNOSE_ONLY=1`
