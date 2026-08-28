@@ -193,6 +193,21 @@ export interface CustomEventTriggerFields {
   }>;
 }
 
+/**
+ * Redo's native per-flow re-entry limit, stored on the TRIGGER step
+ * (redoapp `frequencyCapSchema` in advanced-flow-db-parser.ts). Absent
+ * means "no limit" — the two stored modes are the ones that restrict:
+ *   NO_REENTRY — a profile may enter this flow exactly once, ever.
+ *   COOLDOWN   — a profile may re-enter after value/unit has elapsed.
+ *
+ * This is the exact equivalent of Klaviyo's `definition.reentry_criteria`
+ * and its `profile-not-in-flow` profile filter, so both translate natively
+ * rather than being approximated as a skip condition.
+ */
+export type FrequencyCap =
+  | { mode: "NO_REENTRY" }
+  | { mode: "COOLDOWN"; value: number; unit: WaitTimeUnit };
+
 export interface TriggerStep extends BaseStep {
   type: StepType.TRIGGER;
   schemaType: SchemaType;
@@ -204,6 +219,8 @@ export interface TriggerStep extends BaseStep {
     conditions: unknown[];
   };
   shouldSkipSmartSending?: boolean;
+  // Klaviyo `reentry_criteria` / `profile-not-in-flow`. Omitted = no limit.
+  frequencyCap?: FrequencyCap;
   // Required by Redo for the custom_event trigger; omitted for others. Must
   // match the event name the merchant's integration actually sends.
   eventName?: string;

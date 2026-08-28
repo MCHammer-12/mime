@@ -4,10 +4,11 @@
  *   npx tsx src/flow/flow-reentry-criteria.smoke.ts
  *
  * Klaviyo's reentry_criteria says "wait N days before letting the same
- * profile re-enter THIS flow". Redo has no native field for this, so the
- * parser approximates it as a received-email skip condition in the
- * window. These tests lock in the approximation shape + warning text and
- * verify the absent-field case is a clean no-op.
+ * profile re-enter THIS flow". Redo's native equivalent is `frequencyCap`
+ * on the trigger step, so this translates exactly (no approximation, no
+ * review warning). Klaviyo surfaces the same setting a second way — a
+ * `profile-not-in-flow` condition in `profile_filter` — which must also
+ * land on frequencyCap and must NOT produce a manual-review warning.
  */
 import { parseFlow } from "./parser.js";
 import { MARKETING_TRIGGER_OPTIONS } from "./marketing-trigger-options.js";
@@ -23,6 +24,7 @@ function assert(cond: boolean, msg: string): void {
 function buildFlow(opts: {
   reentry?: { duration: number; unit: string } | null;
   triggerFilter?: unknown;
+  notInFlow?: boolean;
 }): KlaviyoFlow {
   return {
     data: {
@@ -39,6 +41,13 @@ function buildFlow(opts: {
           }],
           actions: [],
           ...(opts.reentry !== undefined ? { reentry_criteria: opts.reentry as any } : {}),
+          ...(opts.notInFlow
+            ? {
+                profile_filter: {
+                  condition_groups: [{ conditions: [{ type: "profile-not-in-flow" }] }],
+                },
+              }
+            : {}),
         } as any,
       },
     },
@@ -48,76 +57,96 @@ function buildFlow(opts: {
 const cart = MARKETING_TRIGGER_OPTIONS.find((o) => o.value === "cart_abandonment");
 if (!cart) throw new Error("cart_abandonment trigger option missing");
 
+const trigger = (r: any) => r.automation?.steps.find((s: any) => s.type === "trigger") as any;
+
 async function main() {
-  // ─── reentry_criteria present (30 days, BA-style) ─────────────────────
+  // ─── reentry_criteria present (30 days, BA-style) → COOLDOWN ──────────
   {
     const flow = buildFlow({ reentry: { duration: 30, unit: "day" } });
     const r = await parseFlow(flow, {}, { teamId: "t", forcedTrigger: cart.resolution });
-    const trig = r.automation?.steps.find((s) => s.type === "trigger") as any;
+    const trig = trigger(r);
+    assert(
+      JSON.stringify(trig?.frequencyCap) ===
+        JSON.stringify({ mode: "COOLDOWN", value: 30, unit: "Days" }),
+      `30-day reentry → COOLDOWN 30 Days, got ${JSON.stringify(trig?.frequencyCap)}`,
+    );
+    // The old approximation must be gone — no received-email skip, no warning.
     const skipConditions = trig?.skipConditions?.conditions ?? [];
-    const reentrySkip = skipConditions.find(
-      (c: any) =>
-        c.dataSource === "inline-segment" &&
-        c.inlineSegment?.conditions?.[0]?.activityType === "received-email",
-    );
-    assert(!!reentrySkip, "30-day reentry → received-email skip condition emitted");
-    const inner = reentrySkip.inlineSegment.conditions[0];
     assert(
-      inner.count.type === "at_least_once",
-      `count is at_least_once, got ${JSON.stringify(inner.count)}`,
+      !skipConditions.some(
+        (c: any) => c.inlineSegment?.conditions?.[0]?.activityType === "received-email",
+      ),
+      "reentry no longer emits a received-email skip approximation",
     );
     assert(
-      inner.timeframe.type === "before-now-relative" &&
-        inner.timeframe.value === 30 &&
-        inner.timeframe.units === "day",
-      `timeframe is 30 days before now, got ${JSON.stringify(inner.timeframe)}`,
-    );
-    const w = r.warnings.find((x) => x.message.includes("reentry_criteria"));
-    assert(!!w, "warning emitted explaining the approximation");
-    assert(
-      !!w && w.message.includes("30 days") && w.message.includes("broader"),
-      `warning calls out duration + broader scope, got: ${w?.message}`,
+      !r.warnings.some((x) => x.message.includes("reentry_criteria")),
+      "native frequencyCap → no manual-review warning",
     );
   }
 
-  // ─── reentry_criteria absent → no received-email skip, no warning ─────
+  // ─── unit "alltime" → NO_REENTRY ──────────────────────────────────────
+  {
+    const flow = buildFlow({ reentry: { duration: 1, unit: "alltime" } });
+    const r = await parseFlow(flow, {}, { teamId: "t", forcedTrigger: cart.resolution });
+    assert(
+      JSON.stringify(trigger(r)?.frequencyCap) === JSON.stringify({ mode: "NO_REENTRY" }),
+      `alltime reentry → NO_REENTRY, got ${JSON.stringify(trigger(r)?.frequencyCap)}`,
+    );
+  }
+
+  // ─── hour / minute units carry through ────────────────────────────────
+  for (const [unit, expected] of [["hour", "Hours"], ["minute", "Minutes"]] as const) {
+    const flow = buildFlow({ reentry: { duration: 6, unit } });
+    const r = await parseFlow(flow, {}, { teamId: "t", forcedTrigger: cart.resolution });
+    assert(
+      trigger(r)?.frequencyCap?.unit === expected,
+      `unit "${unit}" → ${expected}, got ${JSON.stringify(trigger(r)?.frequencyCap)}`,
+    );
+  }
+
+  // ─── profile-not-in-flow alone → NO_REENTRY, silently ─────────────────
+  {
+    const flow = buildFlow({ notInFlow: true });
+    const r = await parseFlow(flow, {}, { teamId: "t", forcedTrigger: cart.resolution });
+    assert(
+      JSON.stringify(trigger(r)?.frequencyCap) === JSON.stringify({ mode: "NO_REENTRY" }),
+      `profile-not-in-flow → NO_REENTRY, got ${JSON.stringify(trigger(r)?.frequencyCap)}`,
+    );
+    assert(
+      !r.warnings.some((x) => x.message.includes("profile-not-in-flow")),
+      "profile-not-in-flow is handled natively, so it must not warn",
+    );
+  }
+
+  // ─── reentry_criteria wins over profile-not-in-flow (they agree) ──────
+  {
+    const flow = buildFlow({ reentry: { duration: 7, unit: "day" }, notInFlow: true });
+    const r = await parseFlow(flow, {}, { teamId: "t", forcedTrigger: cart.resolution });
+    assert(
+      JSON.stringify(trigger(r)?.frequencyCap) ===
+        JSON.stringify({ mode: "COOLDOWN", value: 7, unit: "Days" }),
+      `both present → the explicit interval wins, got ${JSON.stringify(trigger(r)?.frequencyCap)}`,
+    );
+  }
+
+  // ─── reentry_criteria absent → no frequencyCap at all ─────────────────
   {
     const flow = buildFlow({});
     const r = await parseFlow(flow, {}, { teamId: "t", forcedTrigger: cart.resolution });
-    const trig = r.automation?.steps.find((s) => s.type === "trigger") as any;
-    const skipConditions = trig?.skipConditions?.conditions ?? [];
-    const reentrySkip = skipConditions.find(
-      (c: any) =>
-        c.dataSource === "inline-segment" &&
-        c.inlineSegment?.conditions?.[0]?.activityType === "received-email",
+    assert(trigger(r)?.frequencyCap === undefined, "no reentry_criteria → field omitted");
+    assert(
+      !r.warnings.some((x) => x.message.includes("reentry_criteria")),
+      "no warning when reentry_criteria absent",
     );
-    assert(!reentrySkip, "no reentry_criteria → no received-email skip");
-    const w = r.warnings.find((x) => x.message.includes("reentry_criteria"));
-    assert(!w, "no warning when reentry_criteria absent");
   }
 
-  // ─── reentry_criteria with zero / invalid duration → no skip ─────────
+  // ─── zero / negative duration → no frequencyCap ───────────────────────
   for (const bad of [{ duration: 0, unit: "day" }, { duration: -5, unit: "day" }]) {
     const flow = buildFlow({ reentry: bad });
     const r = await parseFlow(flow, {}, { teamId: "t", forcedTrigger: cart.resolution });
-    const trig = r.automation?.steps.find((s) => s.type === "trigger") as any;
-    const skipConditions = trig?.skipConditions?.conditions ?? [];
-    const reentrySkip = skipConditions.find(
-      (c: any) =>
-        c.dataSource === "inline-segment" &&
-        c.inlineSegment?.conditions?.[0]?.activityType === "received-email",
-    );
-    assert(!reentrySkip, `duration=${bad.duration} → no skip emitted`);
-  }
-
-  // ─── singular unit grammar (1 hour, not 1 hours) ──────────────────────
-  {
-    const flow = buildFlow({ reentry: { duration: 1, unit: "hour" } });
-    const r = await parseFlow(flow, {}, { teamId: "t", forcedTrigger: cart.resolution });
-    const w = r.warnings.find((x) => x.message.includes("reentry_criteria"));
     assert(
-      !!w && w.message.includes("1 hour") && !w.message.includes("1 hours"),
-      `singular unit "1 hour", got: ${w?.message}`,
+      trigger(r)?.frequencyCap === undefined,
+      `duration=${bad.duration} → no frequencyCap emitted`,
     );
   }
 

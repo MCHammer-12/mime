@@ -21,6 +21,12 @@ const METRIC_TO_ACTIVITY: Record<string, string> = {
   "checkout started":  "checkout-started",
   "active on site":    "active-on-site",
   "viewed collection": "collection-viewed",
+  // Redo's CustomerActivityType has no fulfillment activity (verified
+  // against redoapp segment-types.ts). "Fulfilled Order" only ever fires
+  // for a profile that already placed an order, so order-placed is the
+  // closest available proxy — it over-matches on orders that were placed
+  // but never fulfilled. Flows land inactive, so this gets reviewed.
+  "fulfilled order": "order-placed",
 };
 
 const TIMEFRAME_UNITS: Record<string, string> = {
@@ -966,10 +972,16 @@ function translateKlaviyoCondition(
         warnings,
         "flow-profile-filter",
       );
+    case "profile-not-in-flow":
+      // Klaviyo's "a profile can only be in this flow once". The parser
+      // reads this off the raw profile_filter and emits Redo's native
+      // `frequencyCap: {mode: "NO_REENTRY"}` on the trigger step, so
+      // there is nothing left to translate and nothing to warn about.
+      // See hasNotInFlowCondition in parser.ts.
+      return null;
     case "profile-marketing-consent":
     case "profile-property":
     case "profile-group-membership":
-    case "profile-not-in-flow":
       warnings.push({
         kind: "requires-review",
         message: `flow profile_filter condition type "${inverted.type}" not yet translated — manual config required in the Redo flow builder`,

@@ -133,7 +133,7 @@ function assert(cond: boolean, msg: string): void {
   );
 }
 
-// ─── Unsupported condition type (profile-not-in-flow) warns + skips ─────
+// ─── profile-not-in-flow drops silently (handled as frequencyCap) ───────
 {
   const warnings: ParseWarning[] = [];
   const pf = {
@@ -144,10 +144,29 @@ function assert(cond: boolean, msg: string): void {
   const result = translateFlowProfileFilter(pf, metrics, warnings);
   assert(
     result === null,
+    "not-in-flow-only profile_filter → null (no Redo conditions to emit)",
+  );
+  assert(
+    warnings.length === 0,
+    `profile-not-in-flow is translated natively as trigger.frequencyCap, so it must not warn — got ${JSON.stringify(warnings)}`,
+  );
+}
+
+// ─── Unsupported condition type (profile-property) warns + skips ────────
+{
+  const warnings: ParseWarning[] = [];
+  const pf = {
+    condition_groups: [
+      { conditions: [{ type: "profile-property" }] },
+    ],
+  };
+  const result = translateFlowProfileFilter(pf, metrics, warnings);
+  assert(
+    result === null,
     "unsupported-only profile_filter → null (no Redo conditions to emit)",
   );
   assert(
-    warnings.some((w) => w.message.includes("profile-not-in-flow")),
+    warnings.some((w) => w.message.includes("profile-property")),
     "warning mentions the unsupported type",
   );
 }

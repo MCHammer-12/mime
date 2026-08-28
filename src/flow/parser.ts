@@ -24,6 +24,7 @@ import {
   type ConditionStep,
   type DoNothingStep,
   type FlowCategory,
+  type FrequencyCap,
   type KlaviyoAction,
   type KlaviyoFlow,
   type ParseResult,
@@ -44,6 +45,19 @@ const TRIGGER_FILTER_GATE_ID = "trigger_filter_gate";
 // Suffix for the SEND_EMAIL step behind a per-message additional_filters gate.
 // The gate takes the original Klaviyo action id; the send moves aside.
 const MESSAGE_GATE_SUFFIX = "__msg";
+
+/**
+ * True when Klaviyo's flow-level `profile_filter` carries a
+ * `profile-not-in-flow` condition — its way of saying "a profile can only
+ * be in this flow once". Redo expresses that as `frequencyCap`, so the
+ * condition is read here and dropped by translateKlaviyoCondition.
+ */
+function hasNotInFlowCondition(profileFilter: unknown): boolean {
+  const groups = (profileFilter as any)?.condition_groups ?? [];
+  return groups.some((g: any) =>
+    (g?.conditions ?? []).some((c: any) => c?.type === "profile-not-in-flow"),
+  );
+}
 
 // Branch pointer may be absent when a Klaviyo action is the last step on its
 // path ("end path" in Klaviyo's UI). Redo's mongoose schemas mark several
@@ -770,50 +784,37 @@ export async function parseFlow(
   }
 
   // Flow-level `definition.reentry_criteria`: Klaviyo's "wait N days
-  // before letting the same profile re-enter THIS flow". Redo has no
-  // native flow-level re-entry interval field; the closest available
-  // shape is a skip condition on the trigger that excludes profiles
-  // who have RECEIVED ANY EMAIL within the window. Imperfect — Redo's
-  // skip checks all emails, not just this flow's — but better than
-  // dropping the field entirely. The warning makes the approximation
-  // explicit so the merchant can refine in the Redo flow builder.
+  // before letting the same profile re-enter THIS flow". Redo has a
+  // native equivalent — `frequencyCap` on the trigger step — so this
+  // translates exactly, no approximation and no review warning.
   //
-  // Per memory `feedback_flow_status_mapping`, imported flows land
-  // inactive — so this approximation gets human review before going
-  // live regardless of how broad it is in the wrong direction.
+  //   Klaviyo {duration: 7,  unit: "day"}     → COOLDOWN 7 Days
+  //   Klaviyo {duration: 1,  unit: "alltime"} → NO_REENTRY
+  //
+  // Klaviyo also surfaces the SAME setting as a `profile-not-in-flow`
+  // condition inside `definition.profile_filter`. That condition is
+  // consumed here too (see `notInFlow` below) and dropped silently by
+  // translateKlaviyoCondition, so the two views don't double-count.
   const reentry = (defn as any)?.reentry_criteria as
     | { duration?: number; unit?: string }
     | undefined;
-  if (reentry && Number.isFinite(reentry.duration) && (reentry.duration ?? 0) > 0) {
-    const rawUnit = String(reentry.unit ?? "day").toLowerCase();
-    const units: "minute" | "hour" | "day" =
-      rawUnit === "minute" || rawUnit === "minutes" ? "minute" :
-      rawUnit === "hour" || rawUnit === "hours" ? "hour" :
-      "day";
-    skipConditions.push({
-      dataSource: "inline-segment",
-      inlineSegment: {
-        mode: "AND",
-        conditions: [
-          {
-            type: "customer_activity",
-            activityType: "received-email",
-            count: { type: "at_least_once" },
-            timeframe: {
-              type: "before-now-relative",
-              value: reentry.duration,
-              units,
-            },
-            whereConditions: [],
-          },
-        ],
-      },
-    });
-    const unitLabel = reentry.duration === 1 ? units : `${units}s`;
-    warnings.push({
-      kind: "requires-review",
-      message: `Klaviyo flow has reentry_criteria duration=${reentry.duration} ${unitLabel}; Redo has no native flow-level re-entry interval, so this PR approximates it as "skip if customer received any email in the last ${reentry.duration} ${unitLabel}". The Redo skip is broader than Klaviyo's "only this flow" scope — refine in the flow builder if needed.`,
-    });
+  let frequencyCap: FrequencyCap | undefined;
+  const rawReentryUnit = String(reentry?.unit ?? "").toLowerCase();
+  if (reentry && rawReentryUnit === "alltime") {
+    frequencyCap = { mode: "NO_REENTRY" };
+  } else if (reentry && Number.isFinite(reentry.duration) && (reentry.duration ?? 0) > 0) {
+    const unit: WaitTimeUnit =
+      rawReentryUnit === "minute" || rawReentryUnit === "minutes"
+        ? WaitTimeUnit.MINUTES
+        : rawReentryUnit === "hour" || rawReentryUnit === "hours"
+          ? WaitTimeUnit.HOURS
+          : WaitTimeUnit.DAYS;
+    frequencyCap = { mode: "COOLDOWN", value: reentry.duration!, unit };
+  }
+  // No reentry_criteria but a `profile-not-in-flow` filter still means
+  // "one entry per profile" — Klaviyo's own alltime re-entry rule.
+  if (!frequencyCap && hasNotInFlowCondition(defn?.profile_filter)) {
+    frequencyCap = { mode: "NO_REENTRY" };
   }
 
   // Klaviyo's per-trigger `trigger_filter` (a product/event filter that
@@ -923,6 +924,7 @@ export async function parseFlow(
     ...(skipConditions.length > 0
       ? { skipConditions: { conjunctionMode: "OR", conditions: skipConditions } }
       : {}),
+    ...(frequencyCap ? { frequencyCap } : {}),
     ...(resolution.triggerSpecificFields
       ? { triggerSpecificFields: resolution.triggerSpecificFields }
       : {}),

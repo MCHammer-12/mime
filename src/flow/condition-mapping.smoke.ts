@@ -294,6 +294,31 @@ console.log("✓ phone-country-code smoke tests pass");
   console.log("✓ Added to Cart VALUE > 74.99 → at_least_once + cart_subtotal gt 74.99");
 }
 
+// ─── Shopify "Fulfilled Order" → order-placed proxy ───────────────────────
+{
+  // Bailey's Blossoms X4gqFj gates a review request on "no other order
+  // fulfilled since flow start". Redo's CustomerActivityType has no
+  // fulfillment activity, so order-placed is the closest proxy — it
+  // over-matches on orders placed but never fulfilled.
+  const warnings: ParseWarning[] = [];
+  const out = translateConditionalSplitExpression(
+    action([
+      {
+        type: "profile-metric",
+        metric_id: "m_ful",
+        measurement: "count",
+        measurement_filter: { type: "numeric", operator: "equals", value: 0 },
+        timeframe_filter: { type: "date", operator: "all-time" },
+      },
+    ]),
+    { m_ful: { id: "m_ful", name: "Fulfilled Order", integration_name: "Shopify" } } as any,
+    warnings,
+  ) as any;
+  const c = out.inlineSegment.conditions[0];
+  if (c?.activityType !== "order-placed") fail(`fulfilled order: activityType=${c?.activityType}`);
+  console.log("✓ Fulfilled Order → order-placed proxy (Redo has no fulfillment activity)");
+}
+
 // ─── Value measurement on order-placed → order_total ──────────────────────
 {
   const warnings: ParseWarning[] = [];

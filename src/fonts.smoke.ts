@@ -10,7 +10,9 @@
  * fontFamily to the brand-kit name.
  */
 import {
+  collectFonts,
   fontFamilyKey,
+  normalizeFontFamilyName,
   matchFontToBrandKit,
   normalizeForFontMatch,
   rewriteTemplateFontFamilies,
@@ -141,6 +143,53 @@ console.log("✓ normalizeForFontMatch strips weight/foundry/case/punct");
   const n = rewriteTemplateFontFamilies(tmpl, new Map());
   assert(n === 0 && (tmpl.sections[0] as any).fontFamily === "Futura", "empty mapping → no-op");
   console.log("✓ empty mapping → no rewrite");
+}
+
+// ─── Klaviyo self-hosted Google fonts ("poppins-klaviyo-hosted") ───────────
+{
+  // Klaviyo renames Google fonts it self-hosts. Google Fonts can't resolve
+  // the slug, so without stripping the suffix the brand font is silently
+  // dropped at upload time. Seen in the wild: poppins-, kanit-klaviyo-hosted.
+  assert(
+    normalizeFontFamilyName("poppins-klaviyo-hosted") === "poppins",
+    `poppins-klaviyo-hosted → ${normalizeFontFamilyName("poppins-klaviyo-hosted")}`,
+  );
+  assert(
+    normalizeFontFamilyName("kanit-klaviyo-hosted") === "kanit",
+    `kanit-klaviyo-hosted → ${normalizeFontFamilyName("kanit-klaviyo-hosted")}`,
+  );
+  // Multi-word slugs un-kebab, so resolveGoogleFont's title-case pass hits.
+  assert(
+    normalizeFontFamilyName("open-sans-klaviyo-hosted") === "open sans",
+    `open-sans-klaviyo-hosted → ${normalizeFontFamilyName("open-sans-klaviyo-hosted")}`,
+  );
+  // A genuine hyphenated family is untouched.
+  assert(
+    normalizeFontFamilyName("brandon-grotesque") === "brandon-grotesque",
+    "non-Klaviyo hyphenated families pass through unchanged",
+  );
+  console.log("✓ -klaviyo-hosted suffix strips to the real Google family");
+}
+
+// ─── CSS fallback chains must not produce phantom custom fonts ─────────────
+{
+  // Bailey's Blossoms: every text span carried
+  //   font-family: 'Century Gothic', CenturyGothic, AppleGothic, sans-serif
+  // collectFonts walks the whole chain, so AppleGothic was collected as a
+  // custom family, failed the Google Fonts lookup, and set hasUnresolved —
+  // reporting a font failure on an import that was actually clean.
+  const sections = [
+    {
+      type: "text",
+      text: `<p style="font-family: 'Century Gothic', CenturyGothic, AppleGothic, sans-serif">hi</p>`,
+    },
+  ] as any;
+  const families = collectFonts(sections).map((f) => f.family);
+  assert(
+    families.length === 1 && families[0] === "Century Gothic",
+    `only the real family is collected, got ${JSON.stringify(families)}`,
+  );
+  console.log("✓ macOS system fallbacks in a CSS chain are not treated as custom fonts");
 }
 
 // ─── fontFamilyKey: base-family dedup key ──────────────────────────────────

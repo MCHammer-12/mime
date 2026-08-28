@@ -40,6 +40,15 @@ const WEB_SAFE_FONTS = new Set([
   "cursive",
   "fantasy",
   "system-ui",
+  // macOS-only system fallbacks. Klaviyo emits these inside CSS fallback
+  // chains ("'Century Gothic', CenturyGothic, AppleGothic, sans-serif"),
+  // never as the intended face. Treating them as custom made buildFontPlan
+  // try to fetch them from Google Fonts, fail, and set hasUnresolved —
+  // a false "font failed to resolve" warning on an otherwise clean import.
+  "applegothic",
+  "apple gothic",
+  "-apple-system",
+  "blinkmacsystemfont",
 ]);
 
 function isCustomFont(family: string): boolean {
@@ -247,6 +256,14 @@ export function fontFamilyKey(family: string): string {
  */
 export function normalizeFontFamilyName(family: string): string {
   const trimmed = family.trim().replace(/^['"]|['"]$/g, "");
+  // Klaviyo self-hosts some Google fonts and renames them with a
+  // "-klaviyo-hosted" suffix on a kebab-cased slug of the real family
+  // ("poppins-klaviyo-hosted", "kanit-klaviyo-hosted"). Google Fonts
+  // can't resolve the slug, so without this the brand font is dropped.
+  // Strip the suffix and un-kebab to recover the real family name;
+  // resolveGoogleFont title-cases on its second attempt.
+  const hosted = /^(.+)-klaviyo-hosted$/i.exec(trimmed);
+  if (hosted) return hosted[1]!.replace(/-/g, " ");
   // If the name already contains a space or a hyphen, assume it's
   // properly-formatted (e.g. "Century Gothic", "brandon-grotesque").
   if (/\s|-/.test(trimmed)) return trimmed;
