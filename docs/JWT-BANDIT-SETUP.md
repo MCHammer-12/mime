@@ -3,8 +3,8 @@
 Two parts. Part 2 (the paste-in prompt) is the one-time setup and has to run
 first; Part 1 is what you do with it every day after.
 
-Prereqs: macOS, Node 18+, GitHub access to `MCHammer-12/jwt-bandit`, and a
-working `admin.getredo.com` login.
+Prereqs: macOS, Node 18+, and a working `admin.getredo.com` login. The repo is
+public, so no GitHub access request is needed.
 
 ---
 
@@ -99,8 +99,8 @@ Do these in order and stop at the first failure:
 
 1. Check `node --version` is 18 or higher. If not, tell me and stop.
 2. `git clone https://github.com/MCHammer-12/jwt-bandit.git ~/code/jwt-bandit`
-   (if `~/code` doesn't exist, create it first). If the clone 404s or asks for
-   credentials, stop — I need to be added to the repo.
+   (if `~/code` doesn't exist, create it first). It's a public repo, so no auth
+   needed.
 3. `cd ~/code/jwt-bandit && npm link` so `jwt-bandit` is on my PATH. If npm link
    fails on permissions, don't sudo — set up a shell alias to
    `node ~/code/jwt-bandit/mint.mjs` instead and tell me.
