@@ -51,6 +51,7 @@ import {
 import { SchemaType, StepType, type KlaviyoFlow } from "./types.js";
 import { findVacuousConditions } from "./vacuous-conditions.js";
 import { assertUpToDate } from "../git-freshness.js";
+import { recordRun } from "./run-ledger.js";
 
 async function main() {
   assertUpToDate();
@@ -309,8 +310,15 @@ async function main() {
     if (e.cause) console.warn(`        cause: ${e.cause.message ?? e.cause}`);
   }
 
+  const ledgerBase = {
+    teamId: audTeamId ?? "unknown",
+    klaviyoFlowId: flowId,
+    flowName: flow.data.attributes.name,
+  };
+
+  let result;
   try {
-    const result = await importFlowRpc(
+    result = await importFlowRpc(
       {
         automation: parsed.automation,
         warnings: parsed.warnings,
@@ -319,12 +327,40 @@ async function main() {
       },
       options,
     );
-    console.log(`\ndone.`);
-    console.log(`  flow id:               ${result.flowId}`);
-    console.log(`  templates created:     ${result.createdTemplateCount}`);
-    console.log(`  blank placeholders:    ${result.blankTemplateCount}`);
   } catch (e: any) {
     console.error(`\nimport failed: ${e.message ?? e}`);
+    recordRun({ ...ledgerBase, redoFlowId: null, status: "failed", blankCount: 0 });
+    process.exit(1);
+  }
+
+  console.log(`\ndone.`);
+  console.log(`  flow id:               ${result.flowId}`);
+  console.log(`  templates created:     ${result.createdTemplateCount}`);
+  console.log(`  blank placeholders:    ${result.blankTemplateCount}`);
+
+  recordRun({
+    ...ledgerBase,
+    flowName: result.name,
+    redoFlowId: result.flowId,
+    status: result.blankTemplateCount > 0 ? "blanks" : "clean",
+    blankCount: result.blankTemplateCount,
+  });
+
+  // A blank email is a merchant-visible failure that reads as success: the flow
+  // is live and wired to an empty template. Exiting 0 here is what let 15 of
+  // them sit in Bailey's Blossoms unnoticed. Make the run say it failed.
+  if (result.blankTemplateCount > 0) {
+    console.error(
+      `\nBLANKS: ${result.blankTemplateCount} email(s) imported with no content.`,
+    );
+    for (const b of result.blankedTemplates ?? []) {
+      console.error(`  - ${b.name}`);
+      console.error(`      ${b.reason}`);
+    }
+    console.error(
+      `\nThe flow exists, but those emails are empty in Redo. Fix the cause, then:\n` +
+        `  FLOW_ID=${flowId} npx tsx src/flow/import-one.ts`,
+    );
     process.exit(1);
   }
 }
