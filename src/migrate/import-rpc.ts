@@ -641,7 +641,7 @@ async function getTeam(options: ImportOptions): Promise<any> {
 
 // ─── RPC wire helpers ──────────────────────────────────────────────────────
 
-async function postMarketingRpc(
+export async function postMarketingRpc(
   method: string,
   input: unknown,
   options: ImportOptions,
@@ -649,7 +649,7 @@ async function postMarketingRpc(
   return postAtPath(`/marketing-rpc/${method}`, input, options);
 }
 
-async function postRpc(
+export async function postRpc(
   method: string,
   input: unknown,
   options: ImportOptions,

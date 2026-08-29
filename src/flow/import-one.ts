@@ -52,6 +52,7 @@ import { SchemaType, StepType, type KlaviyoFlow } from "./types.js";
 import { findVacuousConditions } from "./vacuous-conditions.js";
 import { assertUpToDate } from "../git-freshness.js";
 import { recordRun } from "./run-ledger.js";
+import { formatReport, verifyImportedFlow } from "./verify-import.js";
 
 async function main() {
   assertUpToDate();
@@ -346,6 +347,27 @@ async function main() {
     blankCount: result.blankTemplateCount,
   });
 
+  // Read the flow back out of Redo and diff it against the parse. The import
+  // log reports what we SENT; this reports what LANDED — the only view that
+  // matches what the merchant will open.
+  let readbackBroken = 0;
+  try {
+    const { checks, score } = await verifyImportedFlow(
+      result.flowId,
+      {
+        name: result.name,
+        steps: parsed.automation.steps as Array<Record<string, any>>,
+        warnings: parsed.warnings as Array<{ kind: string; message: string }>,
+      },
+      options,
+    );
+    console.log(formatReport(checks, score));
+    readbackBroken = score.broken;
+  } catch (e: any) {
+    // A readback that can't reach the API says nothing about the import.
+    console.warn(`\nreadback skipped (non-fatal): ${e.message ?? e}`);
+  }
+
   // A blank email is a merchant-visible failure that reads as success: the flow
   // is live and wired to an empty template. Exiting 0 here is what let 15 of
   // them sit in Bailey's Blossoms unnoticed. Make the run say it failed.
@@ -360,6 +382,15 @@ async function main() {
     console.error(
       `\nThe flow exists, but those emails are empty in Redo. Fix the cause, then:\n` +
         `  FLOW_ID=${flowId} npx tsx src/flow/import-one.ts`,
+    );
+    process.exit(1);
+  }
+
+  // The import reported success but the store disagrees. Same reasoning as
+  // blanks: a run that lands broken must not exit 0.
+  if (readbackBroken > 0) {
+    console.error(
+      `\nREADBACK: ${readbackBroken} item(s) did not land correctly. See BROKEN above.`,
     );
     process.exit(1);
   }
