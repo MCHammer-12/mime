@@ -54,3 +54,8 @@ export function assertUpToDate(): void {
   );
   process.exit(1);
 }
+
+/** Short SHA of the commit this clone is running. Null outside a git checkout. */
+export function headSha(): string | null {
+  return git("rev-parse --short HEAD");
+}
