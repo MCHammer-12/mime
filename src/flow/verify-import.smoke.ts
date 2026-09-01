@@ -137,6 +137,56 @@ const verdicts = (cs: Check[], item: string) =>
   );
 }
 
+// 9b. the server reorders object keys on the way back; identical skipConditions
+// must still read as clean
+{
+  const exp = baseExpected([
+    {
+      type: "trigger",
+      skipConditions: {
+        conjunctionMode: "OR",
+        conditions: [
+          { type: "customer_activity", activityType: "order-placed", count: { type: "not_n_times", n: 0 } },
+        ],
+      },
+    },
+  ]);
+  const act = {
+    _id: "f1",
+    steps: [
+      {
+        type: "trigger",
+        skipConditions: {
+          conditions: [
+            { activityType: "order-placed", count: { n: 0, type: "not_n_times" }, type: "customer_activity" },
+          ],
+          conjunctionMode: "OR",
+        },
+      },
+    ],
+  };
+  const cs = verifyFlow(exp, act, TPLS);
+  check(
+    "reordered skipConditions keys → clean",
+    verdicts(cs, "trigger.skipConditions").join() === "clean",
+  );
+}
+
+{
+  const exp = baseExpected([
+    { type: "trigger", skipConditions: { conjunctionMode: "OR", conditions: [{ type: "a" }] } },
+  ]);
+  const act = {
+    _id: "f1",
+    steps: [{ type: "trigger", skipConditions: { conjunctionMode: "AND", conditions: [{ type: "a" }] } }],
+  };
+  const cs = verifyFlow(exp, act, TPLS);
+  check(
+    "genuinely different skipConditions → broken",
+    verdicts(cs, "trigger.skipConditions").join() === "broken",
+  );
+}
+
 // 10. warnings: merchant-visible ones cost half an item, bookkeeping ones cost nothing
 {
   const exp: ExpectedFlow = {

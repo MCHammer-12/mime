@@ -134,6 +134,22 @@ export function contentChecks(
  * from getAdvancedFlows, `templatesById` the store's email templates keyed by
  * _id. Returns one Check per scoreable item.
  */
+// The server round-trips these objects through Mongo, which hands them back
+// with keys in a different order than we sent them. A raw JSON.stringify
+// compare reads that reordering as a mismatch and reports an identical
+// skipConditions as broken, so sort keys depth-first before comparing.
+function canonical(value: unknown): string {
+  const sort = (v: any): any =>
+    Array.isArray(v)
+      ? v.map(sort)
+      : v && typeof v === "object"
+        ? Object.keys(v)
+            .sort()
+            .reduce((acc: any, k) => ((acc[k] = sort(v[k])), acc), {})
+        : v;
+  return JSON.stringify(sort(value) ?? null);
+}
+
 export function verifyFlow(
   expected: ExpectedFlow,
   actual: Record<string, any> | null,
@@ -191,7 +207,7 @@ export function verifyFlow(
       const want = (expectedTrigger as any)[field];
       if (want === undefined || want === null) continue;
       const got = (actualTrigger as any)[field];
-      const same = JSON.stringify(want) === JSON.stringify(got);
+      const same = canonical(want) === canonical(got);
       checks.push({
         item: `trigger.${field} in "${label}"`,
         dimension: "logic",
