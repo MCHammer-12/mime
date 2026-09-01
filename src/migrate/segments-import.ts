@@ -39,7 +39,7 @@ async function getMetrics(key: string): Promise<MetricLookup> {
 
 async function fetchSegmentDetail(key: string, id: string) {
   const detail = await klaviyo(
-    `/segments/${id}/?additional-fields%5Bsegment%5D=definition,profile_count`,
+    `/segments/${id}/?additional-fields%5Bsegment%5D=profile_count`,
     key,
   );
   const attrs = detail.data?.attributes ?? {};
