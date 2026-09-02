@@ -1,0 +1,322 @@
+# Order tracking ads: billing design
+
+Status: riff / options, not a decision. Owner: Austin. Date: 2026-09-02.
+
+## TL;DR
+
+The ads product is built. The billing for it is not. Everything below is about
+closing that gap.
+
+What exists in `redoapp/redo` today:
+
+| Piece | Where |
+| --- | --- |
+| Three offer networks: Rokt, Falcon (white-labeled "Redo Offer Network"), Uptick | `redo/integrations/definitions/common/src/offer-network/offer-placement.ts` |
+| Five surfaces: tracking-page, returns-confirmation, hosted-page, shopify-thank-you, shopify-order-status | `OfferPlacementSurface` |
+| `OFFERS` block on the tracking page builder | `redo/order-tracking/common/src/tracking-page-definition.ts` |
+| Shopify extensions for thank-you and order-status | `redo/shopify/app/thank-you-offers-ui`, `order-status-offers-ui` |
+| Daily revenue sync from providers | `offer_network_daily_metric` table, `syncOfferNetworkMetricsTask` cron |
+| Merchant data-sharing consent attestation | `OfferNetworkDataSharingConsent` on team settings |
+| Analytics metric for offer clicks | `order_tracking_page_offer_clicks` |
+
+What does not exist:
+
+1. Any `BillingCharge` written from offer revenue. The metrics table is
+   reporting-only. Zero dollars flow from ad revenue into billing.
+2. Any record of when a merchant turned ads on or off. `OfferNetworkSettings`
+   is current-state only, no history.
+3. Any detection of silent disablement (toggle on, nothing serving).
+4. Any rate-card switch tied to ad enablement.
+
+## The commercial shape (decide this first)
+
+Everything downstream depends on which of these we are actually selling. This is
+a leadership call, not an engineering one, and it changes the schema.
+
+| Shape | Merchant gets | Redo gets | Build cost |
+| --- | --- | --- | --- |
+| **A. Ads-subsidized** | Order tracking free or discounted | 100% of ad revenue | Low. No payout rail. |
+| **B. Rev share** | A cut of ad revenue as bill credit or cash | The rest | High. Credits, payout, tax. |
+| **C. Placement fee** | Keeps ad revenue | Flat per-placement fee | Low, but caps our upside on the merchants who perform best. |
+
+**Recommendation: A for v1.** It needs no payout rail, no tax questions, and it
+gives us the cleanest merchant pitch: "we monetize the impressions you were not
+using, and your order tracking gets cheaper." B can be layered on later by
+writing a credit charge, since the ledger design below already carries gross
+revenue per window.
+
+The rest of this doc assumes A.
+
+## Problem 1: Revenue tracking
+
+### What we get from the providers
+
+`offer_network_daily_metric` grain is `(account_id, provider, day, placement_id)`
+carrying `clicks`, `transactions`, `revenue_minor`, `revenue_currency`,
+`extra_metrics`, `synced_at`.
+
+Three properties of this data drive the whole design:
+
+- **Daily, not per-order.** No provider gives us "this order earned $0.14." We
+  cannot attribute a dollar to an order, only to a placement-day.
+- **Lagged.** Revenue for day D lands 1 to 3 days later depending on provider.
+- **Restated.** Providers revise prior days after the fact (fraud clawbacks,
+  reconciliation). A day is never truly final.
+
+### Options
+
+**Option 1: Daily sync only (status quo plus billing).**
+Bill straight off `offer_network_daily_metric`.
+Pro: already built, works for all three providers, cheap.
+Con: no denominator. We cannot tell "ads earned nothing because traffic was low"
+apart from "ads earned nothing because the block stopped rendering." That
+distinction is the whole of Problem 3.
+
+**Option 2: Our own event stream.**
+Write an `offer_impression` row on every render and click from our surfaces.
+Pro: per-order attribution, real audit trail, and we own the denominator.
+Con: high write volume on every tracking page view, and revenue allocated down
+to an order is an estimate we invented, not a number a provider will back in a
+dispute.
+
+**Option 3 (recommended): daily revenue is the money, events are the denominator.**
+
+- Provider daily revenue stays the single source of billing truth. Never
+  re-derive money from our own counters.
+- Our own impression counter (aggregate per placement-day, not per event) tells
+  us whether the placement was actually serving. This powers RPM, the enablement
+  check, and the alert.
+- Aggregate counter, not a row per view. A daily rollup keyed
+  `(account, surface, provider, placement, day)` with `impressions` is enough
+  and costs one upsert per page view against a hot key, or a batched counter.
+
+### The restatement rule
+
+Borrow the pattern already proven in checkout-optimization billing
+(`ccb__explain_order` splits `recorded` from `current`):
+
+> Billing truth is what was snapshotted when the window closed. A provider
+> restating an earlier day never rewrites a closed charge. It lands as a
+> separate adjustment charge in the next open window.
+
+`billing_charge_subtype.order_tracking_adjustment` already exists for exactly
+this, and `BillingCharge.reverses_charge_id` links the adjustment to what it
+corrects. This is what makes "why did my invoice change" answerable six months
+later.
+
+### The charge row
+
+Per window, per provider, write one `BillingCharge`:
+
+| Column | Value |
+| --- | --- |
+| `type` | `OrderTracking` (exists) |
+| `charge_subtype` | `offer_network_revenue_share` (**new enum value**) |
+| `recovered_revenue` | Gross network revenue for the window. Column already exists, used by Recover for exactly this. |
+| `revenue_share_percentage` | Redo's cut. 100 under shape A. |
+| `amount` | The charge, or a negative credit under shape B. |
+| `breakdowns` | JSON: per-placement, per-day, per-surface rows so the invoice line is explainable without a query. |
+| `idempotency_key` | `offer-rev-share:{accountId}:{windowId}:{provider}` |
+| `product` | `SubscriptionProduct.OrderTracking` |
+
+No new table needed for the money. `BillingCharge` already carries every column
+this requires.
+
+## Problem 2: Fallback billing
+
+"Ads on" has to change what the merchant pays, and "ads off" has to change it
+back. Three ways to structure that.
+
+**Option A: Floor / minimum guarantee.**
+Merchant is billed $X/mo for order tracking. Ad revenue credits against it, up
+to $X. Underperformance means the merchant pays the difference.
+Pro: Redo revenue is stable and predictable. Safest.
+Con: merchant sees a variable bill they cannot forecast, which is the single
+most common source of billing support tickets.
+
+**Option B: Cliff.**
+Ads on means order tracking is $0. Ads off means full rate. No proration.
+Pro: trivial to explain and to build.
+Con: trivially gamed. Turn ads on the 1st, off the 2nd, pay nothing. Requires a
+coverage-days test anyway, at which point you have built Option C.
+
+**Option C (recommended): coverage-ratio proration.**
+Bill the standard rate scaled by the fraction of the window ads were off:
+
+```
+charge = standardMonthlyRate * (offDays / daysInWindow)
+```
+
+Pro: fair in both directions, hard to game, and the merchant conversation is
+simple ("you pay for the days you were not monetizing").
+Con: needs the enablement ledger below, and needs a definition of "off" that
+survives an argument.
+
+**Recommendation: C, with A as the safety net.** Coverage proration handles the
+merchant who switches off. The floor handles the merchant who leaves ads on but
+earns nothing, whether from low traffic or from quietly suppressing the block.
+
+### Defining "on" so it cannot be gamed
+
+A settings boolean is not a definition. A merchant can leave the toggle on and
+hide the block with one line of CSS. Ads count as ON for a given day only when
+all of these hold:
+
+1. A placement is configured for the surface.
+2. `dataSharingConsent` is present and not revoked.
+3. The provider integration is connected, and for Falcon `isLiveMode` is true.
+   Falcon in test mode serves mock offers and earns nothing.
+4. Our impression counter recorded at least N impressions for that placement-day.
+
+Rule 4 is the one that matters, and it is the reason Option 3 in Problem 1 is
+not optional.
+
+Pick N off real traffic distributions rather than guessing. A merchant with 4
+orders a day should not be flagged for having 3 impressions.
+
+## Problem 3: The switch, the alert, the revert
+
+### The enablement ledger
+
+Replace "is there a boolean on the team doc" with an append-only table:
+
+```
+offer_network_enablement_event(
+  account_id,
+  surface,        -- OfferPlacementSurface
+  provider,       -- offer_network_provider
+  placement_id,
+  state,          -- enabled | disabled | degraded
+  reason,
+  actor,          -- user id, or 'system'
+  effective_at,
+  detected_at
+)
+```
+
+`degraded` is the state that earns its keep: configured and consented, but not
+actually serving. It is neither "the merchant turned it off" nor "everything is
+fine," and collapsing it into either one is how this ships broken.
+
+Two timestamps, not one. `effective_at` is when the world changed;
+`detected_at` is when we noticed. Coverage proration uses `effective_at`. The
+alert SLA is measured on the gap.
+
+Reasons worth enumerating up front: `merchant_toggle`, `block_removed_from_page`,
+`placement_deleted`, `consent_revoked`, `integration_disconnected`,
+`falcon_test_mode`, `zero_impressions`, `provider_reporting_gap`.
+
+### Three detection paths, three latencies
+
+| Path | Trigger | Latency | Notes |
+| --- | --- | --- | --- |
+| **Explicit** | Merchant flips the setting, deletes the OFFERS block, or revokes consent | Synchronous | Write the ledger event in the same transaction as the settings write, or it will drift. |
+| **Structural** | Integration disconnected, placement deleted, Falcon flipped to test mode, block absent from the published page | Daily reconciler | Cheap. Reads config, no traffic data needed. |
+| **Silent** | Settings look correct, impressions went to zero | Daily reconciler on impressions plus `offer_network_daily_metric` | The one that will actually bite us, and the one nobody builds. |
+
+### Alerting
+
+- Fire on the **third** consecutive `degraded` day, not the first. Providers have
+  reporting lag and restate. A day-one page is a false-positive generator that
+  gets muted within a week, and a muted alert is worse than none.
+- Route to the CSM, not to engineering. This is a revenue event, not an outage.
+- Include the last 14 days of revenue and impressions in the alert body. The CSM
+  needs to open the merchant conversation already knowing the number.
+- Separate the two cases in the alert copy. "Merchant turned ads off" is a
+  save conversation. "Ads are on and earning nothing" is a technical
+  investigation. Same alert channel, different first message.
+
+### Reverting the rate
+
+The constraint that shapes this: in checkout-optimization billing, rates are
+**snapshotted onto the billing window when it opens**. Changing team settings
+mid-window does nothing until the next window. Same engine, same constraint here.
+
+So "revert them to the old rate" cannot be instant, and there are two ways to
+live with that:
+
+**Option A: next-window revert.**
+Consistent with how every other Redo usage product behaves.
+Con: on a monthly window, a merchant who switches ads off on the 2nd rides free
+for 29 days. That is precisely the abuse case we are trying to close.
+
+**Option B (recommended): mid-window proration off the ledger.**
+The window still snapshots both rate cards on open (subsidized and standard).
+At close, the coverage ratio from the ledger decides how much of each applies.
+Nothing is recomputed retroactively, and no rate changes mid-window; only the
+apportionment between two already-snapshotted rates changes. That keeps the
+snapshot invariant intact while closing the free-ride window.
+
+**Grace period.** Do not let a two-hour provider outage reprice a merchant.
+Off-days start counting only after 3 consecutive degraded days, and the grace
+days themselves are not billed as off. Cheap insurance against our own
+false positives, and it matches the alert threshold so the merchant is never
+billed for something they were not warned about.
+
+## Problem 4: Design options for the ad placements
+
+The user-visible question. Ranked by revenue potential against brand risk.
+
+| Option | Surface | Revenue | Brand risk | Notes |
+| --- | --- | --- | --- | --- |
+| Offers block below the fold | Tracking page | Medium | Low | What ships today. Safe default. |
+| Above-the-fold slot in the hero | Tracking page | High | High | Highest RPM, highest merchant churn risk. |
+| Interstitial on confirmation | Shopify thank-you | High | High | Interrupts the post-purchase moment. Test carefully. |
+| Inline in the tracking timeline | Tracking page | Medium | Medium | Reads as content, not as an ad. Good middle ground. |
+| **Merchant upsell first, ads as fill** | Both | Medium-High | Low | See below. |
+
+**Recommendation: fill-order, not a fixed slot.** Redo already has
+`PRODUCT_UPSELL` and `SUBSCRIPTION_UPSELL` blocks and a
+`post_purchase_upsell_accepted` billing qualifier. The merchant's own offer
+should always win the slot; ads fill only what the merchant left empty. That
+protects the brand, removes the "you are selling my customers to competitors"
+objection, and turns the pitch into "we monetize impressions you were not using."
+
+Hard constraint to design around: Falcon requires a 580x260 desktop minimum,
+which is why `DEFAULT_BLOCK_SIZES[OFFERS]` is 4 columns by 2 rows. There is no
+compact ad unit available for Falcon. Any "small ad" mock will not render.
+
+Second constraint: Uptick is currently disabled on `TRACKING_PAGE` because its
+`offers.js` appends an unscoped form reset that breaks merchant page styling.
+Tracking-page ads are Rokt and Falcon only until Uptick scopes that stylesheet.
+
+## Build order
+
+1. **Impression counter.** Daily rollup per placement-day on all five surfaces.
+   Nothing else can be measured or defended without it. ~1 week.
+2. **Enablement ledger plus explicit detection.** Table, plus writes on every
+   settings and tracking-page-block mutation. ~1 week.
+3. **Structural and silent reconcilers plus the alert.** Daily job, 3-day
+   threshold, CSM routing. ~1 week.
+4. **The charge.** New `offer_network_revenue_share` subtype, window-close job
+   writing one charge per provider with breakdowns. ~1 to 2 weeks including
+   invoice display.
+5. **Coverage proration and the two-rate-card window.** Depends on 2 and 4.
+   ~1 to 2 weeks.
+
+Steps 1 through 3 are worth doing even if the commercial model changes, because
+they are the measurement layer. Steps 4 and 5 are the part that depends on
+answering the commercial question first.
+
+## Open questions
+
+1. **Shape A, B, or C?** Blocks steps 4 and 5. Everything else can proceed.
+2. **Is order tracking free under ads, or discounted?** Free is a cleaner pitch
+   and makes the coverage ratio the entire bill. Discounted keeps a revenue floor
+   but makes the invoice harder to read.
+3. **What is the standard rate we revert to?** Needs to be the rate on their
+   contract, not a global default, or the first revert becomes a support ticket.
+4. **What is N for the impressions threshold?** Pull the real distribution before
+   picking. A guess here produces either false alerts on small merchants or a
+   loophole for large ones.
+5. **Who owns the CSM alert?** An alert with no owner is a muted channel.
+
+## What I would not do
+
+- Do not attribute ad revenue to individual orders. The providers do not report
+  at that grain, and an invented allocation will lose the first dispute it meets.
+- Do not mutate a closed charge when a provider restates. Adjust forward.
+- Do not gate on a settings boolean alone. It is the one signal a merchant can
+  leave true while serving nothing.
+- Do not build a per-event impression table when a daily rollup answers every
+  question we have.
