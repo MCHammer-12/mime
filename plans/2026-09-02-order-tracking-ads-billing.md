@@ -90,6 +90,40 @@ dispute.
   `(account, surface, provider, placement, day)` with `impressions` is enough
   and costs one upsert per page view against a hot key, or a batched counter.
 
+### Rokt reports nothing. That is a hole in the revenue model.
+
+`report-sources.ts` maps each provider to a reporting feed, and one of the three
+is null:
+
+| Provider | Reporting feed | Consequence |
+| --- | --- | --- |
+| Falcon | `falconReportSource` | Revenue syncs daily |
+| Uptick | `uptickReportSource` | Revenue syncs daily |
+| **Rokt** | **`null`** | **No partner reporting API. We never see a dollar.** |
+
+The comment in the file is explicit: "Merchant-entered integration; Rokt exposes
+no partner reporting API to us." A Rokt placement is set up with a page
+identifier the merchant gets from their own Rokt contact, and the revenue
+relationship is between the merchant and Rokt.
+
+This breaks shape A for Rokt merchants specifically. If Redo keeps 100% of ad
+revenue in exchange for discounting order tracking, a Rokt merchant gets the
+discount while Redo collects nothing and cannot even measure what it gave up.
+
+Three ways to handle it, and this needs deciding alongside the commercial shape:
+
+1. **Do not offer the subsidy on Rokt.** Cleanest. Rokt stays a merchant-owned
+   integration Redo hosts, and order tracking bills at the standard rate.
+2. **Subsidize on fill rate alone, not revenue.** The impression rollup is ours,
+   so we can still prove a Rokt placement is serving even with no revenue feed.
+   Bill coverage-prorated, skip the rev-share charge entirely.
+3. **Get reporting from Rokt.** A partnership conversation, not an engineering
+   one, and it does not unblock anything this quarter.
+
+Option 2 is worth noting because it is only available thanks to the fill-rate
+design. A revenue-only model has no way to tell a serving Rokt placement from a
+removed one.
+
 ### The restatement rule
 
 Borrow the pattern already proven in checkout-optimization billing
@@ -388,6 +422,8 @@ answering the commercial question first.
    but still worth checking against two weeks of real placement-day data before
    it gates a bill.
 5. **Who owns the CSM alert?** An alert with no owner is a muted channel.
+6. **What do we do about Rokt?** No reporting feed exists, so a Rokt merchant
+   cannot be revenue-shared. Decide alongside the commercial shape, not after.
 
 ## What I would not do
 
