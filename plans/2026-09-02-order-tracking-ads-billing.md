@@ -122,6 +122,55 @@ Per window, per provider, write one `BillingCharge`:
 No new table needed for the money. `BillingCharge` already carries every column
 this requires.
 
+## How every other Redo product turns into revenue
+
+Source of truth is `BillingWindow` (the per-window snapshot), `BillingCharge`
+(the charge row), and `invoice-type-mapping.ts` (product to charge type). Across
+all 21 `SubscriptionProduct` values there are only **six** mechanics.
+
+| # | Mechanic | How it bills | Products |
+| --- | --- | --- | --- |
+| 1 | **Period fee** | Flat fee per window, snapshotted at window open into `<product>_period_fee_cents` | Nearly all. Order tracking, CHOP, Recover, Returns, AEO, IMS, IMS Forecasting, Marketing SMS/Email each have their own column. |
+| 2 | **Metered, included + overage** | `included_orders` / `included_shipments` / `included_sms_credits` / `included_email_credits`, then `overage_*_price_micros` beyond | Order tracking, Marketing SMS/Email, Support AI/Voice usage |
+| 3 | **Per-unit gated on proof of work** | Bill per order, but only where a qualifier proves Redo did something. Highest-rate-wins across qualifiers. | Checkout optimization |
+| 4 | **Revenue share on attributed value, with clawback** | Attribute revenue to the product, take `revenue_share_percentage`, give it back if the order is later returned or cancelled | Recover, coverage products (PP+, FSR, return coverage) |
+| 5 | **Cost-plus markup** | Buy at carrier rate, sell at rate plus `upcharge`. `carrier_fees_micros` tracks our cost separately from the charge. | Return labels, outbound labels, pickups |
+| 6 | **Success fee** | Only bill on a win. `min_fee_dollars` plus `fee_percentage` of the amount recovered. | Disputes |
+
+### What order tracking bills today
+
+This is the rate card ads would subsidize and the one a revert falls back to.
+From `orderTrackingOverviewSchema`, it is mechanics 1 and 2 together:
+
+- `order_tracking_period_fee_cents`, the platform fee
+- Included and overage on **orders**, **shipments**, **SMS** and **email**
+- SMS carrier fees passed through separately
+- Charge type `Usage`, subtype `OrderTracking`
+
+So an ads-subsidized merchant is not getting one number waived. They are getting
+a period fee plus four metered lines waived, and the revert has to restore all
+of it. "What rate do we revert to" is therefore not one number, it is their
+whole snapshotted rate card, which is another argument for snapshotting both
+cards on window open rather than trying to reconstruct one later.
+
+### Where ads fits: mechanic 4, with one difference that matters
+
+Recover is the direct precedent. It already handles everything ads needs:
+attributed revenue on a lag, a share percentage, and clawbacks when the
+attributed order comes back. `recoverOverviewSchema` carries
+`recoveredRevenueDollars`, `recoveredOrdersCount` and `revenueSharePercentage`;
+`recoverReturnClawbackDetailsSchema` and
+`recoverCancellationClawbackDetailsSchema` carry the reversals.
+
+One difference decides the design: Recover attributes revenue we can see
+ourselves, at order grain, in Shopify. Ad revenue arrives from a third party at
+placement-day grain, and we never see the shopper transaction at all.
+
+That is why ads cannot reuse Recover's attribution, only its **billing** shape.
+And it is why the clawback path is not optional: providers restate and claw back
+for fraud exactly like a returned order does. Model an ad clawback on
+`recoverReturnClawbackDetails`, not as something new.
+
 ## Problem 2: Fallback billing
 
 "Ads on" has to change what the merchant pays, and "ads off" has to change it
@@ -166,13 +215,41 @@ all of these hold:
 2. `dataSharingConsent` is present and not revoked.
 3. The provider integration is connected, and for Falcon `isLiveMode` is true.
    Falcon in test mode serves mock offers and earns nothing.
-4. Our impression counter recorded at least N impressions for that placement-day.
+4. The fill rate for that placement-day clears the floor. See below.
 
-Rule 4 is the one that matters, and it is the reason Option 3 in Problem 1 is
-not optional.
+### Fill rate, not an impression threshold
 
-Pick N off real traffic distributions rather than guessing. A merchant with 4
-orders a day should not be flagged for having 3 impressions.
+The first instinct is "we should see at least N impressions a day." That is the
+right idea with the wrong shape, because N is unknowable across merchants: a
+brand doing 40 orders a day and one doing 40,000 cannot share a threshold, and
+any N picked for one is either a false alarm or a loophole for the other.
+
+Use a ratio instead. We render the page, so we already know the denominator for
+free:
+
+```
+fillRate = adImpressions / eligiblePageViews
+```
+
+| Reading | Meaning | Action |
+| --- | --- | --- |
+| `fillRate` near 1 | Serving normally | Bill as ads-on |
+| `fillRate` near 0, `eligiblePageViews > 0` | The page ran and the ad did not. Ads are off or broken. | Mark `degraded`, start the alert clock |
+| `eligiblePageViews == 0` | No traffic, so no signal either way | Carry yesterday's state forward. Never alert, never bill as off. |
+
+Three things this buys:
+
+- **It removes the threshold question.** No N to pick, no distribution to study,
+  no per-merchant tuning. The floor is a ratio and it is the same for everyone.
+- **It separates "no traffic" from "no ads."** A slow Sunday and a removed block
+  produce identical impression counts and completely different fill rates. That
+  distinction is the entire point of the signal.
+- **It is unarguable with a merchant.** "Your tracking page served 4,212 views
+  and 12 ad impressions" ends the conversation. A raw count does not.
+
+Set the floor low, around 0.5, and let the three-day grace period below absorb
+provider-side serving gaps. The floor is catching a block that is gone, not a
+network with thin demand.
 
 ## Problem 3: The switch, the alert, the revert
 
@@ -282,8 +359,9 @@ Tracking-page ads are Rokt and Falcon only until Uptick scopes that stylesheet.
 
 ## Build order
 
-1. **Impression counter.** Daily rollup per placement-day on all five surfaces.
-   Nothing else can be measured or defended without it. ~1 week.
+1. **Fill-rate rollup.** Daily counts of ad impressions AND eligible page views
+   per placement-day on all five surfaces. Both numbers, or the ratio does not
+   exist. Nothing else can be measured or defended without it. ~1 week.
 2. **Enablement ledger plus explicit detection.** Table, plus writes on every
    settings and tracking-page-block mutation. ~1 week.
 3. **Structural and silent reconcilers plus the alert.** Daily job, 3-day
@@ -306,9 +384,9 @@ answering the commercial question first.
    but makes the invoice harder to read.
 3. **What is the standard rate we revert to?** Needs to be the rate on their
    contract, not a global default, or the first revert becomes a support ticket.
-4. **What is N for the impressions threshold?** Pull the real distribution before
-   picking. A guess here produces either false alerts on small merchants or a
-   loophole for large ones.
+4. **Is 0.5 the right fill-rate floor?** Lower risk than picking an absolute N,
+   but still worth checking against two weeks of real placement-day data before
+   it gates a bill.
 5. **Who owns the CSM alert?** An alert with no owner is a muted channel.
 
 ## What I would not do
@@ -320,3 +398,7 @@ answering the commercial question first.
   leave true while serving nothing.
 - Do not build a per-event impression table when a daily rollup answers every
   question we have.
+- Do not count impressions without counting eligible page views. A numerator
+  with no denominator cannot tell a quiet day from a broken one.
+- Do not invent an ad clawback path. Providers restate exactly like orders get
+  returned, and Recover's clawback shape already handles it.
