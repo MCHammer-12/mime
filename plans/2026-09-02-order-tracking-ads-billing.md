@@ -138,23 +138,52 @@ this, and `BillingCharge.reverses_charge_id` links the adjustment to what it
 corrects. This is what makes "why did my invoice change" answerable six months
 later.
 
-### The charge row
+### "Just basic invoicing?" No, and it is two separate money flows
 
-Per window, per provider, write one `BillingCharge`:
+**Provider to Redo.** For Falcon and Uptick, the network pays Redo. Ad networks
+remit on their own statement, net-30 or net-60, off their own numbers. Redo does
+not invoice them; Redo reconciles. Monthly per provider:
+
+```
+expected = sum(revenue_minor) over the month from offer_network_daily_metric
+received = the provider's remittance
+delta    = restatement or clawback, carried into next month
+```
+
+That is a receivable ledger, one row per provider per month, and it is
+finance-facing. It never touches a merchant invoice. Confirm on each contract
+who the payee is: for Rokt it is the merchant, which is the whole Rokt problem.
+
+**Redo internal revenue tracking.** "What are merchants making us" is a monthly
+rollup per merchant: attributed provider revenue times Redo's share. It has to
+land in Snowflake to be useful, and `offer_network_daily_metric` is not
+replicated there today (`SHOW TABLES LIKE '%OFFER_NETWORK%'` returns nothing,
+while every other CRDB billing table is present as `STG_CRDB_*`). Replicating
+the table is the first task on this list, and it is a data-eng ticket, not a
+product one. Once it is there, the existing Revenue and Rev_Ops semantic views
+can answer the question.
+
+**Redo to merchant.** Under shape A nothing is invoiced for ad revenue. The
+merchant's bill changes only in that order tracking gets credited. See
+"Reverting the rate" below for the credit-line shape.
+
+### The credit row
+
+Per window, write one `BillingCharge` as a negative credit against the standard
+order-tracking charges. Every column it needs already exists.
 
 | Column | Value |
 | --- | --- |
 | `type` | `OrderTracking` (exists) |
-| `charge_subtype` | `offer_network_revenue_share` (**new enum value**) |
-| `recovered_revenue` | Gross network revenue for the window. Column already exists, used by Recover for exactly this. |
-| `revenue_share_percentage` | Redo's cut. 100 under shape A. |
-| `amount` | The charge, or a negative credit under shape B. |
+| `charge_subtype` | `offer_network_subsidy_credit` (**new enum value**) |
+| `amount` | `-(standardCharges) * onDays / daysInWindow` |
+| `recovered_revenue` | Gross ad revenue for the window, informational. Column already exists, used by Recover for exactly this. |
 | `breakdowns` | JSON: per-placement, per-day, per-surface rows so the invoice line is explainable without a query. |
-| `idempotency_key` | `offer-rev-share:{accountId}:{windowId}:{provider}` |
+| `idempotency_key` | `offer-subsidy:{accountId}:{windowId}` |
 | `product` | `SubscriptionProduct.OrderTracking` |
 
-No new table needed for the money. `BillingCharge` already carries every column
-this requires.
+No new table for the money. See "Reverting the rate" for why this is a credit
+and not a second rate card.
 
 ## How every other Redo product turns into revenue
 
@@ -184,8 +213,8 @@ From `orderTrackingOverviewSchema`, it is mechanics 1 and 2 together:
 So an ads-subsidized merchant is not getting one number waived. They are getting
 a period fee plus four metered lines waived, and the revert has to restore all
 of it. "What rate do we revert to" is therefore not one number, it is their
-whole snapshotted rate card, which is another argument for snapshotting both
-cards on window open rather than trying to reconstruct one later.
+whole snapshotted rate card. That is why the subsidy is a credit against
+charges that are already written, never a substitute rate card.
 
 ### Where ads fits: mechanic 4, with one difference that matters
 
@@ -258,8 +287,7 @@ right idea with the wrong shape, because N is unknowable across merchants: a
 brand doing 40 orders a day and one doing 40,000 cannot share a threshold, and
 any N picked for one is either a false alarm or a loophole for the other.
 
-Use a ratio instead. We render the page, so we already know the denominator for
-free:
+Use a ratio. We render the page, so we already know the denominator:
 
 ```
 fillRate = adImpressions / eligiblePageViews
@@ -271,19 +299,51 @@ fillRate = adImpressions / eligiblePageViews
 | `fillRate` near 0, `eligiblePageViews > 0` | The page ran and the ad did not. Ads are off or broken. | Mark `degraded`, start the alert clock |
 | `eligiblePageViews == 0` | No traffic, so no signal either way | Carry yesterday's state forward. Never alert, never bill as off. |
 
-Three things this buys:
+### Both halves of the ratio already exist
 
-- **It removes the threshold question.** No N to pick, no distribution to study,
-  no per-merchant tuning. The floor is a ratio and it is the same for everyone.
-- **It separates "no traffic" from "no ads."** A slow Sunday and a removed block
-  produce identical impression counts and completely different fill rates. That
-  distinction is the entire point of the signal.
-- **It is unarguable with a merchant.** "Your tracking page served 4,212 views
-  and 12 ad impressions" ends the conversation. A raw count does not.
+The tracking page already emits both numbers into the shopper-event stream, and
+the analytics catalog documents them
+(`tracking-page-event-grain-attributes.ts`):
 
-Set the floor low, around 0.5, and let the three-day grace period below absorb
-provider-side serving gaps. The floor is catching a block that is gone, not a
-network with thin demand.
+| Event | Fired when | Role |
+| --- | --- | --- |
+| `TRACKING_PAGE_VIEWED` | The page rendered in front of a shopper | Denominator |
+| `TRACKING_PAGE_CLICKED` with click target `offer-impression` | "The moment a third-party offer-network placement finishes rendering" | Numerator |
+
+`offers.tsx` raises the impression after `mountOfferPlacement` resolves, with
+`url: block.provider`, so it is split by provider and it fires for Rokt too.
+That is what makes the Rokt option below possible.
+
+Three caveats from the code:
+
+1. It is "SDK mounted," not "creative visible." Falcon resolves after
+   `sdk.init`, Rokt after `selectPlacements`, Uptick immediately after
+   `uptick("init")`. Good enough for "the merchant is using ads," which is the
+   question. It is not a viewability metric.
+2. It carries `trackingPageId` but not `placement_id`. Add the placement to the
+   event so the numerator joins `offer_network_daily_metric` cleanly.
+3. It fires on the tracking page only. The Shopify thank-you and order-status
+   extensions (`thank-you-offers-ui`, `order-status-offers-ui`) are separate
+   code and do not log it. That is the one piece of new instrumentation.
+
+Falcon test mode (`isLiveMode: false`) still renders mock offers and still
+fires the impression. Impressions alone cannot catch a merchant parked in test
+mode earning nothing, which is why "on" is four conditions and not one.
+
+So build step 1 shrinks from "instrument impressions" to "a daily rollup over
+events we already have, plus one event in the Shopify extensions." Days, not a
+week.
+
+### The 48-hour rule
+
+Two consecutive days of `fillRate` below the floor with views above zero, and
+the placement is `degraded`. Two consecutive days of zero views is no signal;
+hold state. The denominator is what makes 48 hours safe: without it, a quiet
+weekend at a small merchant looks identical to a removed block.
+
+Bill from the first zero day, not the third. The 48 hours are there to keep the
+alert quiet, not to give away two days. If the block was gone on Monday, it was
+gone on Monday.
 
 ## Problem 3: The switch, the alert, the revert
 
@@ -337,34 +397,83 @@ Reasons worth enumerating up front: `merchant_toggle`, `block_removed_from_page`
   save conversation. "Ads are on and earning nothing" is a technical
   investigation. Same alert channel, different first message.
 
-### Reverting the rate
+### Reverting the rate: a credit line, not a second rate card
 
-The constraint that shapes this: in checkout-optimization billing, rates are
-**snapshotted onto the billing window when it opens**. Changing team settings
-mid-window does nothing until the next window. Same engine, same constraint here.
+The constraint: rates are snapshotted onto the billing window when it opens.
+Changing settings mid-window does nothing until the next one. Reverting cannot
+be a mid-window rate change.
 
-So "revert them to the old rate" cannot be instant, and there are two ways to
-live with that:
+An earlier draft of this doc proposed snapshotting two rate cards per window and
+apportioning between them at close. There is a simpler shape that uses only what
+exists:
 
-**Option A: next-window revert.**
-Consistent with how every other Redo usage product behaves.
-Con: on a monthly window, a merchant who switches ads off on the 2nd rides free
-for 29 days. That is precisely the abuse case we are trying to close.
+1. **Always write the standard order-tracking charges.** They are already
+   snapshotted on every window (`order_tracking_period_fee_cents`, the four
+   metered lines). Nothing changes here.
+2. **Write one prorated credit against them.** New subtype
+   `offer_network_subsidy_credit`, negative amount:
 
-**Option B (recommended): mid-window proration off the ledger.**
-The window still snapshots both rate cards on open (subsidized and standard).
-At close, the coverage ratio from the ledger decides how much of each applies.
-Nothing is recomputed retroactively, and no rate changes mid-window; only the
-apportionment between two already-snapshotted rates changes. That keeps the
-snapshot invariant intact while closing the free-ride window.
+   ```
+   credit = -(standardCharges) * onDays / daysInWindow
+   ```
 
-**Grace period.** Do not let a two-hour provider outage reprice a merchant.
-Off-days start counting only after 3 consecutive degraded days, and the grace
-days themselves are not billed as off. Cheap insurance against our own
-false positives, and it matches the alert threshold so the merchant is never
-billed for something they were not warned about.
+   `onDays` comes from the enablement ledger.
+3. **Revert is the credit shrinking.** A merchant who turns ads off on the 10th
+   of a 30-day window gets 9/30 of the credit. Nothing is reconstructed, no
+   second card, and the standard charge is on the invoice every month whether
+   ads are on or not.
+
+This is how `FreeTrialCredit`, `PromotionalCredit` and `MerchantIncentive`
+already work, so finance sees a familiar shape: gross revenue on one line,
+contra-revenue on the next. The credit row carries `recovered_revenue` (gross
+ad revenue for the window) and `breakdowns` (per placement-day), so the
+merchant's invoice can say "Ad revenue earned: $X. Order tracking credit: $Y."
+
+The old two-card idea is retired. It solved the same problem with more state.
 
 ## Problem 4: Design options for the ad placements
+
+### How plausible is letting merchants restyle the ad?
+
+Two different things, and the answer is opposite for each.
+
+**Inside the creative: not controllable from our side today.**
+`ResolvedOfferConfig` carries no styling for any provider. The three SDK calls
+take exactly these inputs and nothing else:
+
+| Provider | Call | Styling params |
+| --- | --- | --- |
+| Falcon | `FalconAds.init({ apiKey, containerId, placementId, attributes })` | None |
+| Rokt | `launcher.selectPlacements({ attributes, identifier })` | None. Rokt layouts are styled in Rokt's own dashboard, per page identifier. |
+| Uptick | `uptick("init", container, { ...attributes, app_id, site_id })` | None |
+
+Fonts, button colors or fills inside the ad need each provider to expose a
+theming API. Falcon is white-labeled as "Redo Offer Network," so that is the one
+where asking is realistic. Rokt is merchant-configured on Rokt's side; the most
+we can do is deep-link them there. Uptick already leaks an unscoped stylesheet
+onto the host page, so giving it more styling surface is the wrong direction.
+
+**Around the creative: fully ours, and cheap.**
+The OFFERS block schema is `base + { provider, offerPlacementId }` and nothing
+else, and on the live page it renders with no wrapper at all (`offers.tsx`
+returns the bare container in the customer portal). The page already carries
+`typography` (header and body font family, color, size, weight),
+`badgeSettings` and `buttonBorderRadius`, and every other block applies them.
+OFFERS opts out.
+
+A "frame" option set that costs about a week and cannot break the ad:
+
+| Option | Source | Notes |
+| --- | --- | --- |
+| Heading above the ad | New field, styled by page `typography.header*` | "Offers you might like" and the like |
+| Background color | New field | Behind the creative, not inside it |
+| Padding, border, corner radius | New fields | Same controls other blocks have |
+| Alignment and max width | New field | Within the Falcon 580x260 floor |
+
+Integrity of the original ad is guaranteed by construction here because the
+creative is untouched. Going inside it is a provider negotiation, not a build.
+
+### Where the ads go
 
 The user-visible question. Ranked by revenue potential against brand risk.
 
@@ -393,22 +502,24 @@ Tracking-page ads are Rokt and Falcon only until Uptick scopes that stylesheet.
 
 ## Build order
 
-1. **Fill-rate rollup.** Daily counts of ad impressions AND eligible page views
-   per placement-day on all five surfaces. Both numbers, or the ratio does not
-   exist. Nothing else can be measured or defended without it. ~1 week.
+0. **Replicate `offer_network_daily_metric` to Snowflake.** Data-eng ticket.
+   Nothing about internal revenue tracking works without it. ~days.
+1. **Fill-rate rollup.** Daily `TRACKING_PAGE_VIEWED` vs `offer-impression` per
+   placement-day from events that already exist, plus the same impression event
+   in the two Shopify extensions, plus `placement_id` on the event. ~3 days.
 2. **Enablement ledger plus explicit detection.** Table, plus writes on every
    settings and tracking-page-block mutation. ~1 week.
-3. **Structural and silent reconcilers plus the alert.** Daily job, 3-day
-   threshold, CSM routing. ~1 week.
-4. **The charge.** New `offer_network_revenue_share` subtype, window-close job
-   writing one charge per provider with breakdowns. ~1 to 2 weeks including
-   invoice display.
-5. **Coverage proration and the two-rate-card window.** Depends on 2 and 4.
-   ~1 to 2 weeks.
+3. **Structural and silent reconcilers plus the alert.** Daily job, 48-hour
+   rule, CSM routing. ~1 week.
+4. **The credit.** New `offer_network_subsidy_credit` subtype, window-close job
+   writing one prorated credit with breakdowns. ~1 week including invoice
+   display.
+5. **Provider reconciliation ledger.** Expected vs received per provider per
+   month. Finance-facing. ~3 days.
 
-Steps 1 through 3 are worth doing even if the commercial model changes, because
-they are the measurement layer. Steps 4 and 5 are the part that depends on
-answering the commercial question first.
+Steps 0 through 3 are worth doing whatever the commercial model turns out to be,
+because they are the measurement layer. Steps 4 and 5 wait on the answer to the
+first question below.
 
 ## Open questions
 
@@ -416,8 +527,9 @@ answering the commercial question first.
 2. **Is order tracking free under ads, or discounted?** Free is a cleaner pitch
    and makes the coverage ratio the entire bill. Discounted keeps a revenue floor
    but makes the invoice harder to read.
-3. **What is the standard rate we revert to?** Needs to be the rate on their
-   contract, not a global default, or the first revert becomes a support ticket.
+3. **Who is the payee on each provider contract?** Falcon and Uptick should pay
+   Redo for the subsidy model to work. If any contract names the merchant, that
+   provider joins Rokt in the fill-rate-only bucket.
 4. **Is 0.5 the right fill-rate floor?** Lower risk than picking an absolute N,
    but still worth checking against two weeks of real placement-day data before
    it gates a bill.
