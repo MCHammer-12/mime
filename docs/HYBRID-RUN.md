@@ -1,52 +1,64 @@
-# Running a hybrid import
+# Running a migration
 
-The deterministic code does the mechanical 90%. Claude resolves what it can't
-map, checks the result, and writes what it learned back into the code. You
-approve anything a merchant would notice.
+You give three things and read one report. Everything between those two moments
+is Claude and the deterministic code.
+
+The code does the mechanical 90%. Claude resolves what the code can't map,
+decides it, records why, QAs the result, and writes what it learned back into
+the code so the next merchant doesn't hit the same gap.
+
+**Claude does not stop to ask you about merchant-visible choices.** It makes
+them and reports them. The safety net is that every flow lands **inactive** —
+nothing can send until a human reads the report and turns it on.
 
 Setup is in [ONBOARDING.md](ONBOARDING.md). Commands are in
-[OPERATOR-QUICKSTART.md](OPERATOR-QUICKSTART.md). This is how to actually work
-the loop.
+[OPERATOR-QUICKSTART.md](OPERATOR-QUICKSTART.md).
 
 ---
 
 ## The loop
 
-| # | Phase | Who drives | Time |
-|---|---|---|---|
-| 1 | Scope | You | 2 min |
-| 2 | Recon | Claude | 2 min |
-| 3 | Diagnose | Claude, you answer | ~1 min per flow |
-| 4 | Import | Claude | ~2 min per flow |
-| 5 | QA | Claude, you spot-check | 10–30 min per store |
-| 6 | Write-back and report | Claude, you approve | 10 min |
-
-Phases 3 and 5 are the ones that decide the score. Everything else is plumbing.
+| # | Phase | Time |
+|---|---|---|
+| 1 | You give the input | 1 min |
+| 2 | Recon — what's already in the store | 2 min |
+| 3 | Diagnose — every gap, before anything is written | ~1 min per flow |
+| 4 | Import | ~2 min per flow |
+| 5 | QA — read the store back and score it | 5 min per store |
+| 6 | Write-back and report | 10 min |
+| 7 | You read the report | 5 min |
 
 ---
 
-## 1. Scope
+## 1. The input
 
-Give Claude three things:
+Three things:
 
-1. Merchant name
-2. Klaviyo private API key (`pk_…`) — read access is enough
-3. The flows and templates to bring over, by name
+1. **Klaviyo private API key** (`pk_…`) — read access is enough
+2. **The store's name in Redo** — the name, not an id
+3. **The flows to bring over**, by name
 
-Names straight off the call transcript are fine. Claude matches them to Klaviyo
-ids and reads back the list before touching anything. If a name is ambiguous
-(a live flow and a `(UNUSED)` twin) it asks which.
+Names straight off a call transcript are fine.
+
+Two things stop the run here, both because they are bad *input* rather than
+decisions to make:
+
+- **The store name matches more than one Redo store.** Claude lists the
+  candidates and stops. Writing flows into the wrong merchant's account is the
+  one mistake in this pipeline that can't be undone from outside.
+- **The clone is behind `origin/main`.** Someone fixed a mapping you don't have.
+  Running anyway re-imports a solved bug and re-learns a solved mapping.
 
 ---
 
 ## 2. Recon
 
-Claude checks what already exists in the Redo store before importing anything.
+Claude reads the Redo store before writing anything: existing flows, their
+trigger keys, existing templates.
 
-**Do not skip this and do not let it be skipped.** Re-running creates duplicate
-flows, it does not update them. If the store already has flows with these names,
-decide *now* — delete the old ones, or import with `NAME_SUFFIX`. Sorting it out
-afterward means untangling two sets of near-identical flows by hand.
+Re-running an import creates duplicate flows — it does not update them. If the
+store already has flows under these names, Claude either imports under
+`NAME_SUFFIX` or deletes the previous set, and says which in the report.
 
 One person per store at a time.
 
@@ -54,110 +66,110 @@ One person per store at a time.
 
 ## 3. Diagnose
 
-`DIAGNOSE_ONLY=1`. Parses the flow, resolves the templates, prints every gap,
-writes nothing. Run it on every flow before importing any of them.
+`DIAGNOSE_ONLY=1` on every flow before importing any of them. It parses,
+resolves templates, prints every gap, writes nothing.
 
 What comes back:
 
 - **Trigger mapping** — which Redo trigger each Klaviyo trigger became
 - **Warnings** — `degraded-mapping`, `requires-review`, `skipped-step`,
   `unsupported-action`, `unsupported-trigger`
-- **Hard stops** — a condition that would match no customer blocks the import
-  outright, because a flow that looks imported and silently behaves differently
-  is worse than one that didn't import
+- **Vacuous conditions** — a condition Redo's schema can't express, which would
+  match no customer and send everyone down the false branch
 
-Your job in this phase is to answer the merchant-visible questions. Claude brings
-a recommendation with the trade-off, not an open question. Say yes, or name the
-other option.
+Claude resolves each one and records the decision. The order it tries:
 
-Typical ones: a trigger with no Redo equivalent, a font not in the brand kit, a
-discount that has to be created Redo-side, a condition Redo's schema can't
-express.
+1. **Map it properly** and put the mapping in the code — the write-back loop.
+   This is the outcome that makes the next run better.
+2. **Map it approximately**, if the degradation is smaller than the loss. The
+   approximation and what it costs go in the report.
+3. **Import it degraded on purpose** (`ALLOW_VACUOUS_CONDITIONS=1`) when nothing
+   maps, and report it as a known issue with what a human has to do about it.
 
-Everything mechanical, Claude decides on its own.
+Nothing here waits on you. Every choice is in the report.
 
 ---
 
 ## 4. Import
 
-Same command, `DIAGNOSE_ONLY` dropped. Every flow lands **inactive**. Nothing
-you run here can send an email.
+Same command, `DIAGNOSE_ONLY` dropped. Every flow lands **inactive**.
 
-`verify-import.ts` runs automatically at the end of each import: it reads the
-store back out of Redo and diffs it against what the parser said should be
-there. The run exits non-zero if anything landed broken, so a degraded import
-can't be mistaken for a clean one.
-
-Read the score line. Grades are in [ACCURACY-SCALE.md](ACCURACY-SCALE.md).
+`verify-import.ts` runs at the end of each import: it reads the store back and
+diffs it against what the parser said should be there. The run exits non-zero if
+anything landed broken, so a degraded import can't be mistaken for a clean one.
 
 ---
 
 ## 5. QA
 
-This is the phase that produces the delta. Bailey's Blossoms scored 38 out of
-100 on the code's first pass and 100 after this phase. Skipping it means handing
-the merchant the 38.
+`verify-import.ts` compares Redo against mime's *own parse*. That's a
+self-consistency check: if the parser is wrong, the verifier agrees with it and
+reports clean. Bailey's Blossoms passed it at 100%.
 
-Three tiers, and only the first is automated:
+`qa-store.ts` is the second pass, and it checks things that are broken
+regardless of what the parse thought.
 
-| Tier | Question | Who |
+```bash
+REDO_JWT="$(jwt-bandit <teamId>)" FLOW_FILTER="<name fragment>" \
+  QA_JSON=/tmp/qa.json npx tsx src/flow/qa-store.ts
+```
+
+Scope it with `FLOW_FILTER` or `FLOW_IDS`. Unscoped it audits the whole store,
+where the merchant's own live flows are supposed to be on and to share triggers
+with each other — so it skips the inactive-on-import check and reports only
+collisions this migration is part of.
+
+What it asserts:
+
+| | Check | Why it isn't caught upstream |
 |---|---|---|
-| **Wiring** | Does the flow exist, with the right steps, pointing at real templates? | `verify-import.ts`, automatic |
-| **Fidelity** | Is what's inside the email correct? | Claude, by hand today |
-| **Visual** | Does it look right? | You, always |
+| **Logic** | No condition with an empty conditions array | Empty evaluates FALSE — everyone takes the false branch and the true branch's emails never send, silently |
+| | No two flows sharing a trigger key | Activating both double-sends. A migrated flow can collide with one that was already there |
+| | Nothing active | Imports land inactive until a human decides |
+| **Structure** | Every step reachable from the trigger | A dropped step re-stitched wrong strands the chain. Edges aren't always top-level — an `ab_test` carries one per variant |
+| | No pointer into a step that doesn't exist | |
+| **Fidelity** | Render every template via `previewEmailTemplate` and read the HTML | This is what the merchant actually receives |
+| | No surviving `{{ … }}` / `{% … %}` | Ships literally to the customer |
+| | Unsubscribe present in the *rendered* output | Checking for a footer block gives both false positives and false negatives |
+| | No `d3k81ch9hvuctc.cloudfront.net` assets | Images break when the merchant leaves Klaviyo |
+| | No Klaviyo click-tracking link hosts | |
+| | Real subject lines, not `Email #1 Subject` | |
 
-### Fidelity checklist
+Score = `(clean + 0.5 × degraded) / (clean + degraded + broken)`. Grades in
+[ACCURACY-SCALE.md](ACCURACY-SCALE.md). Non-zero exit on any broken check.
 
-Ask Claude to run all of these. Every one is a real failure that has shipped.
+**Two things this can't see**, and they go in the report as such:
 
-**Email content**
-
-1. Render each template (`previewEmailTemplate`) and grep the output — **any**
-   surviving `{{ … }}` or `{% … %}` ships literally to the customer.
-   `{% current_year %}` and `{{ organization.name }}` are the usual survivors.
-2. Unsubscribe link present in the **rendered** output of every marketing email.
-   Checking for a footer *block* gives both false positives and false negatives.
-3. Discount matches the Klaviyo original on all five axes: amount, type, the code
-   itself (and that it is live in Shopify), static vs dynamic, and consistency
-   across body copy, CTA link, subject, and any text baked into an image.
-4. Subject lines are real copy, not `Email #1 Subject` or `[Placeholder]`.
-5. Images and fonts: no `d3k81ch9hvuctc.cloudfront.net` URLs left pointing at
-   Klaviyo's CDN, fonts resolved to the brand kit, links on the merchant's own
-   domain.
-
-**Flow logic**
-
-6. No condition step with an empty conditions array. An empty condition
-   evaluates FALSE and routes everyone down the false branch — the true branch
-   becomes dead code and those emails never send. It is silent.
-7. Skip conditions have the right polarity. Klaviyo "enter if A **and** B" is
-   Redo "skip if not-A **or** not-B". Getting the mode wrong over-sends.
-8. Every step is reachable from the trigger, and no send step is `disabled`.
-
-### Visual
-
-Open two or three of the imported emails in Redo's builder next to the Klaviyo
-original. Structural checks can't see a white block sitting on a tinted
-background or a stock image the importer left behind.
+- **Discount parity** — that the code is live in Shopify, and that amount, type,
+  and static-vs-dynamic match the Klaviyo original across body copy, CTA link,
+  subject, and text baked into an image.
+- **Visual judgement** — a white block on a tinted background, a stock image the
+  importer left behind. Claude opens a few and says what it sees; a person
+  looking at the builder is still better at it.
 
 ---
 
 ## 6. Write-back and report
 
-**Write-back.** When Claude works out a mapping the code didn't know — a
-trigger, a metric, a font, a condition — that mapping goes into the code, not
-just into this one import. Claude will propose the diff. Read it, approve it,
-let it commit and push. Anyone on the team can approve.
+**Write-back.** A mapping Claude works out goes into the code, not just into
+this one import, and gets committed and pushed in the same run. Next merchant,
+it happens with no intervention. Skipping this is how five people solve the same
+problem five times.
 
-Next merchant, it happens with no intervention. Skipping this is how five people
-solve the same problem five times.
+Merchant-specific facts — a store's discount prefix, their org name — go in the
+run notes instead. Those aren't mappings.
 
-Merchant-specific facts (a store's discount prefix, their org name) go in the run
-notes instead. Those aren't mappings.
+**Report.** Four sections:
 
-**Report.** What the merchant gets: what landed, what was mapped approximately,
-what was dropped and why, and anything they need to do on their side. Everything
-is inactive until a human turns it on — say so explicitly.
+1. **Known issues nobody fixed** — what a human has to decide or do, each with
+   the flow and the reason. This is the section you act on.
+2. **Code fixed this run** — the mappings that went back into mime, with the
+   commit. Every entry here is a gap that won't recur.
+3. **Decisions made without asking** — every merchant-visible call, with the
+   alternative that was rejected. This is where you overrule Claude.
+4. **The numbers** — score, per-flow breakdown, what's inactive.
+
+Everything is inactive until a human turns it on. The report says so explicitly.
 
 ---
 
@@ -166,27 +178,25 @@ is inactive until a human turns it on — say so explicitly.
 **Start a run**
 
 ```
-Migrate <merchant>. Klaviyo key pk_XXXX, Redo team <24-hex id>.
+Migrate <store name>. Klaviyo key pk_XXXX.
 Bring over these flows: <names>.
 
-Check the store for existing flows first, diagnose everything before importing
-anything, and stop for anything a merchant would notice.
+Run the whole loop in docs/HYBRID-RUN.md end to end. Don't stop to ask me about
+merchant-visible choices — decide them, and put every decision in the report.
 ```
 
 **QA a store that's already imported**
 
 ```
-QA the <merchant> migration in Redo team <24-hex id> against Klaviyo
-(key pk_XXXX). Run the fidelity checklist in docs/HYBRID-RUN.md — render every
-template and check surviving Liquid, unsubscribe, discounts, subjects, assets,
-plus empty conditions, skip polarity, and reachability on every flow.
+QA the <store name> migration: resolve the store, run qa-store.ts scoped to the
+migrated flows, and check discount parity against Klaviyo (key pk_XXXX) by hand.
 Report findings ranked by severity. Don't change anything yet.
 ```
 
 **Re-run flows a later fix would now import correctly**
 
 ```
-Run rerun-stale for team <24-hex id> and re-import anything it lists.
+Run rerun-stale for <store name> and re-import anything it lists.
 ```
 
 That last one exists because a fix landing mid-run leaves earlier flows stranded
@@ -194,9 +204,11 @@ on the old code. `rerun-stale.ts` reads the run ledger and finds them.
 
 ---
 
-## Stop and ask Michael
+## What still reaches Michael
+
+Not as a mid-run question — as a flagged item in the report.
 
 - The merchant needs a Redo-side schema change (a field Redo doesn't have)
 - A flow can't be expressed in Redo at all and needs a rebuild decision
-- Anything involving a discount code that has to be created on the Redo side
+- A discount code that has to be created on the Redo side
 - The store already has a partial migration from someone else
