@@ -87,6 +87,10 @@ const METRIC_NAME_MAP: Record<
   "viewed product":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
   "active on site":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
   "back in stock":      { key: MarketingTriggerKey.BACK_IN_STOCK,      schemaType: SchemaType.MARKETING_BACK_IN_STOCK,        category: "Marketing" },
+  // Klaviyo's Shopify integration names the metric "Subscribed to Back in
+  // Stock" (the subscribe event, which is what flows trigger on). Same
+  // activity as "back in stock" — src/segments/maps.ts already aliases it.
+  "subscribed to back in stock": { key: MarketingTriggerKey.BACK_IN_STOCK, schemaType: SchemaType.MARKETING_BACK_IN_STOCK,    category: "Marketing" },
   "low inventory":      { key: MarketingTriggerKey.LOW_INVENTORY,      schemaType: SchemaType.MARKETING_LOW_INVENTORY,        category: "Marketing" },
   "warranty registration": { key: MarketingTriggerKey.WARRANTY_REGISTRATION, schemaType: SchemaType.MARKETING_WARRANTY_REGISTRATION, category: "Marketing" },
   "placed order":       { key: OrderTrackingTriggerKey.ORDER_CREATED,  schemaType: SchemaType.ORDER_TRACKING,                 category: "Order tracking" },
