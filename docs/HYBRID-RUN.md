@@ -94,6 +94,10 @@ Nothing here waits on you. Every choice is in the report.
 
 Same command, `DIAGNOSE_ONLY` dropped. Every flow lands **inactive**.
 
+Images are pulled off Klaviyo's CDN and re-uploaded to Redo as part of the
+import. Left alone they break the moment the merchant stops paying Klaviyo,
+months after anyone is watching. (`SKIP_IMAGE_REHOST=1` opts out.)
+
 `verify-import.ts` runs at the end of each import: it reads the store back and
 diffs it against what the parser said should be there. The run exits non-zero if
 anything landed broken, so a degraded import can't be mistaken for a clean one.
@@ -131,7 +135,7 @@ What it asserts:
 | **Fidelity** | Render every template via `previewEmailTemplate` and read the HTML | This is what the merchant actually receives |
 | | No surviving `{{ … }}` / `{% … %}` | Ships literally to the customer |
 | | Unsubscribe present in the *rendered* output | Checking for a footer block gives both false positives and false negatives |
-| | No `d3k81ch9hvuctc.cloudfront.net` assets | Images break when the merchant leaves Klaviyo |
+| | No `d3k81ch9hvuctc.cloudfront.net` assets | Images break when the merchant leaves Klaviyo. Imports re-host as they go; a store migrated before that landed is fixed with `rehost-existing.ts` |
 | | No Klaviyo click-tracking link hosts | |
 | | Real subject lines, not `Email #1 Subject` | |
 
@@ -171,6 +175,10 @@ run notes instead. Those aren't mappings.
 
 Everything is inactive until a human turns it on. The report says so explicitly.
 
+Write the report to `migrations/<store>/<date>-write-back-report.md` — that path
+is gitignored, which is where merchant data belongs — and publish it as an
+artifact so it has a link the team and the agency can open.
+
 ---
 
 ## Copy-paste prompts
@@ -183,6 +191,7 @@ Bring over these flows: <names>.
 
 Run the whole loop in docs/HYBRID-RUN.md end to end. Don't stop to ask me about
 merchant-visible choices — decide them, and put every decision in the report.
+Publish the report as an artifact when you're done.
 ```
 
 **QA a store that's already imported**
