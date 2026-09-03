@@ -54,6 +54,16 @@ const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string>>> = {
   [SchemaType.MARKETING_COMMENTSOLD_CART_ABANDONMENT]: {
     "event.URL": "checkout_url",
   },
+  // Klaviyo back-in-stock templates fetch the item with {% catalog %} and read
+  // `catalog_item.*` inside the block. baseMarketingBackInStockSchema exposes
+  // the same data flattened (backInStockProductUrl/Title) plus
+  // `restockedProduct: Maybe Trigger Product` for the image.
+  [SchemaType.MARKETING_BACK_IN_STOCK]: {
+    "catalog_item.url":   "back_in_stock_product_url",
+    "catalog_item.title": "back_in_stock_product_title",
+    "catalog_item.variant.featured_image.full.src": "restocked_product.image_url",
+    "unsubscribe_link":   "unsubscribe_link",
+  },
   // Klaviyo's price-drop event fields → baseMarketingPriceDropSchema
   // (redo/flows/common/src/schemas/marketing/marketing.ts). The schema also
   // exposes `discountedProduct: Maybe Trigger Product` with .url/.image_url
@@ -101,7 +111,7 @@ function resolveOrgToken(varPath: string, account: KlaviyoAccount): string | nul
 // verbatim costs the entire flow import. Drop to empty + warn instead: the flow
 // lands and the operator gets a breadcrumb. Tokens outside these roots are left
 // alone — they may already be valid Redo variables.
-const KLAVIYO_ROOTS = ["person", "event", "organization"];
+const KLAVIYO_ROOTS = ["person", "event", "organization", "catalog_item"];
 
 // Liquid tags that structure the document. A Klaviyo-only *output* tag
 // (`{% currency_format %}`) can be dropped on sight; dropping a control tag
@@ -112,6 +122,11 @@ const LIQUID_CONTROL_TAGS = new Set([
   "case", "when", "endcase",
   "assign", "capture", "endcapture", "comment", "endcomment", "raw", "endraw",
 ]);
+
+// Klaviyo-only paired tags, dropped on sight. {% catalog %} binds catalog_item
+// inside its block; the opener carries the event reference but the closer
+// doesn't, so without this the closer leaks as literal text into the email.
+const KLAVIYO_ONLY_TAGS = new Set(["catalog", "endcatalog"]);
 
 function isKlaviyoNamespaced(varPath: string): boolean {
   return KLAVIYO_ROOTS.some((r) => varPath === r || varPath.startsWith(`${r}.`));
@@ -251,7 +266,11 @@ export function sanitizeTemplateLiquid(
     // would orphan its `{% endif %}`) and flag both kinds either way.
     let out = s;
     for (const m of s.matchAll(/\{%\s*(\w+)[^%]*%\}/g)) {
-      if (!/\b(event|organization|person)\b/.test(m[0])) continue;
+      if (
+        !KLAVIYO_ONLY_TAGS.has(m[1]!) &&
+        !/\b(event|organization|person)\b/.test(m[0])
+      )
+        continue;
       unresolvableTags.push(m[0].trim());
       if (!LIQUID_CONTROL_TAGS.has(m[1]!)) out = out.split(m[0]).join("");
     }
