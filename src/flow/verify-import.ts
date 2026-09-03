@@ -17,7 +17,7 @@
 // Score = (clean + 0.5 x degraded) / (clean + degraded + broken).
 
 export type Verdict = "clean" | "degraded" | "broken" | "unverified";
-export type Dimension = "structure" | "content" | "logic";
+export type Dimension = "structure" | "content" | "logic" | "fidelity";
 
 export interface Check {
   item: string;
