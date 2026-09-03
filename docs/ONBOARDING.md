@@ -10,8 +10,9 @@ Current roster: Bailey Kealamakia, Milo Atwood, Austin Napierski.
 | # | Thing | Where |
 |---|---|---|
 | 1 | GitHub collaborator on **`MCHammer-12/mime`** | repo → Settings → Collaborators |
-| 2 | GitHub collaborator on **`MCHammer-12/jwt-bandit`** | same |
-| 3 | Confirm they have a **Redo admin account** on `admin.getredo.com` | admin dashboard |
+| 2 | Confirm they have a **Redo admin account** on `admin.getredo.com` | admin dashboard |
+
+`MCHammer-12/jwt-bandit` is public — nothing to grant there.
 
 Nothing else. The operator does the rest from inside Claude Code.
 
@@ -31,7 +32,8 @@ stop at any step that needs me.
 
 1. Check I have node >= 20. If not, tell me and stop.
 2. Clone https://github.com/MCHammer-12/mime.git and https://github.com/MCHammer-12/jwt-bandit.git
-   into the current directory. If a clone 404s, tell me — it means I haven't been added yet.
+   into the current directory. If the mime clone 404s, tell me — it means I haven't been added
+   yet. (jwt-bandit is public.)
 3. In mime/: run `npm install`.
 4. In jwt-bandit/: run `npm link` so `jwt-bandit` is on my PATH. Verify with `which jwt-bandit`.
 5. Stop and tell me to get my Redo admin token: on an authenticated admin.getredo.com session,
@@ -94,17 +96,27 @@ of the accuracy comes from.
 
 ---
 
-## 4. What Claude will stop and ask you about
+## 4. What Claude decides on its own
 
-Mechanical choices it makes on its own. It stops for anything a merchant would notice:
+It does not stop mid-run to ask you about merchant-visible choices. It decides them,
+records the alternative it rejected, and puts both in the report:
 
 - A trigger with no Redo equivalent
 - A font that isn't in the brand kit
-- A discount code that has to be created on the Redo side
 - A condition that can't be expressed in Redo's schema
-- Anything that would change what a customer receives
+- Anything else that changes what a customer receives
 
-It brings you a recommendation, not an open question. Say yes, or say which option instead.
+The safety net is that **everything lands inactive**. Nothing can send before you read
+the report, and the report's "Decisions made without asking" section is where you
+overrule anything you disagree with.
+
+Two things genuinely stop a run, and both are input problems rather than judgement
+calls: a store name that matches more than one Redo store, and a clone that's behind
+`origin/main`.
+
+Some things can't be decided by anyone in the run — a Redo-side schema change, a flow
+that has to be rebuilt by hand, a discount code that has to be created on the Redo
+side. Those get flagged in the report, not asked about.
 
 ---
 
@@ -115,15 +127,14 @@ When Claude resolves a mapping the tool didn't know how to handle, it does two t
 1. Imports it for this merchant
 2. **Changes mime's code so the next run handles it automatically**
 
-That second part is the point. You'll be asked to approve the code change — read the diff,
-approve it, and it gets committed. Over time the tool needs you less.
+That second part is the point. The change is committed and pushed in the same run, and
+the report lists every one of them with its commit — read them after the fact and revert
+anything you disagree with. Over time the tool needs you less.
 
 Two rules that keep five clones converging instead of drifting:
 
 - **Pull before you run.** The tool enforces this; don't work around it with `SKIP_VERSION_CHECK=1`.
 - **Push what you learn.** A fix that stays on your machine helps nobody.
-
-Anyone on the team can approve a change.
 
 ---
 
@@ -134,5 +145,5 @@ Anyone on the team can approve a change.
 - `.claude/settings.local.json` (gitignored — your personal permissions)
 
 `.claude/settings.json` **is** committed. It's the shared permission allowlist so a run
-doesn't stop for approval on every `npx tsx` and `curl`. Code edits still prompt — that's
-deliberate, it's how you review the write-back loop.
+doesn't stop for approval on every `npx tsx` and `curl`. You review the write-back loop
+from the report's commit list after the run, not from a prompt during it.
