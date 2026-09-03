@@ -236,7 +236,11 @@ export function rewriteKlaviyoLiquid(
     // Flag as unmapped either way (caller's token count will spike and the
     // whole webhook gets skipped via the enrichment heuristic).
     unmappedTokens.push(parsed.varPath);
-    return isKlaviyoNamespaced(parsed.varPath) ? "" : full;
+    if (isKlaviyoNamespaced(parsed.varPath)) return "";
+    // Kept verbatim — but a Klaviyo root in its filter args still never
+    // resolves, so scrub those either way. Also makes a re-run over an
+    // already-rewritten template converge instead of re-leaking.
+    return `{{ ${parsed.varPath}${scrubKlaviyoFilters(parsed.filters)} }}`;
   });
 
   if (unmappedTokens.length > 0) {
