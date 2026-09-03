@@ -138,6 +138,8 @@ export function decodeJwtAud(jwt: string | null | undefined): string | null {
   }
 }
 
+import { rehostKlaviyoImages } from "./rehost-images.js";
+
 export type ImportProgressEvent =
   | { kind: "filter_created"; templateName: string; productFilterId: string }
   | { kind: "template_created"; templateName: string; templateId: string }
@@ -151,6 +153,13 @@ export type ImportProgressEvent =
   | { kind: "font_uploading"; family: string; fileName: string }
   | { kind: "font_registered"; family: string }
   | { kind: "fonts_done"; uploaded: number; skipped: number }
+  | {
+      kind: "images_rehosted";
+      templateName: string;
+      rehosted: number;
+      rewritten: number;
+      failed: Array<{ url: string; reason: string }>;
+    }
   | { kind: "flow_started"; flowName: string; placeholderCount: number }
   | { kind: "flow_created"; flowName: string; flowId: string }
   | { kind: "flow_failed"; flowName: string; error: string };
@@ -347,7 +356,24 @@ async function preparePayload(
     rest.sections.push({ ...section, blocks: resolvedBlocks });
   }
 
-  return rest;
+  // Pull Klaviyo-hosted images onto Redo. Left alone they break the moment the
+  // merchant stops paying Klaviyo, long after anyone is watching the migration.
+  if (process.env.SKIP_IMAGE_REHOST) return rest;
+  const { template: rehosted, summary } = await rehostKlaviyoImages(
+    rest,
+    (bytes, fileName, contentType) => uploadAttachment(bytes, fileName, options, contentType),
+    options.jwt,
+  );
+  if (summary.rehosted || summary.failed.length) {
+    options.onProgress?.({
+      kind: "images_rehosted",
+      templateName: String(template.name ?? ""),
+      rehosted: summary.rehosted,
+      rewritten: summary.rewritten,
+      failed: summary.failed,
+    });
+  }
+  return rehosted;
 }
 
 // ─── Font upload ───────────────────────────────────────────────────────────
@@ -577,10 +603,15 @@ async function uploadAttachment(
   bytes: Uint8Array,
   fileName: string,
   options: ImportOptions,
+  contentType?: string,
 ): Promise<string> {
   const base = resolveServerBase(options.serverBase);
   const form = new FormData();
-  form.append("attachment", new Blob([bytes as BlobPart]), fileName);
+  form.append(
+    "attachment",
+    new Blob([bytes as BlobPart], contentType ? { type: contentType } : undefined),
+    fileName,
+  );
   const res = await fetch(`${base}/team/upload-attachment`, {
     method: "POST",
     headers: { authorization: options.jwt },
