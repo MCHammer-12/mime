@@ -7,6 +7,9 @@ merchant would notice.
 
 Everything imports **inactive** in Redo. Nothing you run here can send an email.
 
+The phase-by-phase run loop — including the QA pass that produces most of the
+accuracy — is in [HYBRID-RUN.md](HYBRID-RUN.md).
+
 ---
 
 ## One-time setup (~15 min)

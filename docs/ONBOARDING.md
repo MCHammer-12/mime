@@ -88,6 +88,10 @@ That's the whole input. From there Claude will:
 
 **Every imported flow lands disabled.** Nothing sends until a human turns it on.
 
+That is the happy path. [HYBRID-RUN.md](HYBRID-RUN.md) covers the whole loop
+phase by phase, including the post-import QA checklist — run it, it is where most
+of the accuracy comes from.
+
 ---
 
 ## 4. What Claude will stop and ask you about
