@@ -113,6 +113,13 @@ function resolveOrgToken(varPath: string, account: KlaviyoAccount): string | nul
 // alone — they may already be valid Redo variables.
 const KLAVIYO_ROOTS = ["person", "event", "organization", "catalog_item"];
 
+// Matches any Klaviyo root used as a word inside a Liquid tag or filter chain.
+// Built from KLAVIYO_ROOTS so a root added above is covered everywhere — the
+// old hand-written tag regex missed catalog_item and let
+// `{% currency_format catalog_item.metadata.price %}` reach the recipient as
+// literal text (Bronco Western 2026-09-02).
+const KLAVIYO_ROOT_RE = new RegExp(`\\b(${KLAVIYO_ROOTS.join("|")})\\b`);
+
 // Liquid tags that structure the document. A Klaviyo-only *output* tag
 // (`{% currency_format %}`) can be dropped on sight; dropping a control tag
 // would orphan its closer, so those are flagged and left in place.
@@ -130,6 +137,19 @@ const KLAVIYO_ONLY_TAGS = new Set(["catalog", "endcatalog"]);
 
 function isKlaviyoNamespaced(varPath: string): boolean {
   return KLAVIYO_ROOTS.some((r) => varPath === r || varPath.startsWith(`${r}.`));
+}
+
+// A mapped variable keeps its filter chain, but a filter *argument* can itself
+// reference a Klaviyo root (`|default:catalog_item.featured_image.full.src`),
+// which Redo leaves in the rendered email as literal text. Drop just those
+// segments and keep the rest of the chain (Bronco Western 2026-09-02).
+function scrubKlaviyoFilters(filters: string): string {
+  if (!filters || !KLAVIYO_ROOT_RE.test(filters)) return filters;
+  const kept = filters
+    .split("|")
+    .slice(1)
+    .filter((seg) => !KLAVIYO_ROOT_RE.test(seg));
+  return kept.length ? `|${kept.join("|")}` : "";
 }
 
 interface LiquidToken {
@@ -188,7 +208,7 @@ export function rewriteKlaviyoLiquid(
         const remaining = parsed.filters.slice(lookupMatch[0].length);
         const mapped = varMap[`${parsed.varPath}.${field}`];
         if (mapped) {
-          return `{{ ${mapped}${remaining} }}`;
+          return `{{ ${mapped}${scrubKlaviyoFilters(remaining)} }}`;
         }
         // Lookup target we don't recognize — keep current "drop to empty
         // string + warn" behaviour so AI / event-specific properties
@@ -200,7 +220,7 @@ export function rewriteKlaviyoLiquid(
 
     const mapped = varMap[parsed.varPath];
     if (mapped) {
-      return `{{ ${mapped}${parsed.filters} }}`;
+      return `{{ ${mapped}${scrubKlaviyoFilters(parsed.filters)} }}`;
     }
 
     // Merchant constants resolve to literals — filters are dropped along with
@@ -266,10 +286,7 @@ export function sanitizeTemplateLiquid(
     // would orphan its `{% endif %}`) and flag both kinds either way.
     let out = s;
     for (const m of s.matchAll(/\{%\s*(\w+)[^%]*%\}/g)) {
-      if (
-        !KLAVIYO_ONLY_TAGS.has(m[1]!) &&
-        !/\b(event|organization|person)\b/.test(m[0])
-      )
+      if (!KLAVIYO_ONLY_TAGS.has(m[1]!) && !KLAVIYO_ROOT_RE.test(m[0]))
         continue;
       unresolvableTags.push(m[0].trim());
       if (!LIQUID_CONTROL_TAGS.has(m[1]!)) out = out.split(m[0]).join("");

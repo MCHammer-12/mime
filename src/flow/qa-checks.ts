@@ -186,9 +186,28 @@ export function triggerCollisionChecks(
 const KLAVIYO_ASSET_HOST = "d3k81ch9hvuctc.cloudfront.net";
 const KLAVIYO_LINK_HOSTS = ["trk.klaviyomail.com", "klclick.com", "klclick1.com", "a.klaviyo.com"];
 // previewEmailTemplate substitutes a stand-in for the real per-recipient
-// unsubscribe URL; either marker proves the link is wired.
-const UNSUBSCRIBE_MARKERS = ["example.com/unsubscribe", "named_unsubscribe-link"];
+// unsubscribe URL; any marker proves the link is wired. Some schemas resolve
+// {{ unsubscribe_link }} to a real tokenised URL in preview
+// (returns.getredo.com/.../marketing/unsubscribe?...) rather than a stand-in —
+// without that marker 7 wired links scored broken (Bronco Western 2026-09-02).
+const UNSUBSCRIBE_MARKERS = [
+  "example.com/unsubscribe",
+  "named_unsubscribe-link",
+  "/marketing/unsubscribe",
+];
 const STUB_SUBJECT = /^(email #\d+ subject|subject line \d+|untitled|test)$/i;
+
+// Redo runtime variables that createEmailTemplate accepts but preview leaves
+// unresolved (no trigger product exists in preview context). A rendered token
+// that reads ONLY from these roots resolves at send time and isn't a leak —
+// unless its filter chain drags in Klaviyo data, which never resolves.
+const REDO_RUNTIME_TOKEN_ROOTS = ["restocked_product", "discounted_product"];
+const KLAVIYO_LEAK_RE = /\b(person|event|organization|catalog_item)\b/;
+function isRedoRuntimeToken(token: string): boolean {
+  if (KLAVIYO_LEAK_RE.test(token)) return false;
+  const m = /^\{\{\s*([a-z_]+)\./.exec(token);
+  return m !== null && REDO_RUNTIME_TOKEN_ROOTS.includes(m[1]!);
+}
 
 export interface RenderedTemplate {
   id: string;
@@ -214,7 +233,7 @@ export function renderChecks(
   const liquid = [
     ...(html.match(/\{\{[^}]{0,80}\}\}/g) ?? []),
     ...(html.match(/\{%[^%]{0,80}%\}/g) ?? []),
-  ];
+  ].filter((t) => !isRedoRuntimeToken(t));
   if (liquid.length) {
     checks.push({
       item: item("liquid"),
