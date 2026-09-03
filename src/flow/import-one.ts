@@ -226,13 +226,13 @@ async function main() {
     console.log(`      treeify: no merges detected`);
   }
 
-  // An inline-segment condition with no conditions matches everyone, so the
-  // branch silently always takes the true path. See vacuous-conditions.ts.
+  // An inline-segment condition with no conditions matches nobody, so the
+  // branch silently always takes the false path. See vacuous-conditions.ts.
   const vacuous = findVacuousConditions(parsed.automation.steps);
   for (const v of vacuous) {
     console.log(
-      `      vacuous condition: step ${v.id} matches everyone — always takes true ` +
-        `(${v.nextTrueId}); false branch (${v.falseBranchType} ${v.nextFalseId}) never runs`,
+      `      vacuous condition: step ${v.id} matches nobody — always takes false ` +
+        `(${v.nextFalseId}); true branch (${v.trueBranchType} ${v.nextTrueId}) never runs`,
     );
   }
 
@@ -245,7 +245,7 @@ async function main() {
   if (vacuous.length > 0 && !process.env.ALLOW_VACUOUS_CONDITIONS) {
     console.error(
       `\nRefusing to import: ${vacuous.length} condition step(s) carry no translatable ` +
-        `filter, so Redo would match every customer and silently take the true branch. ` +
+        `filter, so Redo would match no customer and silently take the false branch. ` +
         `Resolve the filter (see the warnings above) or re-run with ` +
         `ALLOW_VACUOUS_CONDITIONS=1 to import as-is.`,
     );

@@ -62,7 +62,7 @@ What comes back:
 - **Trigger mapping** — which Redo trigger each Klaviyo trigger became
 - **Warnings** — `degraded-mapping`, `requires-review`, `skipped-step`,
   `unsupported-action`, `unsupported-trigger`
-- **Hard stops** — a condition that would match every customer blocks the import
+- **Hard stops** — a condition that would match no customer blocks the import
   outright, because a flow that looks imported and silently behaves differently
   is worse than one that didn't import
 

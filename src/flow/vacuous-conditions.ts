@@ -1,8 +1,10 @@
 // A CONDITION step whose expression is an inline segment with zero conditions
-// matches *everyone*. redoapp's condition-evaluator routes
-// `dataSource: "inline-segment"` to doesCustomerMatchSegmentQuery, and an empty
-// AND query is vacuously true (redo/flows/service/src/condition-evaluator.ts).
-// The branch always takes the true path; the false path never runs.
+// matches *nobody*. redoapp's condition-evaluator routes
+// `dataSource: "inline-segment"` to doesCustomerMatchSegmentQuery, which wraps
+// the block and short-circuits: "A condition block with no conditions should not
+// match any customer" (redo/marketing/db/util/src/segments/
+// evaluate-segment-membership.ts:184). The branch always takes the false path;
+// the true path never runs.
 //
 // Klaviyo filters no translator understands fall through to a placeholder that
 // warns and contributes no condition, so a split built only from un-translatable
@@ -16,8 +18,8 @@ export interface VacuousCondition {
   id: string;
   nextTrueId: string;
   nextFalseId: string;
-  /** Step type the false branch heads into — what will never run. */
-  falseBranchType: string;
+  /** Step type the true branch heads into — what will never run. */
+  trueBranchType: string;
 }
 
 function isVacuousExpression(expression: unknown): boolean {
@@ -39,7 +41,7 @@ export function findVacuousConditions(steps: Step[]): VacuousCondition[] {
       id: step.id,
       nextTrueId: step.nextTrueId,
       nextFalseId: step.nextFalseId,
-      falseBranchType: byId.get(step.nextFalseId)?.type ?? "missing",
+      trueBranchType: byId.get(step.nextTrueId)?.type ?? "missing",
     });
   }
   return out;

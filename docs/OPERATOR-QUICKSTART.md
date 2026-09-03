@@ -112,8 +112,8 @@ Then re-run. (`SKIP_VERSION_CHECK=1` overrides — don't, unless you're offline.
 **2. `Refusing to import: N condition step(s) carry no translatable filter`**
 
 A branch in the flow uses a Klaviyo filter mime can't express in Redo. Imported
-as-is, that branch would match **every** customer and always take the true path —
-the false branch would never run. The flow would look imported and behave
+as-is, that branch would match **no** customer and always take the false path —
+the true branch would never run. The flow would look imported and behave
 differently, silently. That's worse than not importing it.
 
 Fix the mapping (Claude will propose one), or import as-is on purpose with

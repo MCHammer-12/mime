@@ -22,11 +22,11 @@ function condition(expression: unknown): Step {
 }
 
 const tail: Step[] = [
-  { type: StepType.DO_NOTHING, id: "send" } as Step,
+  { type: StepType.SEND_EMAIL, id: "send" } as Step,
   { type: StepType.DO_NOTHING, id: "nothing" } as Step,
 ];
 
-// ─── Empty inline segment matches everyone ───
+// ─── Empty inline segment matches nobody — the true branch is dead ───
 
 const empty = findVacuousConditions([
   condition({ dataSource: "inline-segment", inlineSegment: { mode: "AND", conditions: [] } }),
@@ -34,7 +34,7 @@ const empty = findVacuousConditions([
 ]);
 if (empty.length !== 1) fail(`empty inline segment: expected 1 vacuous condition, got ${empty.length}`);
 if (empty[0].id !== "split") fail("empty inline segment: wrong step id");
-if (empty[0].falseBranchType !== StepType.DO_NOTHING) fail("empty inline segment: wrong false-branch type");
+if (empty[0].trueBranchType !== StepType.SEND_EMAIL) fail("empty inline segment: wrong true-branch type");
 console.log("✓ empty inline segment flagged");
 
 // ─── A translated filter is fine ───

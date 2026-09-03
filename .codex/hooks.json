@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/Users/michael.hammer/code/redo/mime/.codex/hooks/sync-main.sh'",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
