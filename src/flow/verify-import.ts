@@ -187,11 +187,25 @@ export function verifyFlow(
   const expectedTrigger = expected.steps.find((s) => s.type === "trigger");
   const actualTrigger = actualSteps.find((s) => s.type === "trigger");
   if (expectedTrigger && actualTrigger) {
+    // The server canonicalizes object key order on write, so a raw
+    // JSON.stringify compare flags correctly-landed skipConditions as
+    // "broken" (Bronco Western 2026-09-02: 3 false positives). Sort keys
+    // recursively before comparing.
+    const canon = (v: unknown): unknown =>
+      Array.isArray(v)
+        ? v.map(canon)
+        : v && typeof v === "object"
+          ? Object.fromEntries(
+              Object.keys(v as object)
+                .sort()
+                .map((k) => [k, canon((v as any)[k])]),
+            )
+          : v;
     for (const field of ["frequencyCap", "shouldSkipSmartSending", "skipConditions"]) {
       const want = (expectedTrigger as any)[field];
       if (want === undefined || want === null) continue;
       const got = (actualTrigger as any)[field];
-      const same = JSON.stringify(want) === JSON.stringify(got);
+      const same = JSON.stringify(canon(want)) === JSON.stringify(canon(got));
       checks.push({
         item: `trigger.${field} in "${label}"`,
         dimension: "logic",

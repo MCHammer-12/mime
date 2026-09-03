@@ -284,6 +284,21 @@ async function convertAction(
       // {{ view_in_browser_link }} and any {{ event|lookup:'…' }} that only
       // Klaviyo can resolve. See TransformOptions.customEvent.
       const customEvent = flowSchemaType === SchemaType.CUSTOM_EVENT;
+      // A send-email with no template_id is an email the merchant never
+      // built in Klaviyo (draft flows ship these with stub subjects like
+      // "Email #4 Subject"). Without a recorded reason the blank surfaces
+      // as "resolved to null with no recorded reason" / "failed to create",
+      // which reads like an importer bug (Bronco Western 2026-09-02).
+      if (!msg.template_id) {
+        warnings.push({
+          kind: "requires-review",
+          actionId: id,
+          message: `send-email "${msg.subject_line ?? ""}" has no template in Klaviyo — the email was never built there. Imported as a blank placeholder; write the content in Redo or delete the step.`,
+        });
+        templateWarnings.push(
+          "No template in Klaviyo: the email was never built there (blank placeholder imported)",
+        );
+      }
       if (templateResolver && msg.template_id) {
         const resolved = await templateResolver.resolve(msg.template_id, {
           customEvent,
