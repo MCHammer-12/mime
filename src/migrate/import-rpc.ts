@@ -599,7 +599,7 @@ async function downloadFontBytes(url: string): Promise<Uint8Array> {
   return new Uint8Array(await res.arrayBuffer());
 }
 
-async function uploadAttachment(
+export async function uploadAttachment(
   bytes: Uint8Array,
   fileName: string,
   options: ImportOptions,
