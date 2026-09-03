@@ -54,6 +54,23 @@ const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string>>> = {
   [SchemaType.MARKETING_COMMENTSOLD_CART_ABANDONMENT]: {
     "event.URL": "checkout_url",
   },
+  // Klaviyo's price-drop event fields → baseMarketingPriceDropSchema
+  // (redo/flows/common/src/schemas/marketing/marketing.ts). The schema also
+  // exposes `discountedProduct: Maybe Trigger Product` with .url/.image_url
+  // (product-variables.ts documents that dotted usage), which covers the
+  // image and clickthrough tokens the flattened fields don't.
+  [SchemaType.MARKETING_PRICE_DROP]: {
+    "event.product_name":      "product_title",
+    "event.original_price":    "formatted_previous_price",
+    "event.reduced_price":     "formatted_current_price",
+    "event.price_drop_amount": "formatted_savings",
+    "event.price_drop_percent": "formatted_price_drop_percentage",
+    "event.image_url":         "discounted_product.image_url",
+    "event.url":               "discounted_product.url",
+    // Already a valid Redo field (schema's unsubscribeLink, auto-snake-cased);
+    // listed so the rewriter recognises it instead of flagging it as dropped.
+    "unsubscribe_link":        "unsubscribe_link",
+  },
 };
 
 // Klaviyo `organization.*` tokens are merchant constants (name, site URL,
