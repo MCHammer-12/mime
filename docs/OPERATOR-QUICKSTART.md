@@ -16,8 +16,10 @@ accuracy — is in [HYBRID-RUN.md](HYBRID-RUN.md).
 
 ## One-time setup (~15 min)
 
-**1. Get access.** Ask Michael for collaborator access on `MCHammer-12/mime`.
-(`MCHammer-12/jwt-bandit` is public — no access needed.)
+**1. Get access.** Both repos are public — nothing to request. What you do need is
+a Redo **admin** account on `admin.getredo.com` for step 4. Without one, skip steps
+3 and 4 and paste a merchant JWT per run instead — see
+[ONBOARDING.md](ONBOARDING.md) path B.
 
 **2. Clone and install.**
 

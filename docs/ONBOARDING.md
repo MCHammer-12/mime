@@ -7,16 +7,18 @@ Current roster: Bailey Kealamakia, Milo Atwood, Austin Napierski.
 
 ## 1. What Michael does first (once per person)
 
-| # | Thing | Where |
+Usually nothing. Both `MCHammer-12/mime` and `MCHammer-12/jwt-bandit` are public.
+The only prerequisite is Redo access, and which one depends on the token path:
+
+| Path | Needs | Good for |
 |---|---|---|
-| 1 | GitHub collaborator on **`MCHammer-12/mime`** | repo → Settings → Collaborators |
-| 2 | Confirm they have a **Redo admin account** on `admin.getredo.com` | admin dashboard |
+| **A — jwt-bandit** (recommended) | a **Redo admin account** on `admin.getredo.com` | anyone running this more than once — resolves a store by name and mints its own session for any team |
+| **B — paste a JWT** | browser access to the merchant's own Redo store | a one-off run, or before an admin account exists |
 
-`MCHammer-12/jwt-bandit` is public — nothing to grant there.
+Path A is worth the extra five minutes of setup. On path B the operator re-copies
+a token out of DevTools for every store, and every token expires.
 
-Nothing else. The operator does the rest from inside Claude Code.
-
-> The admin token each person stores is **org-wide root** — it can mint a merchant
+> The admin token path A stores is **org-wide root** — it can mint a merchant
 > session for any team. One per person, in their own Keychain, never shared, never
 > pasted into chat.
 
@@ -24,7 +26,9 @@ Nothing else. The operator does the rest from inside Claude Code.
 
 ## 2. Paste this into Claude Code (the operator, once)
 
-Open Claude Code in `~/code` (or wherever you keep repos) and paste the whole block:
+Open Claude Code in `~/code` (or wherever you keep repos) and paste one block.
+
+### Path A — jwt-bandit
 
 ```
 Set me up to run mime (the Klaviyo → Redo migration tool). Work through this in order and
@@ -32,8 +36,7 @@ stop at any step that needs me.
 
 1. Check I have node >= 20. If not, tell me and stop.
 2. Clone https://github.com/MCHammer-12/mime.git and https://github.com/MCHammer-12/jwt-bandit.git
-   into the current directory. If the mime clone 404s, tell me — it means I haven't been added
-   yet. (jwt-bandit is public.)
+   into the current directory. Both are public.
 3. In mime/: run `npm install`.
 4. In jwt-bandit/: run `npm link` so `jwt-bandit` is on my PATH. Verify with `which jwt-bandit`.
 5. Stop and tell me to get my Redo admin token: on an authenticated admin.getredo.com session,
@@ -46,19 +49,53 @@ stop at any step that needs me.
    https://app-server.getredo.com/rpc/getAdvancedFlows with header `Authorization: <token>`
    (NO "Bearer" prefix — merchant RPCs reject it). Expect HTTP 200 and a list of flows.
    Report the flow count only. Never print either token.
-8. From mime/, read CLAUDE.md and docs/ONBOARDING.md so you know the rules, then tell me I'm
-   set up and what to give you to start a migration.
+8. From mime/, read CLAUDE.md, docs/ONBOARDING.md and docs/HYBRID-RUN.md so you know the rules,
+   then tell me I'm set up and what to give you to start a migration.
 ```
 
-Expected time: 10 minutes, most of it waiting on `npm install` and the DevTools copy.
+### Path B — paste a JWT each run
+
+No admin account, no Keychain, no jwt-bandit. Setup is one step shorter; every
+run costs one DevTools copy.
+
+```
+Set me up to run mime (the Klaviyo → Redo migration tool). I don't have a Redo admin
+account, so I'll paste a merchant JWT for each run instead of minting one.
+
+1. Check I have node >= 20. If not, tell me and stop.
+2. Clone https://github.com/MCHammer-12/mime.git into the current directory (it's public)
+   and run `npm install` in it.
+3. Stop and tell me to grab a merchant JWT: log into the merchant's store on app.getredo.com,
+   DevTools → Network → click any request to app-server.getredo.com → copy the whole
+   Authorization header value. It is a raw JWT with NO "Bearer" prefix. Tell me to paste it.
+4. When I paste it, write it to a file outside the repo (chmod 600) and export REDO_JWT from
+   that file — never echo it, never put it in a repo file. Decode its `aud` claim: it reads
+   `mcht/<teamId>`, and that team id IS the store, so I don't need to give you a store name.
+   Tell me which store it resolved to and confirm it's the right one.
+5. Verify it works: POST https://app-server.getredo.com/rpc/getAdvancedFlows with header
+   `Authorization: <the raw JWT>` and body {"input":{"getUsers":false,"includeMetrics":false,
+   "includeOriginFlows":false}}. Expect HTTP 200. Report the flow count only.
+6. From mime/, read CLAUDE.md, docs/ONBOARDING.md and docs/HYBRID-RUN.md so you know the rules,
+   then tell me I'm set up and what to give you to start a migration.
+
+For the rest of this session, skip src/flow/resolve-store.ts — it needs an admin token I don't
+have. Use the team id from the JWT directly.
+```
+
+Tokens expire in about 30 days on path A and sooner on path B — when an RPC
+starts returning 401, get a fresh one. It is never a bug in mime.
+
+Expected time: 10 minutes on path A, 5 on path B — most of it waiting on `npm install`
+and the DevTools copy.
 
 If a step fails, say what failed and Claude will name the cause. The common ones:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `git clone` → 404 | Not added to the repo yet | Ping Michael |
+| `git clone` fails | Network or a typo — both repos are public, so it isn't access | Re-run the clone |
 | `jwt-bandit: command not found` | `npm link` didn't run or PATH is stale | Re-run `npm link` in `jwt-bandit/`, open a new shell |
 | Mint returns 401 | Admin token partial or expired (~30 day life) | Re-run `jwt-bandit setup` |
+| `no admin token` from resolve-store | Path B — there is no admin token by design | Skip resolve-store; use the team id from the JWT's `aud` claim |
 | RPC returns 401 with a fresh token | `Bearer ` prefix on a merchant RPC | Send the raw JWT, no prefix |
 
 ---
@@ -67,7 +104,8 @@ If a step fails, say what failed and Claude will name the cause. The common ones
 
 Give Claude three things:
 
-1. **Merchant name** — so it can find the Redo store
+1. **Merchant name** — so it can find the Redo store. On path B, paste the merchant
+   JWT instead: it carries the team id in its `aud` claim, so the name is redundant
 2. **Klaviyo private API key** — `pk_...` (read access is enough)
 3. **The list of flows / templates to bring over** — names as they appear in Klaviyo
 
