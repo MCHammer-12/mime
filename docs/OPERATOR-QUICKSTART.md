@@ -1,9 +1,11 @@
 # Operator quickstart
 
 mime brings a merchant's Klaviyo flows and email templates into Redo. You run it
-locally, from this repo, with Claude Code driving it. Claude runs the commands
-and resolves what the deterministic code can't map; you approve anything a
-merchant would notice.
+locally, from this repo, with Claude Code driving it.
+
+You give three things and read one report. In between, Claude runs the commands,
+resolves what the deterministic code can't map, and decides the merchant-visible
+calls itself — it reports them, it doesn't ask.
 
 Everything imports **inactive** in Redo. Nothing you run here can send an email.
 
@@ -14,8 +16,8 @@ accuracy — is in [HYBRID-RUN.md](HYBRID-RUN.md).
 
 ## One-time setup (~15 min)
 
-**1. Get access.** Ask Michael for collaborator access on two private repos:
-`MCHammer-12/mime` and `MCHammer-12/jwt-bandit`.
+**1. Get access.** Ask Michael for collaborator access on `MCHammer-12/mime`.
+(`MCHammer-12/jwt-bandit` is public — no access needed.)
 
 **2. Clone and install.**
 
@@ -54,23 +56,27 @@ it like a production password. Never put it in a file, a dotfile, git, or Slack.
 **What you need before starting:**
 
 - The merchant's Klaviyo private API key (`pk_…`) — from the merchant, or Beacon
-- The Redo team id — the 24-hex id in the merchant's Redo URL (`/stores/<id>`)
-- The list of flows and templates to bring over — usually from the call transcript
+- **The store's name in Redo** — the name, not an id
+- The list of flows to bring over — usually from the call transcript
 
 **Then just tell Claude, in this repo:**
 
-> Bring over these flows for `<merchant>`: `<names>`. Klaviyo key `pk_…`, Redo
-> team `<24-hex id>`.
+> Migrate `<store name>`. Klaviyo key `pk_…`. Bring over these flows: `<names>`.
+>
+> Run the whole loop in docs/HYBRID-RUN.md end to end. Don't stop to ask me about
+> merchant-visible choices — decide them, and put every decision in the report.
 
-Claude does the rest — lists the flows, matches names to Klaviyo ids, diagnoses
-each one, imports, and reports what landed and what didn't.
+Claude resolves the name to a team id, mints a JWT, lists the Klaviyo flows,
+matches names to ids, diagnoses each one, imports, QAs the store, writes what it
+learned back into the code, and hands you a report.
 
 ### What Claude is actually running
 
 For reference, or if you want to run one by hand.
 
 ```bash
-# mint a merchant JWT (30 days)
+# store name -> team id + a minted JWT (accepts a 24-hex id too)
+npx tsx src/flow/resolve-store.ts "Bailey's Blossoms"
 REDO_JWT="$(jwt-bandit <teamId> 2>/dev/null)"
 
 # dry run — parses, warns, writes nothing
@@ -80,6 +86,10 @@ KLAVIYO_API_KEY=pk_... REDO_JWT="$REDO_JWT" FLOW_ID=<klaviyoFlowId> \
 # real import — same command, drop DIAGNOSE_ONLY
 KLAVIYO_API_KEY=pk_... REDO_JWT="$REDO_JWT" FLOW_ID=<klaviyoFlowId> \
   SKIP_AI=1 npx tsx src/flow/import-one.ts
+
+# QA the store — renders every template and checks absolute invariants
+REDO_JWT="$REDO_JWT" FLOW_FILTER="<name fragment>" QA_JSON=/tmp/qa.json \
+  npx tsx src/flow/qa-store.ts
 
 # a standalone template (not attached to a flow)
 KLAVIYO_API_KEY=pk_... REDO_JWT="$REDO_JWT" TEMPLATE_ID=<klaviyoTemplateId> \
@@ -96,33 +106,34 @@ nothing has been written to the merchant's Redo account yet.
 
 ## When the tool stops
 
-Three guards deliberately halt a run. Each means something different.
+Three guards halt a run. Claude clears the first two itself; only the third is
+about you.
 
 **1. `Refusing to run: this clone is N commit(s) behind origin/main`**
 
 Someone fixed a mapping you don't have yet. Running anyway would re-import a bug
 that's already solved, and would re-learn a mapping that's already in the code.
-
-```bash
-git pull
-```
-
-Then re-run. (`SKIP_VERSION_CHECK=1` overrides — don't, unless you're offline.)
+Claude pulls and re-runs. (`SKIP_VERSION_CHECK=1` overrides — don't, unless
+you're offline.)
 
 **2. `Refusing to import: N condition step(s) carry no translatable filter`**
 
 A branch in the flow uses a Klaviyo filter mime can't express in Redo. Imported
 as-is, that branch would match **no** customer and always take the false path —
 the true branch would never run. The flow would look imported and behave
-differently, silently. That's worse than not importing it.
+differently, silently.
 
-Fix the mapping (Claude will propose one), or import as-is on purpose with
-`ALLOW_VACUOUS_CONDITIONS=1` and hand the merchant a note about the branch.
+Claude works the mapping out and puts it in the code. If nothing maps, it imports
+on purpose with `ALLOW_VACUOUS_CONDITIONS=1` and the branch goes in the report as
+a known issue. Either way the run continues.
 
-**3. `requires-review: …` warnings**
+**3. `"<name>" matches N stores` from resolve-store**
 
-Not a stop — the run continues. Something mapped approximately or got dropped.
-Read them; they're what goes in the merchant report.
+This one is yours. The store name is ambiguous, and writing flows into the wrong
+merchant's account is the one mistake here that can't be undone from outside.
+Re-run with the full name or the team id.
+
+`requires-review: …` warnings are not a stop — they're what goes in the report.
 
 ---
 
@@ -132,11 +143,12 @@ This is the part that makes the tool get better instead of staying at 90%.
 
 When Claude figures out how to map something the code didn't know — a trigger, a
 metric, a font, a condition — that mapping goes **into the code**, not just into
-this one import. Next merchant, it happens automatically with no intervention.
+this one import, and gets committed and pushed in the same run. Next merchant, it
+happens automatically. Skipping this is how five people end up solving the same
+problem five times.
 
-So: when Claude proposes a code change after resolving a mapping, approve it and
-let it commit and push. Anyone on the team can approve. Skipping this is how five
-people end up solving the same problem five times.
+The report lists every code change with its commit, so you can read what changed
+after the fact and revert anything you disagree with.
 
 Merchant-specific facts (a store's discount prefix, their org name) go in the run
 notes instead — those aren't mappings.
@@ -147,8 +159,10 @@ notes instead — those aren't mappings.
 
 - **Never commit merchant data or credentials.** `migrations/` is gitignored;
   keep merchant output there. Keys and JWTs go in the environment, never a file.
-- **Everything lands inactive.** Review in Redo before anyone turns a flow on.
-- **Ask before anything a merchant would notice.** Mechanical choices are yours;
-  anything that changes what a customer receives is a conversation.
+- **Everything lands inactive.** This is the whole safety net for an unattended
+  run — read the report before anyone turns a flow on.
+- **Claude decides, then reports.** Merchant-visible calls are made during the
+  run and listed in the report with the option that was rejected. Overrule them
+  there, before activation.
 - **One person per store at a time.** Check for an existing import in the Redo
   account before you start — re-running creates duplicate flows, not updates.
