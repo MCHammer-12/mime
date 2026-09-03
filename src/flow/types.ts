@@ -193,6 +193,24 @@ export interface CustomEventTriggerFields {
   }>;
 }
 
+// Redo's `price_drop` trigger REQUIRES all three of these (redoapp
+// marketingPriceDropTriggerStepSchema): the minimum drop that fires it, which
+// prior shopper actions qualify a contact, and how far back those actions
+// count. Klaviyo's price-drop trigger carries the same three settings
+// (price_drop_amount_value/unit, audience, timeframe_days).
+export interface MarketingPriceDropTriggerFields {
+  minimumPriceDropAmount: {
+    type: "percentage" | "currency";
+    value: number;
+  };
+  contactRequirements: {
+    productViewed: boolean;
+    addedToCart: boolean;
+    startedCheckout: boolean;
+  };
+  daysBack: number;
+}
+
 /**
  * Redo's native per-flow re-entry limit, stored on the TRIGGER step
  * (redoapp `frequencyCapSchema` in advanced-flow-db-parser.ts). Absent
@@ -224,8 +242,12 @@ export interface TriggerStep extends BaseStep {
   // Required by Redo for the custom_event trigger; omitted for others. Must
   // match the event name the merchant's integration actually sends.
   eventName?: string;
-  // Required by Redo for the marketing_date trigger; omitted for others.
-  triggerSpecificFields?: MarketingDateTriggerFields | CustomEventTriggerFields;
+  // Required by Redo for the marketing_date, custom_event and price_drop
+  // triggers; omitted for others.
+  triggerSpecificFields?:
+    | MarketingDateTriggerFields
+    | CustomEventTriggerFields
+    | MarketingPriceDropTriggerFields;
 }
 
 export interface WaitStep extends BaseStep {

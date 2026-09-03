@@ -10,6 +10,7 @@ import {
   type KlaviyoFlow,
   type KlaviyoTrigger,
   type MarketingDateTriggerFields,
+  type MarketingPriceDropTriggerFields,
   type ParseWarning,
   type TriggerKey,
 } from "./types.js";
@@ -34,7 +35,10 @@ export interface TriggerResolution {
   eventName?: string;
   // Required by Redo for the marketing_date trigger (parseFlow writes it onto
   // the trigger step). Without it createAdvancedFlow 400s on a 50KB Zod wall.
-  triggerSpecificFields?: MarketingDateTriggerFields | CustomEventTriggerFields;
+  triggerSpecificFields?:
+    | MarketingDateTriggerFields
+    | CustomEventTriggerFields
+    | MarketingPriceDropTriggerFields;
 }
 
 // Redo's merchant-defined event trigger. Never auto-resolved from a Klaviyo
@@ -60,6 +64,48 @@ const BIRTHDAY_ON_DAY: MarketingDateTriggerFields = {
   dimension: "birthday",
   comparison: { type: "today", options: null },
 };
+
+// Redo's price_drop trigger 400s without triggerSpecificFields. Klaviyo's
+// price-drop trigger carries the same three settings, so translate directly:
+// amount value/unit, audience (which shopper actions qualify a contact —
+// observed tokens: "viewed", "added-to-cart", "checkout-started"), and
+// timeframe_days (Redo clamps daysBack to 1–365).
+function priceDropTriggerFields(
+  t: KlaviyoTrigger,
+  warnings: ParseWarning[],
+): MarketingPriceDropTriggerFields {
+  const audience = t.audience ?? [];
+  const contactRequirements = {
+    productViewed: audience.some((a) => a.includes("view")),
+    addedToCart: audience.some((a) => a.includes("cart")),
+    startedCheckout: audience.some((a) => a.includes("checkout")),
+  };
+  if (!Object.values(contactRequirements).some(Boolean)) {
+    warnings.push({
+      kind: "degraded-mapping",
+      message: `price-drop trigger audience ${JSON.stringify(audience)} did not map to any Redo contact requirement — defaulted to "viewed product". Adjust in the Redo flow builder before enabling.`,
+    });
+    contactRequirements.productViewed = true;
+  }
+  let amount: MarketingPriceDropTriggerFields["minimumPriceDropAmount"];
+  if (t.price_drop_amount_value && t.price_drop_amount_value > 0) {
+    amount = {
+      type: t.price_drop_amount_unit === "percent" ? "percentage" : "currency",
+      value: t.price_drop_amount_value,
+    };
+  } else {
+    warnings.push({
+      kind: "degraded-mapping",
+      message: `price-drop trigger has no minimum drop amount in Klaviyo — defaulted to 10%. Adjust in the Redo flow builder before enabling.`,
+    });
+    amount = { type: "percentage", value: 10 };
+  }
+  return {
+    minimumPriceDropAmount: amount,
+    contactRequirements,
+    daysBack: Math.min(365, Math.max(1, Math.round(t.timeframe_days ?? 30))),
+  };
+}
 
 // Well-known Klaviyo metric names → Redo trigger. Keys are case-insensitive.
 // Merchants customize metric NAMES rarely but metric IDs always — the name is
@@ -408,7 +454,12 @@ export function resolveTrigger(
         triggerSpecificFields: BIRTHDAY_ON_DAY,
       };
     case "price-drop":
-      return { key: MarketingTriggerKey.PRICE_DROP, schemaType: SchemaType.MARKETING_PRICE_DROP, category: "Marketing" };
+      return {
+        key: MarketingTriggerKey.PRICE_DROP,
+        schemaType: SchemaType.MARKETING_PRICE_DROP,
+        category: "Marketing",
+        triggerSpecificFields: priceDropTriggerFields(t, warnings),
+      };
     default:
       warnings.push({
         kind: "unsupported-trigger",
