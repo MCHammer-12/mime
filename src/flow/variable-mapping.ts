@@ -110,8 +110,10 @@ function resolveOrgToken(varPath: string, account: KlaviyoAccount): string | nul
 // map is guaranteed to be rejected by Redo's template validator, so leaving it
 // verbatim costs the entire flow import. Drop to empty + warn instead: the flow
 // lands and the operator gets a breadcrumb. Tokens outside these roots are left
-// alone — they may already be valid Redo variables.
-const KLAVIYO_ROOTS = ["person", "event", "organization", "catalog_item"];
+// alone — they may already be valid Redo variables. `today` is Klaviyo's date
+// global (bound by its `{% today %}` tag); Redo's validator rejects it on any
+// trigger, so it drops like a namespace (White Elm 2026-09-04).
+const KLAVIYO_ROOTS = ["person", "event", "organization", "catalog_item", "today"];
 
 // Matches any Klaviyo root used as a word inside a Liquid tag or filter chain.
 // Built from KLAVIYO_ROOTS so a root added above is covered everywhere — the
@@ -301,8 +303,10 @@ export function sanitizeTemplateLiquid(
     // lets them through and then renders the tag as literal text. Drop the
     // output-style ones; leave control flow alone (stripping a `{% if %}`
     // would orphan its `{% endif %}`) and flag both kinds either way.
+    // [\s\S]*? not [^%]*: a tag body may contain literal % (strftime formats —
+    // `{% today '%Y-%m-%d' as today %}` was invisible to the old scan).
     let out = s;
-    for (const m of s.matchAll(/\{%\s*(\w+)[^%]*%\}/g)) {
+    for (const m of s.matchAll(/\{%\s*(\w+)[\s\S]*?%\}/g)) {
       if (!KLAVIYO_ONLY_TAGS.has(m[1]!) && !KLAVIYO_ROOT_RE.test(m[0]))
         continue;
       unresolvableTags.push(m[0].trim());
