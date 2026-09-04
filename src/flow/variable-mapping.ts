@@ -175,6 +175,19 @@ function parseLiquidVar(inside: string): { varPath: string; filters: string } | 
 //
 // Returns { output, unmappedTokens } where unmapped tokens are varPaths
 // not in the map. Caller decides whether to skip the webhook based on count.
+// Klaviyo's price-drop event fields are bare numbers, so templates supply the
+// symbol and number-formatting themselves: "${{ … }}", "{{ … }}%",
+// |floatformat:2. The Redo formatted_* fields they map to are strings that
+// already carry the symbol — left alone the literal doubles ("$$71.99",
+// "20%% off") and floatformat breaks on the non-number (Bronco price-drop
+// email). Fold the now-redundant literals and filters into the token.
+function dedupeFormattedSymbols(s: string): string {
+  return s
+    .replace(/(\{\{\s*formatted_[a-z_]*percentage[^}]*\}\})\s*%/gi, "$1")
+    .replace(/\$\s*(\{\{\s*formatted_[a-z_]*(?:price|savings)[^}]*\}\})/gi, "$1")
+    .replace(/(\{\{\s*formatted_[a-z_]+[^}]*?)\s*\|\s*floatformat(?::\d+)?/gi, "$1");
+}
+
 export function rewriteKlaviyoLiquid(
   input: string,
   warnings: ParseWarning[],
@@ -252,7 +265,7 @@ export function rewriteKlaviyoLiquid(
     });
   }
 
-  return { output, unmappedTokens };
+  return { output: dedupeFormattedSymbols(output), unmappedTokens };
 }
 
 /**

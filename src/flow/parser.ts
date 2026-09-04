@@ -12,7 +12,7 @@ import { collapseConsentSplits } from "./flatten.js";
 import { treeifyFlow } from "./treeify.js";
 import { resolveTrigger, summarizeTriggerFilter, type TriggerResolution } from "./trigger-mapping.js";
 import { rewriteKlaviyoLiquid, sanitizeTemplateLiquid } from "./variable-mapping.js";
-import { substituteStringVars } from "../transform.js";
+import { substituteStringVars, visibleTextLength } from "../transform.js";
 import { formatAddress, type KlaviyoAccount } from "../fetch-account.js";
 import {
   SchemaType,
@@ -323,6 +323,19 @@ async function convertAction(
           // Klaviyo Liquid that survived the HTML parse (logo clickthroughs,
           // hand-rolled cart cards) 400s createEmailTemplate and takes the
           // whole flow with it. Resolve what we can, drop what we can't.
+          // Snapshot which text sections carry visible copy before the scrub.
+          // A section that was ONLY Klaviyo-only Liquid — e.g. a price line of
+          // `{% catalog … %}{% currency_format catalog_item.metadata.price %}{% endcatalog %}`
+          // (Bronco back-in-stock) — comes out of the scrub blank and must be
+          // dropped, not shipped as an empty line. Sections that never had
+          // visible text (&nbsp; spacers) are left alone.
+          const preScrubHadCopy = Array.isArray(fullTemplate.sections)
+            ? fullTemplate.sections.map(
+                (b: any) =>
+                  b?.type === "text" &&
+                  visibleTextLength(String(b.text ?? "")) > 0,
+              )
+            : [];
           const sanitized = sanitizeTemplateLiquid(
             fullTemplate.sections,
             id,
@@ -330,6 +343,18 @@ async function convertAction(
             flowSchemaType,
             account,
           );
+          if (Array.isArray(fullTemplate.sections)) {
+            fullTemplate.sections = fullTemplate.sections.filter(
+              (b: any, i: number) => {
+                if (!preScrubHadCopy[i]) return true;
+                if (visibleTextLength(String(b.text ?? "")) > 0) return true;
+                templateWarnings.push(
+                  "Dropped a text section left empty after removing Klaviyo-only Liquid",
+                );
+                return false;
+              },
+            );
+          }
           if (sanitized.unmappedTokens.length > 0 || sanitized.unresolvableTags.length > 0) {
             templateWarnings.push(
               `Dropped Klaviyo-only Liquid: ${[...sanitized.unmappedTokens, ...sanitized.unresolvableTags].join(", ")}`,

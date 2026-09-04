@@ -301,8 +301,11 @@ function ruleBasedStripInlineCoupon(html: string): string | null {
   // entire chunk from the html.
   const match = INLINE_COUPON_PHRASE_RE.exec(html);
   if (!match) return null;
+  // Replace with a space, not "" — the phrase often sits mid-sentence and an
+  // empty replacement glues the halves together ("Use code:All you have to
+  // do is…" — Bronco welcome email). The collapse below dedupes the space.
+  let result = html.replace(INLINE_COUPON_PHRASE_RE, " ");
   // Collapse consecutive whitespace / empty tags the removal leaves behind.
-  let result = html.replace(INLINE_COUPON_PHRASE_RE, "");
   result = result
     .replace(/(<span[^>]*>)(\s|&nbsp;)*(<\/span>)/gi, "")
     .replace(/\s{2,}/g, " ")
@@ -611,6 +614,37 @@ export function substituteStringVars(
 function substituteTextVars(html: string, ctx: Ctx): string {
   let result = html;
 
+  // CKEditor artifact: the author's real href is stashed in
+  // data-cke-saved-href while the visible href gets URL-encoded into a
+  // klaviyo.com/media/js/lib/ckeditor/… form. Restore the real value so the
+  // rewrites below see the Liquid tag, and drop the artifact attribute.
+  result = result.replace(
+    /<a\s([^>]*?)data-cke-saved-href="([^"]*)"([^>]*)>/gi,
+    (_m, pre: string, saved: string, post: string) => {
+      let attrs = `${pre}${post}`.trim();
+      attrs = /href="/i.test(attrs)
+        ? attrs.replace(/href="[^"]*"/i, () => `href="${saved}"`)
+        : `${attrs} href="${saved}"`;
+      return `<a ${attrs}>`;
+    },
+  );
+
+  // Preferences links: Redo has no manage-preferences page, but its
+  // unsubscribe page is where a recipient adjusts email settings. Keep the
+  // anchor and its visible text — dropping the whole link ate the object of
+  // the sentence ("feel free to change your ." — Bronco sunset email). Under
+  // custom_event the schema has no unsubscribe_link, so there the drop in
+  // dropUnsupportedAnchors still applies.
+  if (!ctx.customEvent && /href="\{%\s*manage_preferences/i.test(result)) {
+    result = result.replace(
+      /href="\{%\s*manage_preferences(?:_link)?(?:\s+'[^']*')?\s*%\}"/gi,
+      'href="{{ unsubscribe_link }}"',
+    );
+    ctx.subs.push(
+      "href={% manage_preferences_link %} → {{ unsubscribe_link }} (link text kept)",
+    );
+  }
+
   result = dropUnsupportedAnchors(result, ctx);
   result = dropUnsupportedBlockTags(result, ctx);
 
@@ -801,7 +835,7 @@ function isEffectivelyEmpty(html: string): boolean {
   return visibleTextLength(html) === 0;
 }
 
-function visibleTextLength(html: string): number {
+export function visibleTextLength(html: string): number {
   return html
     .replace(/<[^>]+>/g, "")
     .replace(/&nbsp;/gi, "")

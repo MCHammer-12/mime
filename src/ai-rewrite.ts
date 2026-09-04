@@ -94,7 +94,8 @@ Rules:
 4. Don't add any new links, buttons, or markup. Don't add emoji or formatting the original didn't have.
 5. When the original sentence referred to "the code" or "code below" or "use the code X", rewrite to say "the code below" or similar — refer to the block that's being inserted.
 6. If the sentence after removal would be stubby or awkward, merge it with an adjacent sentence rather than leaving a fragment.
-7. Output ONLY the rewritten HTML fragment. No preamble, no explanation, no code fences.
+7. Never glue two clauses together without a space ("Use code:All you have to do…") and never leave a dangling half-sentence ("at checkout to get 10% off!"). Every sentence in the output must read as a complete sentence with normal spacing. A short lead-in like "Use the code below:" is fine — the discount block renders right under it.
+8. Output ONLY the rewritten HTML fragment. No preamble, no explanation, no code fences.
 
 Examples:
 
