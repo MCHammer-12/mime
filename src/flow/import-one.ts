@@ -279,6 +279,12 @@ async function main() {
       case "fonts_done":
         console.log(`      fonts: ${e.uploaded} uploaded, ${e.skipped} skipped`);
         break;
+      case "static_products_fallback":
+        console.log(
+          `      ~ static product grid in "${e.templateName}" → dynamic best-sellers ` +
+            `(no RPC resolves product names to Shopify ids); re-pin in the editor: ${e.products.join(", ")}`,
+        );
+        break;
     }
   };
 

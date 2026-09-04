@@ -139,9 +139,15 @@ export function decodeJwtAud(jwt: string | null | undefined): string | null {
 }
 
 import { rehostKlaviyoImages } from "./rehost-images.js";
+import { BEST_SELLERS_FILTER } from "../parser/blocks/product.js";
 
 export type ImportProgressEvent =
   | { kind: "filter_created"; templateName: string; productFilterId: string }
+  | {
+      kind: "static_products_fallback";
+      templateName: string;
+      products: string[];
+    }
   | { kind: "template_created"; templateName: string; templateId: string }
   | { kind: "template_failed"; templateName: string; error: string }
   | {
@@ -170,6 +176,12 @@ export interface ImportOptions {
   serverBase?: string;
   account?: KlaviyoAccount | null;
   onProgress?: (event: ImportProgressEvent) => void;
+  /**
+   * Per-job dedupe of created product filters, keyed by the filter doc's
+   * JSON. Lazily initialized on first use; pass a shared Map to dedupe
+   * across templates in one import run.
+   */
+  filterCache?: Map<string, string>;
 }
 
 export interface ImportResult {
@@ -326,34 +338,66 @@ async function preparePayload(
     rest.address = mapAccountAddress(options.account);
   }
 
+  // Template sections are FLAT — each entry IS a block (type + blockId at the
+  // top level), there is no nested `.blocks` array. An earlier version of this
+  // loop walked `section.blocks` and so never touched anything: `_pendingFilter`
+  // sailed through to createEmailTemplate (Zod stripped it, leaving cart grids
+  // with no recommendedProductFilterId) and `_pendingProducts` grids landed as
+  // `static` with an empty product list — an invisible block.
+  //
+  // Identical filter docs are created once per import job, not once per block:
+  // a cart-abandonment template holds one Cart Item grid per branch and every
+  // template in the flow repeats it.
+  const filterCache = (options.filterCache ??= new Map<string, string>());
+  const resolveFilter = async (filterDoc: Record<string, any>) => {
+    const key = JSON.stringify(filterDoc);
+    let productFilterId = filterCache.get(key);
+    if (!productFilterId) {
+      const filterRes = await postMarketingRpc(
+        "createProductFilter",
+        filterDoc,
+        options,
+      );
+      productFilterId = String(filterRes.productFilterId ?? filterRes);
+      filterCache.set(key, productFilterId);
+      options.onProgress?.({
+        kind: "filter_created",
+        templateName: String(template.name ?? ""),
+        productFilterId,
+      });
+    }
+    return productFilterId;
+  };
+
   const sections = Array.isArray(rest.sections) ? rest.sections : [];
   rest.sections = [];
-  for (const section of sections) {
-    const blocks = Array.isArray(section.blocks) ? section.blocks : [];
-    const resolvedBlocks: any[] = [];
-    for (const block of blocks) {
-      if (block && block._pendingFilter) {
-        const filterRes = await postMarketingRpc(
-          "createProductFilter",
-          block._pendingFilter,
-          options,
-        );
-        const productFilterId = filterRes.productFilterId ?? String(filterRes);
-        options.onProgress?.({
-          kind: "filter_created",
-          templateName: String(template.name ?? ""),
-          productFilterId,
-        });
-        const { _pendingFilter: _drop, ...blockRest } = block;
-        resolvedBlocks.push({
-          ...blockRest,
-          recommendedProductFilterId: productFilterId,
-        });
-      } else {
-        resolvedBlocks.push(block);
-      }
+  for (const block of sections) {
+    if (block && block._pendingFilter) {
+      const { _pendingFilter, ...blockRest } = block;
+      rest.sections.push({
+        ...blockRest,
+        recommendedProductFilterId: await resolveFilter(_pendingFilter),
+      });
+    } else if (block && block._pendingProducts) {
+      // Static grid: the parser only recovered product NAMES from the HTML,
+      // and no marketing RPC resolves a name to a Shopify product id. Falling
+      // back to a dynamic best-sellers grid keeps the block visible (static +
+      // empty `manuallySelectedProducts` renders as nothing); the operator can
+      // re-pin the original products in the editor.
+      const { _pendingProducts, ...blockRest } = block;
+      rest.sections.push({
+        ...blockRest,
+        productSelectionType: "dynamic",
+        recommendedProductFilterId: await resolveFilter(BEST_SELLERS_FILTER),
+      });
+      options.onProgress?.({
+        kind: "static_products_fallback",
+        templateName: String(template.name ?? ""),
+        products: _pendingProducts.map((p: { name: string }) => p.name),
+      });
+    } else {
+      rest.sections.push(block);
     }
-    rest.sections.push({ ...section, blocks: resolvedBlocks });
   }
 
   // Pull Klaviyo-hosted images onto Redo. Left alone they break the moment the

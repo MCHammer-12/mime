@@ -26,7 +26,7 @@ import type * as cheerio from "cheerio";
 
 // ─── Filter defaults ───────────────────────────────────────────────
 
-const BEST_SELLERS_FILTER: ProductFilterDoc = {
+export const BEST_SELLERS_FILTER: ProductFilterDoc = {
   name: "Best Sellers",
   provider: "shopify",
   additionalProductFilters: [
