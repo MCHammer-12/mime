@@ -320,6 +320,18 @@ function buildPendingDiscount(originalText: string): PendingDiscount | null {
     : null;
 }
 
+// The chip inherits the host paragraph's look: its font size (a hardcoded 32
+// towered over the copy it sits in), bold (codes render bold in Klaviyo), and
+// the paragraph's alignment — inline text-align in the HTML wins over the
+// block-level default.
+function deriveAlignment(tb: TextBlock): Alignment {
+  const m = tb.text.match(/text-align\s*:\s*(left|right|center)/i);
+  const v = (m?.[1] ?? tb.textAlign ?? "").toLowerCase();
+  if (v === "left") return Alignment.LEFT;
+  if (v === "right") return Alignment.RIGHT;
+  return Alignment.CENTER;
+}
+
 function buildDiscountFromTextBlock(
   tb: TextBlock,
   pending: PendingDiscount | null,
@@ -329,10 +341,10 @@ function buildDiscountFromTextBlock(
     blockId: nextId(),
     sectionPadding: tb.sectionPadding,
     sectionColor: tb.sectionColor,
-    alignment: Alignment.CENTER,
+    alignment: deriveAlignment(tb),
     fontFamily: tb.fontFamily,
-    fontWeight: EmailBuilderFontWeight.NORMAL,
-    fontSize: 32,
+    fontWeight: EmailBuilderFontWeight.BOLD,
+    fontSize: tb.fontSize || 16,
     textColor: tb.textColor,
     blockBackgroundColor: tb.sectionColor,
     ...(pending ? { _pendingDiscount: pending } : {}),
