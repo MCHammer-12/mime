@@ -271,6 +271,26 @@ export interface SocialsBlock extends BaseBlock {
   useBrandKitSocials?: boolean;
 }
 
+/**
+ * Shopify discount configuration inferred from the copy around a coupon code,
+ * shaped for the createDiscount RPC. `summary` is human-readable ("15% off,
+ * expires in 15 days") for warnings and reports.
+ */
+export interface InferredDiscountConfig {
+  discountSettings: Record<string, unknown>;
+  expiration:
+    | { expirationType: "never" }
+    | { expirationType: "expiration"; days: number };
+  summary: string;
+}
+
+export interface PendingDiscount {
+  couponName: string;
+  /** null when the copy never states the offer — the importer then warns and
+   *  leaves the chip unwired instead of inventing a discount. */
+  config: InferredDiscountConfig | null;
+}
+
 export interface DiscountBlock extends BaseBlock {
   type: EmailBlockType.DISCOUNT;
   alignment: Alignment;
@@ -280,6 +300,11 @@ export interface DiscountBlock extends BaseBlock {
   textColor: string;
   blockBackgroundColor: string;
   discountId?: string;
+  // Non-prod: coupon name + config inferred from surrounding copy. Importer
+  // resolves it via getDiscounts/createDiscount, sets `discountId`, then
+  // strips this field. A chip without discountId renders as NOTHING in Redo,
+  // so leaving it unresolved must always come with a warning.
+  _pendingDiscount?: PendingDiscount;
 }
 
 /**

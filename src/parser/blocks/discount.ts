@@ -14,6 +14,7 @@ import {
   parsePx,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
+import { inferDiscountConfig } from "../../discount-infer.js";
 import { parseTextBlock } from "./text.js";
 import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
@@ -81,9 +82,13 @@ export function tryParseDiscountFromText(
     }
 
     const inherited = findInheritedStyles(html, match.index);
-    blocks.push(
-      buildDiscountBlock(match.span, match.name, tdStyle, divStyle, inherited, sectionColor),
-    );
+    const db = buildDiscountBlock(match.span, tdStyle, divStyle, inherited, sectionColor);
+    if (match.name) {
+      // Infer the offer from the whole td's copy — the "15% off" wording
+      // usually sits in the text right above/below the code line.
+      db._pendingDiscount = { couponName: match.name, config: inferDiscountConfig(html) };
+    }
+    blocks.push(db);
 
     cursor = match.index + match.length;
   }
@@ -132,7 +137,16 @@ export function parseCouponBlock(
       (lost.length ? ` — ${lost.join(" and ")} not carried over` : ""),
   );
 
+  // The pill td holds only the code itself, so inference here almost always
+  // comes back null — the importer then links an existing discount by name
+  // or warns. That beats scanning the whole document, where another coupon's
+  // offer could cross-contaminate.
+  const pendingDiscount = name
+    ? { _pendingDiscount: { couponName: name, config: inferDiscountConfig($td.text() ?? "") } }
+    : {};
+
   return {
+    ...pendingDiscount,
     type: EmailBlockType.DISCOUNT,
     blockId: nextId(),
     sectionPadding: parsePaddingFromTd(outerStyle),
@@ -268,7 +282,6 @@ function findInheritedStyles(
 
 function buildDiscountBlock(
   spanTag: string,
-  _couponName: string,
   tdStyle: Record<string, string>,
   divStyle: Record<string, string>,
   inherited: Record<string, string>,

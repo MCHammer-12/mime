@@ -285,6 +285,18 @@ async function main() {
             `(no RPC resolves product names to Shopify ids); re-pin in the editor: ${e.products.join(", ")}`,
         );
         break;
+      case "discount_created":
+        console.log(`      + discount "${e.couponName}" created (${e.summary}) → ${e.discountId}`);
+        break;
+      case "discount_linked":
+        console.log(`      = discount "${e.couponName}" → existing ${e.discountId}`);
+        break;
+      case "discount_unresolved":
+        console.log(
+          `      ! coupon "${e.couponName}" in "${e.templateName}": offer not stated in copy — ` +
+            `chip imported unwired (renders blank); attach a discount in the editor`,
+        );
+        break;
     }
   };
 

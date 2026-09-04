@@ -21,8 +21,10 @@ import {
   EmailBuilderFontWeight,
   Size,
 } from "./renderer/types.js";
+import type { PendingDiscount } from "./renderer/types.js";
 import { nextId } from "./parser/helpers.js";
 import { hasInlineCoupon, rewriteInlineCoupon } from "./ai-rewrite.js";
+import { extractCouponName, inferDiscountConfig } from "./discount-infer.js";
 
 export interface TransformResult {
   sections: Section[];
@@ -158,6 +160,15 @@ async function transformBlock(
     const withSubs = { ...tb, text: substitutedText };
 
     if (hasInlineCoupon(withSubs.text)) {
+      // Capture the coupon name + inferred config from the ORIGINAL text —
+      // both the AI rewrite and the rule-based strip remove the
+      // {% coupon_code %} tag and often the offer wording with it.
+      const pending = buildPendingDiscount(withSubs.text);
+      if (!pending) {
+        ctx.warnings.push(
+          "inline coupon detected but no {% coupon_code 'Name' %} tag found — discount chip needs a discount attached in the editor",
+        );
+      }
       if (!ctx.skipAi) {
         const { text: rewritten, usage } = await rewriteInlineCoupon(
           withSubs.text,
@@ -168,7 +179,7 @@ async function transformBlock(
         ctx.usage.cacheCreationTokens += usage.cacheCreationTokens;
         ctx.onRewrite();
         const rewrittenBlock = { ...withSubs, text: rewritten };
-        return [rewrittenBlock, buildDiscountFromTextBlock(rewrittenBlock)];
+        return [rewrittenBlock, buildDiscountFromTextBlock(rewrittenBlock, pending)];
       }
       // AI-less fallback. Covers the common Klaviyo pattern:
       //   "USE CODE {% coupon_code 'X' %} FOR N% OFF ..."
@@ -185,7 +196,7 @@ async function transformBlock(
           : "inline coupon kept in text + discount block appended (AI off)",
       );
       const textBlock = { ...withSubs, text: textForRender };
-      return [textBlock, buildDiscountFromTextBlock(textBlock)];
+      return [textBlock, buildDiscountFromTextBlock(textBlock, pending)];
     }
     return [withSubs];
   }
@@ -302,7 +313,17 @@ function ruleBasedStripInlineCoupon(html: string): string | null {
 
 // ─── Placeholder discount block (styled from text block) ────────────
 
-function buildDiscountFromTextBlock(tb: TextBlock): DiscountBlock {
+function buildPendingDiscount(originalText: string): PendingDiscount | null {
+  const couponName = extractCouponName(originalText);
+  return couponName
+    ? { couponName, config: inferDiscountConfig(originalText) }
+    : null;
+}
+
+function buildDiscountFromTextBlock(
+  tb: TextBlock,
+  pending: PendingDiscount | null,
+): DiscountBlock {
   return {
     type: EmailBlockType.DISCOUNT,
     blockId: nextId(),
@@ -314,6 +335,7 @@ function buildDiscountFromTextBlock(tb: TextBlock): DiscountBlock {
     fontSize: 32,
     textColor: tb.textColor,
     blockBackgroundColor: tb.sectionColor,
+    ...(pending ? { _pendingDiscount: pending } : {}),
   };
 }
 

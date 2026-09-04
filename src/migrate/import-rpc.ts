@@ -140,6 +140,7 @@ export function decodeJwtAud(jwt: string | null | undefined): string | null {
 
 import { rehostKlaviyoImages } from "./rehost-images.js";
 import { BEST_SELLERS_FILTER } from "../parser/blocks/product.js";
+import type { PendingDiscount } from "../renderer/types.js";
 
 export type ImportProgressEvent =
   | { kind: "filter_created"; templateName: string; productFilterId: string }
@@ -148,6 +149,20 @@ export type ImportProgressEvent =
       templateName: string;
       products: string[];
     }
+  | {
+      kind: "discount_created";
+      templateName: string;
+      couponName: string;
+      discountId: string;
+      summary: string;
+    }
+  | {
+      kind: "discount_linked";
+      templateName: string;
+      couponName: string;
+      discountId: string;
+    }
+  | { kind: "discount_unresolved"; templateName: string; couponName: string }
   | { kind: "template_created"; templateName: string; templateId: string }
   | { kind: "template_failed"; templateName: string; error: string }
   | {
@@ -182,6 +197,12 @@ export interface ImportOptions {
    * across templates in one import run.
    */
   filterCache?: Map<string, string>;
+  /**
+   * Per-job memo of the team's discounts (getDiscounts fetched once, on the
+   * first coupon chip). Created discounts are appended so later templates in
+   * the same run link instead of re-creating.
+   */
+  discountsPromise?: Promise<any[]>;
 }
 
 export interface ImportResult {
@@ -369,6 +390,64 @@ async function preparePayload(
     return productFilterId;
   };
 
+  const templateName = String(template.name ?? "");
+  const resolveDiscount = async (pending: PendingDiscount): Promise<string | null> => {
+    const discounts = await (options.discountsPromise ??= postMarketingRpc(
+      "getDiscounts",
+      {},
+      options,
+    ).then((out) => (Array.isArray(out) ? out : (out.discounts ?? []))));
+    const { couponName, config } = pending;
+    const prior = discounts.find(
+      (d: any) =>
+        d.name === couponName || d.codeGenerationStrategy?.code === couponName,
+    );
+    if (prior) {
+      const discountId = String(prior._id);
+      options.onProgress?.({ kind: "discount_linked", templateName, couponName, discountId });
+      return discountId;
+    }
+    if (!config) {
+      // Copy never states the offer, so creating one would be a guess. The
+      // chip imports without a discountId (renders as nothing) and the event
+      // makes it a review item instead of a silently wrong discount.
+      options.onProgress?.({ kind: "discount_unresolved", templateName, couponName });
+      return null;
+    }
+    const created = await postMarketingRpc(
+      "createDiscount",
+      {
+        discountConfiguration: {
+          name: couponName,
+          provider: "shopifyDiscount",
+          codeGenerationStrategy: { strategy: "dynamic", code: couponName },
+          expiration: config.expiration,
+          discountSettings: config.discountSettings,
+        },
+      },
+      options,
+    );
+    const discountId = String(created._id ?? created);
+    if (!/^[a-f0-9]{24}$/i.test(discountId)) {
+      throw new Error(
+        `createDiscount "${couponName}" returned no usable _id — refusing to wire the chip with junk. Response keys: ${created && typeof created === "object" ? Object.keys(created).join(", ") : typeof created}`,
+      );
+    }
+    discounts.push({
+      _id: discountId,
+      name: couponName,
+      codeGenerationStrategy: { code: couponName },
+    });
+    options.onProgress?.({
+      kind: "discount_created",
+      templateName,
+      couponName,
+      discountId,
+      summary: config.summary,
+    });
+    return discountId;
+  };
+
   const sections = Array.isArray(rest.sections) ? rest.sections : [];
   rest.sections = [];
   for (const block of sections) {
@@ -395,6 +474,10 @@ async function preparePayload(
         templateName: String(template.name ?? ""),
         products: _pendingProducts.map((p: { name: string }) => p.name),
       });
+    } else if (block && block._pendingDiscount) {
+      const { _pendingDiscount, ...blockRest } = block;
+      const discountId = await resolveDiscount(_pendingDiscount);
+      rest.sections.push(discountId ? { ...blockRest, discountId } : blockRest);
     } else {
       rest.sections.push(block);
     }
