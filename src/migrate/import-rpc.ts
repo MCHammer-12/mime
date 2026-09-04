@@ -141,6 +141,7 @@ export function decodeJwtAud(jwt: string | null | undefined): string | null {
 import { rehostKlaviyoImages } from "./rehost-images.js";
 import { BEST_SELLERS_FILTER } from "../parser/blocks/product.js";
 import type { PendingDiscount } from "../renderer/types.js";
+import { inferDiscountConfig } from "../discount-infer.js";
 
 export type ImportProgressEvent =
   | { kind: "filter_created"; templateName: string; productFilterId: string }
@@ -391,13 +392,27 @@ async function preparePayload(
   };
 
   const templateName = String(template.name ?? "");
+  // Block-local inference misses offers stated only in the subject line
+  // ("Celebrate Your Birthday with 10% Off–Just for 7 Days") or a sibling text
+  // block. Widening the scan is only safe when the template carries a single
+  // coupon — with two, one code's "15% off" copy would configure the other.
+  const allSections: any[] = Array.isArray(rest.sections) ? rest.sections : [];
+  const pendingCouponNames = new Set(
+    allSections
+      .filter((b) => b?._pendingDiscount?.couponName)
+      .map((b) => String(b._pendingDiscount.couponName)),
+  );
+  const templateCorpus = [
+    String(rest.subject ?? ""),
+    ...allSections.map((b) => (b?.type === "text" ? String(b.text ?? "") : "")),
+  ].join(" ");
   const resolveDiscount = async (pending: PendingDiscount): Promise<string | null> => {
     const discounts = await (options.discountsPromise ??= postMarketingRpc(
       "getDiscountsByTeam",
       {},
       options,
     ).then((out) => (Array.isArray(out) ? out : (out.discounts ?? []))));
-    const { couponName, config } = pending;
+    const { couponName } = pending;
     const prior = discounts.find(
       (d: any) =>
         d.name === couponName || d.codeGenerationStrategy?.code === couponName,
@@ -407,6 +422,9 @@ async function preparePayload(
       options.onProgress?.({ kind: "discount_linked", templateName, couponName, discountId });
       return discountId;
     }
+    const config =
+      pending.config ??
+      (pendingCouponNames.size === 1 ? inferDiscountConfig(templateCorpus) : null);
     if (!config) {
       // Copy never states the offer, so creating one would be a guess. The
       // chip imports without a discountId (renders as nothing) and the event
