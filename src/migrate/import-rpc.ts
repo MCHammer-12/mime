@@ -393,7 +393,7 @@ async function preparePayload(
   const templateName = String(template.name ?? "");
   const resolveDiscount = async (pending: PendingDiscount): Promise<string | null> => {
     const discounts = await (options.discountsPromise ??= postMarketingRpc(
-      "getDiscounts",
+      "getDiscountsByTeam",
       {},
       options,
     ).then((out) => (Array.isArray(out) ? out : (out.discounts ?? []))));
