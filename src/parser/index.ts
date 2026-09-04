@@ -187,10 +187,14 @@ export function parseKlaviyoHtml(
  * merchant's grouping and breaks the merge. The intervening decorative
  * sections are dropped when a merge happens.
  *
- * Dynamic blocks are NOT merged — each carries its own `_pendingFilter` /
- * `schemaFieldName` and combining them would lose semantics.
+ * Dynamic blocks of DIFFERENT feeds are NOT merged — each carries its own
+ * `_pendingFilter` / `schemaFieldName` and combining them would lose
+ * semantics. But adjacent dynamic blocks of the SAME feed (identical
+ * filter + schemaFieldName) are duplicates — a multi-column Klaviyo
+ * product row emits one per column, and each hydrates the full feed at
+ * send time — so keep the first and drop the rest.
  */
-function mergeAdjacentProductBlocks(sections: Section[]): Section[] {
+export function mergeAdjacentProductBlocks(sections: Section[]): Section[] {
   const out: Section[] = [];
   for (const s of sections) {
     if (s.type !== EmailBlockType.PRODUCTS) {
@@ -234,6 +238,18 @@ function mergeAdjacentProductBlocks(sections: Section[]): Section[] {
       (prev as any).numberOfProducts = merged.length;
       // Drop any intervening decorative sections — they were Klaviyo's
       // visual gap between grid rows, redundant inside the merged block.
+      out.length = prevIdx + 1;
+      continue;
+    }
+    if (
+      prev &&
+      prev.type === EmailBlockType.PRODUCTS &&
+      (prev as any).productSelectionType === "dynamic" &&
+      (s as any).productSelectionType === "dynamic" &&
+      (prev as any).schemaFieldName === (s as any).schemaFieldName &&
+      JSON.stringify((prev as any)._pendingFilter) ===
+        JSON.stringify((s as any)._pendingFilter)
+    ) {
       out.length = prevIdx + 1;
       continue;
     }
