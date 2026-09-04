@@ -10,8 +10,14 @@
  * {{ first_name|default:'' }} :)" shipped to Redo with the raw
  * template variable intact, and the merchant saw it literal in
  * their email preview (Castle Sports Post Purchase Email 1).
+ *
+ * Also covers the coupon-pill button conversion: a ButtonBlock whose label
+ * is a {% coupon_code %} tag is Klaviyo's coupon pill, not a CTA, and must
+ * become a DiscountBlock (White Elm welcome heroes shipped the raw tag as
+ * button text).
  */
-import { substituteStringVars } from "./transform.js";
+import { substituteStringVars, transformSections } from "./transform.js";
+import { Alignment, ButtonLinkType, EmailBlockType } from "./renderer/types.js";
 
 const orgCtx = {
   orgName: "Castle Sports",
@@ -143,6 +149,79 @@ function assert(cond: boolean, msg: string): void {
       out.includes("Castle Sports"),
     `mixed substitution, got: ${JSON.stringify(out)}`,
   );
+}
+
+// ─── Coupon-pill button → discount chip ────────────────────────────────
+{
+  const pill: any = {
+    type: EmailBlockType.BUTTON,
+    blockId: "pill-1",
+    sectionPadding: { top: 10, right: 18, bottom: 10, left: 18 },
+    sectionColor: "#F5F1EA",
+    alignment: Alignment.LEFT,
+    cornerRadius: 4,
+    buttonText: "{% coupon_code 'WELCOME10' %}",
+    padding: { top: 12, right: 24, bottom: 12, left: 24 },
+    buttonLink: "https://example.com/redeem",
+    fillColor: "#8A9B6E",
+    strokeColor: "transparent",
+    textColor: "#ffffff",
+    strokeWeight: 0,
+    fontFamily: "Arial",
+    fontSize: 20,
+    linkType: ButtonLinkType.WEB_PAGE,
+  };
+  const res = await transformSections([pill], null, { skipAi: true });
+  assert(res.sections.length === 1, `pill → 1 block, got ${res.sections.length}`);
+  const chip: any = res.sections[0];
+  assert(
+    chip.type === EmailBlockType.DISCOUNT,
+    `pill converts to discount chip, got: ${chip.type}`,
+  );
+  assert(
+    chip._pendingDiscount?.couponName === "WELCOME10",
+    `chip carries the coupon name, got: ${JSON.stringify(chip._pendingDiscount)}`,
+  );
+  assert(
+    chip.blockBackgroundColor === "#8A9B6E" &&
+      chip.alignment === Alignment.LEFT &&
+      chip.textColor === "#ffffff" &&
+      chip.fontSize === 20,
+    `chip inherits the pill's fill/alignment/label styling, got: ${JSON.stringify(chip)}`,
+  );
+  assert(
+    res.substitutions.some((s) => s.includes("coupon-pill button")),
+    `conversion noted in substitutions, got: ${JSON.stringify(res.substitutions)}`,
+  );
+}
+
+// ─── Plain CTA button passes through untouched ─────────────────────────
+{
+  const cta: any = {
+    type: EmailBlockType.BUTTON,
+    blockId: "cta-1",
+    sectionPadding: { top: 10, right: 18, bottom: 10, left: 18 },
+    sectionColor: "#ffffff",
+    alignment: Alignment.CENTER,
+    cornerRadius: 0,
+    buttonText: "SHOP NOW",
+    padding: { top: 12, right: 24, bottom: 12, left: 24 },
+    buttonLink: "https://example.com/collections",
+    fillColor: "#000000",
+    strokeColor: "transparent",
+    textColor: "#ffffff",
+    strokeWeight: 0,
+    fontFamily: "Arial",
+    fontSize: 16,
+    linkType: ButtonLinkType.WEB_PAGE,
+  };
+  const res = await transformSections([cta], null, { skipAi: true });
+  const outBtn: any = res.sections[0];
+  assert(
+    res.sections.length === 1 && outBtn.type === EmailBlockType.BUTTON,
+    `plain CTA stays a button, got: ${JSON.stringify(res.sections.map((s) => s.type))}`,
+  );
+  assert(outBtn.buttonText === "SHOP NOW", `CTA label untouched, got: ${outBtn.buttonText}`);
 }
 
 console.log("transform.smoke.ts: all assertions passed");

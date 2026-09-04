@@ -10,6 +10,7 @@
 import type { KlaviyoAccount } from "./fetch-account.js";
 import { formatAddress } from "./fetch-account.js";
 import type {
+  ButtonBlock,
   DiscountBlock,
   FooterBlock,
   Section,
@@ -231,6 +232,24 @@ async function transformBlock(
   // Button blocks: substitute {{ organization.url }} in link
   if (block.type === EmailBlockType.BUTTON) {
     const out: any = { ...block };
+    // A "button" whose label is a {% coupon_code %} tag is Klaviyo's coupon
+    // pill — a display chip, not a CTA. Shipped as a ButtonBlock it renders
+    // the raw Jinja tag as the label; Redo's native equivalent is the
+    // DiscountBlock (importer mints a real code via _pendingDiscount).
+    if (typeof out.buttonText === "string" && hasInlineCoupon(out.buttonText)) {
+      const pending = buildPendingDiscount(out.buttonText);
+      if (!pending) {
+        ctx.warnings.push(
+          "coupon-pill button detected but no {% coupon_code 'Name' %} tag found — discount chip needs a discount attached in the editor",
+        );
+      }
+      ctx.subs.push(
+        typeof out.buttonLink === "string" && out.buttonLink
+          ? `coupon-pill button → discount chip (link ${out.buttonLink} dropped — chips aren't clickable)`
+          : "coupon-pill button → discount chip",
+      );
+      return [buildDiscountFromButtonBlock(out as ButtonBlock, pending)];
+    }
     if (typeof out.buttonLink === "string") {
       const newLink = substituteOrgUrl(out.buttonLink, ctx.orgUrl);
       if (newLink !== out.buttonLink) {
@@ -350,6 +369,27 @@ function buildDiscountFromTextBlock(
     fontSize: tb.fontSize || 16,
     textColor: tb.textColor,
     blockBackgroundColor: tb.sectionColor,
+    ...(pending ? { _pendingDiscount: pending } : {}),
+  };
+}
+
+// Coupon-pill variant: the chip inherits the pill's own look — its
+// alignment, label styling, and fill color as the chip background.
+function buildDiscountFromButtonBlock(
+  bb: ButtonBlock,
+  pending: PendingDiscount | null,
+): DiscountBlock {
+  return {
+    type: EmailBlockType.DISCOUNT,
+    blockId: nextId(),
+    sectionPadding: bb.sectionPadding,
+    sectionColor: bb.sectionColor,
+    alignment: bb.alignment,
+    fontFamily: bb.fontFamily,
+    fontWeight: EmailBuilderFontWeight.BOLD,
+    fontSize: bb.fontSize || 16,
+    textColor: bb.textColor,
+    blockBackgroundColor: bb.fillColor,
     ...(pending ? { _pendingDiscount: pending } : {}),
   };
 }
