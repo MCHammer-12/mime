@@ -158,4 +158,56 @@ const body = `Head back: {{ event.URL|default:'' }}`;
   );
 }
 
+// ─── Bare profile shorthands ({{ first_name }}) ─────────────────────────
+// Klaviyo's un-namespaced alias for person.first_name. Not a Klaviyo root, so
+// the rewriter used to keep it verbatim and Redo 400'd the whole template.
+{
+  const warnings: ParseWarning[] = [];
+  const { output, unmappedTokens } = rewriteKlaviyoLiquid(
+    `Hey {{ first_name|default:'friend' }} {{ last_name }}`,
+    warnings,
+    "a1",
+    SchemaType.SMS_MARKETING_SIGNUP,
+  );
+  assert(
+    output === `Hey {{ customer_first_name|default:'friend' }} {{ customer_last_name }}`,
+    `bare first_name/last_name mapped, got: ${JSON.stringify(output)}`,
+  );
+  assert(unmappedTokens.length === 0, `no unmapped tokens, got: ${unmappedTokens}`);
+}
+
+// ─── unsubscribe_link: base map, dropped on SMS sign-up ─────────────────
+{
+  const { output, unmappedTokens } = rewriteKlaviyoLiquid(
+    `<a href="{{ unsubscribe_link }}">stop</a>`,
+    [],
+    "a1",
+    SchemaType.EMAIL_MARKETING_SIGNUP,
+  );
+  assert(
+    output === `<a href="{{ unsubscribe_link }}">stop</a>`,
+    `unsubscribe_link kept where the trigger provides it, got: ${JSON.stringify(output)}`,
+  );
+  assert(
+    unmappedTokens.length === 0,
+    `unsubscribe_link no longer reported as dropped, got: ${unmappedTokens}`,
+  );
+}
+{
+  const { output, unmappedTokens } = rewriteKlaviyoLiquid(
+    `<a href="{{ unsubscribe_link }}">stop</a>`,
+    [],
+    "a1",
+    SchemaType.SMS_MARKETING_SIGNUP,
+  );
+  assert(
+    output === `<a href="">stop</a>`,
+    `unsubscribe_link dropped on SMS sign-up, got: ${JSON.stringify(output)}`,
+  );
+  assert(
+    unmappedTokens.includes("unsubscribe_link"),
+    `drop is reported, got: ${unmappedTokens}`,
+  );
+}
+
 console.log("variable-mapping.smoke.ts: all assertions passed");

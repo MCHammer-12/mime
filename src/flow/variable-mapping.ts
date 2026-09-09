@@ -18,6 +18,25 @@ export const KLAVIYO_TO_REDO_VAR_MAP: Record<string, string> = {
   "person.phone_number": "customer_phone",
   "person.id":           "redo_customer_id",
 
+  // Klaviyo's older dialect lets a template say {{ first_name }} for the same
+  // profile field as {{ person.first_name }}. It isn't namespaced, so the
+  // rewriter used to pass it through verbatim — and Redo's validator rejects
+  // it on every trigger, taking the whole flow import with it (Any Means
+  // Necessary 2026-09-09: three flows died on one {{ first_name }} in an SMS).
+  // Probed against live createSmsTemplate: customer_first_name and
+  // customer_last_name are accepted on sms_marketing_signup,
+  // marketing_cart_abandonment, marketing_browse_abandonment,
+  // email_marketing_signup, marketing_back_in_stock and order_tracking, so
+  // these belong in the base map rather than a per-schema overlay.
+  "first_name":          "customer_first_name",
+  "last_name":           "customer_last_name",
+
+  // Already a valid Redo field on every marketing schema except
+  // SMS_MARKETING_SIGNUP (which drops it below — an SMS sign-up flow opts out
+  // via STOP, not a link). Mapped to itself so the rewriter recognises it
+  // instead of reporting it as dropped on nearly every template.
+  "unsubscribe_link":    "unsubscribe_link",
+
   // Event-specific fields — most relevant for abandonment triggers
   "event.checkout_url":              "checkout_url",
   "event.responsive_checkout_url":   "checkout_url",
@@ -36,7 +55,16 @@ export const KLAVIYO_TO_REDO_VAR_MAP: Record<string, string> = {
 // baseMarketingBrowseAbandonmentSchema and its CS twin both expose
 // `browsedPageUrl: Maybe Url` ("The URL of the page the customer was browsing"),
 // which is exactly Klaviyo's Viewed Product / Active on Site `event.URL`.
-const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string>>> = {
+// A `null` value means "drop this token on this schema": it is a valid Redo
+// field elsewhere, so it lives in the base map, but this trigger doesn't
+// provide it and passing it through would 400 the template.
+const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string | null>>> = {
+  // SMS sign-up carries no unsubscribe link — the opt-out is a STOP reply, and
+  // the trigger doesn't expose the field (verified: createSmsTemplate rejects
+  // unsubscribe_link, customer_email, customer_phone and store_url here).
+  [SchemaType.SMS_MARKETING_SIGNUP]: {
+    "unsubscribe_link": null,
+  },
   [SchemaType.MARKETING_BROWSE_ABANDONMENT]: {
     "event.URL": "browsed_page_url",
   },
@@ -62,7 +90,6 @@ const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string>>> = {
     "catalog_item.url":   "back_in_stock_product_url",
     "catalog_item.title": "back_in_stock_product_title",
     "catalog_item.variant.featured_image.full.src": "restocked_product.image_url",
-    "unsubscribe_link":   "unsubscribe_link",
   },
   // Klaviyo's price-drop event fields → baseMarketingPriceDropSchema
   // (redo/flows/common/src/schemas/marketing/marketing.ts). The schema also
@@ -77,9 +104,6 @@ const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string>>> = {
     "event.price_drop_percent": "formatted_price_drop_percentage",
     "event.image_url":         "discounted_product.image_url",
     "event.url":               "discounted_product.url",
-    // Already a valid Redo field (schema's unsubscribeLink, auto-snake-cased);
-    // listed so the rewriter recognises it instead of flagging it as dropped.
-    "unsubscribe_link":        "unsubscribe_link",
   },
 };
 
@@ -236,6 +260,13 @@ export function rewriteKlaviyoLiquid(
     const mapped = varMap[parsed.varPath];
     if (mapped) {
       return `{{ ${mapped}${scrubKlaviyoFilters(parsed.filters)} }}`;
+    }
+    // Explicitly dropped on this schema (see SCHEMA_VAR_MAP): valid Redo field,
+    // just not one this trigger provides. Empty + warn, same as a namespaced
+    // token — passing it through would 400 the template.
+    if (mapped === null) {
+      unmappedTokens.push(parsed.varPath);
+      return "";
     }
 
     // Merchant constants resolve to literals — filters are dropped along with
