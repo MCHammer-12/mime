@@ -9,7 +9,7 @@
  * 400s the whole createSmsTemplate call ("Message uses {{ event }}, which the
  * Browse abandonment trigger doesn't provide") and the SMS imports blank.
  */
-import { rewriteKlaviyoLiquid } from "./variable-mapping.js";
+import { rewriteKlaviyoLiquid, sanitizeTemplateLiquid } from "./variable-mapping.js";
 import { SchemaType, type ParseWarning } from "./types.js";
 import type { KlaviyoAccount } from "../fetch-account.js";
 
@@ -207,6 +207,70 @@ const body = `Head back: {{ event.URL|default:'' }}`;
   assert(
     unmappedTokens.includes("unsubscribe_link"),
     `drop is reported, got: ${unmappedTokens}`,
+  );
+}
+
+// ─── back-in-stock product card: price + variant deep-link ─────────────
+// Klaviyo hand-rolls the card inside {% catalog %}: the price arrives as an
+// output-style tag and the CTA appends the variant id to the product url.
+// Before this mapping the tag was deleted (price vanished) and the id dropped
+// (link ended in a dangling "?variant=") — Any Means Necessary, 2026-09-09.
+{
+  const node = {
+    imageUrl: "{{ catalog_item.variant.featured_image.full.src }}",
+    text: "{% currency_format catalog_item.variant.price|floatformat:2 %}",
+    buttonLink: "{{ catalog_item.url }}?variant={{ catalog_item.variant.id }}",
+  };
+  const { unmappedTokens } = sanitizeTemplateLiquid(
+    node,
+    "a1",
+    [],
+    SchemaType.MARKETING_BACK_IN_STOCK,
+  );
+  assert(
+    node.text === "{{ restocked_product.price }}",
+    `currency_format unwrapped to the mapped price, got: ${JSON.stringify(node.text)}`,
+  );
+  assert(
+    node.buttonLink ===
+      "{{ back_in_stock_product_url }}?variant={{ product_variant_id }}",
+    `variant deep-link intact, got: ${JSON.stringify(node.buttonLink)}`,
+  );
+  assert(
+    node.imageUrl === "{{ restocked_product.image_url }}",
+    `card image mapped, got: ${JSON.stringify(node.imageUrl)}`,
+  );
+  assert(
+    unmappedTokens.length === 0,
+    `whole card maps with nothing dropped, got: ${unmappedTokens}`,
+  );
+}
+
+// The product-level image is the same field as the variant-level one; Klaviyo
+// cards use whichever the merchant picked in the block editor.
+{
+  const node = { imageUrl: "{{ catalog_item.featured_image.full.src }}" };
+  sanitizeTemplateLiquid(node, "a1", [], SchemaType.MARKETING_BACK_IN_STOCK);
+  assert(
+    node.imageUrl === "{{ restocked_product.image_url }}",
+    `product-level image mapped, got: ${JSON.stringify(node.imageUrl)}`,
+  );
+}
+
+// A currency_format whose argument doesn't map still ends up empty rather than
+// leaking the tag as literal text — the pre-existing guarantee.
+{
+  const node = { text: "{% currency_format catalog_item.nope %}" };
+  const { unmappedTokens } = sanitizeTemplateLiquid(
+    node,
+    "a1",
+    [],
+    SchemaType.MARKETING_BACK_IN_STOCK,
+  );
+  assert(node.text === "", `unmappable currency_format empties, got: ${JSON.stringify(node.text)}`);
+  assert(
+    unmappedTokens.includes("catalog_item.nope"),
+    `unmappable argument reported, got: ${unmappedTokens}`,
   );
 }
 

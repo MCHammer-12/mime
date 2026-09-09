@@ -89,7 +89,20 @@ const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string | null>>>
   [SchemaType.MARKETING_BACK_IN_STOCK]: {
     "catalog_item.url":   "back_in_stock_product_url",
     "catalog_item.title": "back_in_stock_product_title",
+    "catalog_item.featured_image.full.src": "restocked_product.image_url",
     "catalog_item.variant.featured_image.full.src": "restocked_product.image_url",
+    // `restocked_product` is a Trigger Product: product-variables.ts documents
+    // `.title`/`.url`/`.image_url`/`.price` on it, and `.price` is a
+    // pre-formatted money string ("$98.00") — not a bare number. Without this
+    // the hand-rolled Klaviyo product card loses its price outright (Any Means
+    // Necessary back-in-stock, 2026-09-09).
+    "catalog_item.variant.price": "restocked_product.price",
+    // Klaviyo cards build the variant deep-link as `{{ catalog_item.url }}?variant=
+    // {{ catalog_item.variant.id }}`. Use the flat `productVariantId` rather than
+    // `restocked_product.variant_id`: it's the trigger's own non-Maybe field, so
+    // it survives even when the product lookup returns nothing, and
+    // `back_in_stock_product_url` carries no variant of its own to collide with.
+    "catalog_item.variant.id":    "product_variant_id",
   },
   // Klaviyo's price-drop event fields → baseMarketingPriceDropSchema
   // (redo/flows/common/src/schemas/marketing/marketing.ts). The schema also
@@ -340,6 +353,24 @@ export function sanitizeTemplateLiquid(
     for (const m of s.matchAll(/\{%\s*(\w+)[\s\S]*?%\}/g)) {
       if (!KLAVIYO_ONLY_TAGS.has(m[1]!) && !KLAVIYO_ROOT_RE.test(m[0]))
         continue;
+      // `{% currency_format catalog_item.variant.price|floatformat:2 %}` is an
+      // output tag whose argument is a real variable that usually maps, so
+      // deleting it drops the price out of a product card entirely. Unwrap to
+      // `{{ ... }}` and let the rewriter map it; an argument that doesn't map
+      // still lands empty + warned, exactly as before. Redo's money fields are
+      // pre-formatted strings, so the number-formatting filters Klaviyo needed
+      // go with the tag.
+      if (m[1] === "currency_format") {
+        const arg = m[0]
+          .replace(/^\{%\s*currency_format\s*/, "")
+          .replace(/\s*%\}$/, "")
+          .replace(/\|\s*(?:floatformat|intcomma)(?::[^|]*)?/g, "")
+          .trim();
+        if (arg) {
+          out = out.split(m[0]).join(`{{ ${arg} }}`);
+          continue;
+        }
+      }
       unresolvableTags.push(m[0].trim());
       if (!LIQUID_CONTROL_TAGS.has(m[1]!)) out = out.split(m[0]).join("");
     }
