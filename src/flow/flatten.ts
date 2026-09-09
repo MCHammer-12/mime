@@ -12,6 +12,19 @@
 //      the send-side branch is always taken. Redo already suppresses sends to
 //      profiles without consent, so the branch is redundant machinery.
 //
+//      Only when the other branch really is machinery. Klaviyo authors two
+//      different things with the same split shape:
+//
+//        guard     consent? → send SMS ; else → skip ahead to the next step
+//        fallback  consent? → send SMS ; else → send the SAME message by email
+//
+//      The guard is redundant and collapses. The fallback is a real audience
+//      split — collapsing it deletes the email that everyone without a phone
+//      number was supposed to get. Seen at Any Means Necessary 2026-09-09:
+//      three Reclaim flows, five fallback splits, five emails that would have
+//      vanished. So a split only collapses when the non-send branch reaches
+//      the join without sending anything of its own.
+//
 //   2. Repeated identical predicates are folded on the path that already
 //      decided them — implemented in treeify.ts, where the root-to-node path
 //      exists.
@@ -37,15 +50,66 @@ function consentDimension(expression: unknown): string | null {
   return w?.comparison?.value === true ? dim : null;
 }
 
+function nextIds(s: Step): string[] {
+  if (s.type === StepType.CONDITION) return [s.nextTrueId, s.nextFalseId];
+  if (s.type === StepType.AB_TEST) return s.variants.map((v) => v.nextId);
+  return (s as { nextId?: string }).nextId ? [(s as { nextId: string }).nextId] : [];
+}
+
+function reachable(byId: Map<string, Step>, from: string): Set<string> {
+  const seen = new Set<string>();
+  const stack = [from];
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const s = byId.get(id);
+    if (s) stack.push(...nextIds(s));
+  }
+  return seen;
+}
+
+// True when the false branch is pure bypass: it rejoins the true branch (or
+// runs out) without a send of its own. That is the guard shape, and only the
+// guard shape is safe to collapse — see the header.
+function falseBranchOnlySkips(byId: Map<string, Step>, split: Step & { type: StepType.CONDITION }): boolean {
+  const join = reachable(byId, split.nextTrueId);
+  const seen = new Set<string>();
+  const stack = [split.nextFalseId];
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (seen.has(id) || join.has(id)) continue;
+    seen.add(id);
+    const s = byId.get(id);
+    if (!s) continue;
+    if (s.type === StepType.SEND_EMAIL || s.type === StepType.SEND_SMS) return false;
+    stack.push(...nextIds(s));
+  }
+  return true;
+}
+
 export function collapseConsentSplits(
   steps: Step[],
   warnings: ParseWarning[],
 ): Step[] {
+  const byId = new Map(steps.map((s) => [s.id, s]));
   const redirect = new Map<string, string>();
+  const kept: string[] = [];
   for (const s of steps) {
     if (s.type !== StepType.CONDITION) continue;
     const dim = consentDimension(s.expression);
-    if (dim) redirect.set(s.id, s.nextTrueId);
+    if (!dim) continue;
+    if (falseBranchOnlySkips(byId, s)) redirect.set(s.id, s.nextTrueId);
+    else kept.push(s.id);
+  }
+  if (kept.length > 0) {
+    warnings.push({
+      kind: "degraded-mapping",
+      message:
+        `kept ${kept.length} channel-consent split(s) whose other branch sends on a different channel ` +
+        `(${kept.join(", ")}) — an SMS-or-email fallback, not a redundant guard. Redo evaluates ` +
+        `subscribed-to-sms as current state, so a profile that has since opted out takes the email branch.`,
+    });
   }
   if (redirect.size === 0) return steps;
 

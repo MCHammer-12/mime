@@ -136,13 +136,12 @@ function sequences(steps: Step[]): Set<string> {
   console.log("✓ distinct predicates still branch (4 paths)");
 }
 
-// ── Consent splits collapse to the send branch ──────────────────────────────
+// ── A guard split (other branch just skips the send) collapses ──────────────
 {
   const steps: Step[] = [
     { type: StepType.TRIGGER, id: "trigger", nextId: "c1" } as unknown as Step,
-    cond("c1", smsConsent, "sms", "skip"),
+    cond("c1", smsConsent, "sms", "end"),
     email("sms", "end"),
-    email("skip", "end"),
     { type: StepType.DO_NOTHING, id: "end" } as unknown as Step,
   ];
   const warnings: ParseWarning[] = [];
@@ -153,7 +152,30 @@ function sequences(steps: Step[]): Set<string> {
   if (!warnings.some((w) => w.message.includes("collapsed 1 channel-consent split"))) {
     fail("missing consent-collapse warning");
   }
-  console.log("✓ SMS consent split collapsed to the send branch");
+  console.log("✓ SMS consent guard collapsed to the send branch");
+}
+
+// ── An SMS-or-email fallback is a real audience split — keep it ─────────────
+// Klaviyo writes the fallback with the same split shape as the guard: consent
+// → SMS, no consent → the same message by email, both rejoining. Collapsing it
+// deletes the email. Five of these at Any Means Necessary (2026-09-09).
+{
+  const steps: Step[] = [
+    { type: StepType.TRIGGER, id: "trigger", nextId: "c1" } as unknown as Step,
+    cond("c1", smsConsent, "sms", "fallback"),
+    email("sms", "join"),
+    email("fallback", "join"),
+    { type: StepType.WAIT, id: "join", nextId: "end" } as unknown as Step,
+    { type: StepType.DO_NOTHING, id: "end" } as unknown as Step,
+  ];
+  const warnings: ParseWarning[] = [];
+  const flat = collapseConsentSplits(steps, warnings);
+  if (!flat.some((s) => s.id === "c1")) fail("SMS-or-email fallback split must survive");
+  if (!flat.some((s) => s.id === "fallback")) fail("fallback email must survive");
+  if (!warnings.some((w) => w.message.includes("kept 1 channel-consent split"))) {
+    fail("missing kept-fallback warning");
+  }
+  console.log("✓ SMS-or-email fallback split preserved");
 }
 
 // ── A negative consent test is a real audience split — keep it ──────────────
