@@ -596,6 +596,26 @@ function resolveTextVar(
   return null;
 }
 
+// A literal substitution ends the Liquid pipeline — there is no runtime left
+// to apply `|title`, so apply the pure string filters here and drop the rest.
+// Without this the org/shop tokens below only matched a bare `{{ x }}`, and a
+// filtered one like `{{ organization.name|title }}` survived into Redo, where
+// createEmailTemplate rejects the whole template on the unknown `organization`
+// root — one filter in preview text cost an entire flow import (Invader
+// Concepts "GD Post Purchase").
+function applyLiteralFilters(value: string, filters: string): string {
+  let out = value;
+  for (const m of filters.matchAll(/\|\s*(upper|lower|title|capitalize)\b/g)) {
+    const f = m[1]!;
+    if (f === "upper") out = out.toUpperCase();
+    else if (f === "lower") out = out.toLowerCase();
+    else if (f === "title")
+      out = out.replace(/\S+/g, (w) => w[0]!.toUpperCase() + w.slice(1).toLowerCase());
+    else out = out.charAt(0).toUpperCase() + out.slice(1);
+  }
+  return out;
+}
+
 /**
  * Variable substitution for plain-text strings (subject lines, preview text).
  * Same org / shop / customer-profile substitutions as `substituteTextVars` but
@@ -617,20 +637,26 @@ export function substituteStringVars(
     if (subs) subs.push(s);
   };
 
-  if (ctx.orgName && /\{\{\s*organization\.name\s*\}\}/.test(result)) {
-    result = result.replace(/\{\{\s*organization\.name\s*\}\}/g, ctx.orgName);
-    note(`{{ organization.name }} → ${ctx.orgName}`);
+  const orgSub = (re: RegExp, value: string, label: string): void => {
+    result = result.replace(re, (_full, filters = "") => {
+      const out = applyLiteralFilters(value, filters ?? "");
+      note(`{{ ${label} }} → ${out}`);
+      return out;
+    });
+  };
+
+  if (ctx.orgName) {
+    orgSub(/\{\{\s*organization\.name\s*(\|[^}]*)?\}\}/g, ctx.orgName, "organization.name");
   }
-  if (ctx.orgAddress && /\{\{\s*organization\.full_address\s*\}\}/.test(result)) {
-    result = result.replace(/\{\{\s*organization\.full_address\s*\}\}/g, ctx.orgAddress);
-    note(`{{ organization.full_address }} → ${ctx.orgAddress}`);
+  if (ctx.orgAddress) {
+    orgSub(
+      /\{\{\s*organization\.full_address\s*(\|[^}]*)?\}\}/g,
+      ctx.orgAddress,
+      "organization.full_address",
+    );
   }
   if (ctx.orgName) {
-    const shopRe = /\{\{\s*shop(?:\.name|_name)\s*\}\}/g;
-    if (shopRe.test(result)) {
-      result = result.replace(shopRe, ctx.orgName);
-      note(`{{ shop.name|shop_name }} → ${ctx.orgName}`);
-    }
+    orgSub(/\{\{\s*shop(?:\.name|_name)\s*(\|[^}]*)?\}\}/g, ctx.orgName, "shop.name|shop_name");
   }
   // Customer profile shortcuts: {{ first_name }} / {{ person.X }} → Redo
   // equivalents. Preserve any Liquid filter (`{{ first_name|default:'' }}`)

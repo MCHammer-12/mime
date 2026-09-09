@@ -224,4 +224,41 @@ function assert(cond: boolean, msg: string): void {
   assert(outBtn.buttonText === "SHOP NOW", `CTA label untouched, got: ${outBtn.buttonText}`);
 }
 
+// ─── org/shop tokens tolerate a Liquid filter — the Invader case ───────
+// `{{ organization.name|title }}` in preview text used to slip past the
+// bare-token regex and reach Redo, where createEmailTemplate rejects the
+// whole template on the unknown `organization` root. One filter cost the
+// entire "GD Post Purchase" flow import.
+{
+  const subs: string[] = [];
+  const out = substituteStringVars(
+    "An official welcome to the {{ organization.name|title }} Family!",
+    orgCtx,
+    subs,
+  );
+  assert(
+    out === "An official welcome to the Castle Sports Family!",
+    `filtered organization.name substituted, got: ${JSON.stringify(out)}`,
+  );
+  assert(
+    !/\{\{/.test(out),
+    `no Liquid token survives, got: ${JSON.stringify(out)}`,
+  );
+}
+
+// ─── |upper and |lower actually apply to the literal ───────────────────
+{
+  const up = substituteStringVars("{{ organization.name|upper }}", orgCtx);
+  assert(up === "CASTLE SPORTS", `|upper applied, got: ${JSON.stringify(up)}`);
+  const lo = substituteStringVars("{{ shop.name|lower }}", orgCtx);
+  assert(lo === "castle sports", `|lower applied to shop.name, got: ${JSON.stringify(lo)}`);
+  const bare = substituteStringVars("{{ organization.name }}", orgCtx);
+  assert(bare === "Castle Sports", `unfiltered still works, got: ${JSON.stringify(bare)}`);
+  const addr = substituteStringVars("{{ organization.full_address|upper }}", orgCtx);
+  assert(
+    addr === "1 CASTLE ST, TOWNSVILLE",
+    `filtered full_address substituted, got: ${JSON.stringify(addr)}`,
+  );
+}
+
 console.log("transform.smoke.ts: all assertions passed");
