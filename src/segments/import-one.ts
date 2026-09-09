@@ -71,7 +71,7 @@ async function main() {
   const detail = segmentFile
     ? JSON.parse(readFileSync(segmentFile, "utf8"))
     : await klaviyo(
-        `/segments/${segmentId}/?additional-fields%5Bsegment%5D=definition,profile_count`,
+        `/segments/${segmentId}/?additional-fields%5Bsegment%5D=profile_count`,
         key,
       );
   const attrs = detail.data?.attributes ?? {};

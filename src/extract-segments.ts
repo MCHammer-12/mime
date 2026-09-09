@@ -31,7 +31,7 @@ async function main() {
     // definition = condition tree; profile_count is rate-limited (1/s) but the
     // klaviyo() helper backs off on 429 automatically.
     const detail = await klaviyo(
-      `/segments/${id}/?additional-fields%5Bsegment%5D=definition,profile_count`,
+      `/segments/${id}/?additional-fields%5Bsegment%5D=profile_count`,
       key,
     );
     await writeFile(join(outDir, `${base}.json`), JSON.stringify(detail, null, 2));
