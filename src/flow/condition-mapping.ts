@@ -27,7 +27,68 @@ const METRIC_TO_ACTIVITY: Record<string, string> = {
   // closest available proxy — it over-matches on orders that were placed
   // but never fulfilled. Flows land inactive, so this gets reviewed.
   "fulfilled order": "order-placed",
+
+  // Third-party pixels/apps re-emit the same on-site events into Klaviyo under
+  // their own metric names. Same shopper activity, same Redo activity — Redo
+  // tracks it natively, so the vendor's copy stops mattering after migration.
+  // Reclaim (retention app) and Triple Whale, seen at Any Means Necessary
+  // 2026-09-09. Left un-aliased, each one silently voids the branch it gates.
+  "added to cart reclaim":      "added-product-to-cart",
+  "added to cart - triple pixel": "added-product-to-cart",
+  "viewed product reclaim":     "viewed-product",
+  "checkout started reclaim":   "checkout-started",
+  "active on site reclaim":     "active-on-site",
+  // Klaviyo's SMS receive metric; Redo's RECEIVED_TEXT is the same event.
+  "received text message":      "received-text",
 };
+
+// Klaviyo metric name (lowercased) → Redo customer-ATTRIBUTE consent
+// dimension (CustomerCharacteristicType.SUBSCRIBED_TO_SMS / _EMAIL).
+//
+// Klaviyo models "is this profile an SMS subscriber?" as an event count —
+// "has done Subscribed to Text Messaging Marketing at least once over all
+// time". Redo has no such activity; it models consent as current state. These
+// are not interchangeable vocabularies, so the metric has to cross from the
+// activity table to the attribute table or the condition doesn't translate at
+// all — and an untranslated condition is vacuous, always false, which strands
+// the entire branch behind it. In practice that branch is always "SMS
+// subscriber → text them, otherwise → email them", so the cost of missing this
+// is every SMS in the flow silently never sending.
+//
+// The semantics differ on purpose: Klaviyo asks "did they EVER subscribe",
+// Redo asks "are they subscribed NOW". Current state is the correct gate for a
+// channel split — texting someone who has since opted out is the worse error.
+const CONSENT_METRIC_TO_DIMENSION: Record<string, "subscribed-to-sms" | "subscribed-to-email"> = {
+  "subscribed to text messaging marketing": "subscribed-to-sms",
+  "subscribed to sms marketing": "subscribed-to-sms",
+  "consented to receive sms": "subscribed-to-sms",
+  "subscribed to email marketing": "subscribed-to-email",
+  "consented to receive email marketing": "subscribed-to-email",
+};
+
+// Read a Klaviyo count filter as the boolean Redo wants. "at least once" is
+// subscribed; "zero times" is not. Anything else is a count of subscribe
+// EVENTS ("subscribed exactly 3 times"), which has no consent meaning — warn
+// and treat as subscribed rather than silently voiding the branch.
+function consentValueFromCount(
+  operator: string,
+  value: number,
+  metricName: string,
+  warnings: ParseWarning[],
+  actionId: string,
+): boolean {
+  const count = translateCount(operator, value);
+  if (count.type === "at_least_once") return true;
+  if (count.type === "zero_times") return false;
+  if (count.type === "less_than_n" && (count.n ?? 0) <= 1) return false;
+  if (count.type === "at_most_n" && (count.n ?? 0) === 0) return false;
+  warnings.push({
+    kind: "requires-review",
+    actionId,
+    message: `condition on "${metricName}" counts subscribe events (${operator} ${value}); Redo only has subscribed yes/no — read as subscribed. Verify the split in the Redo flow builder.`,
+  });
+  return true;
+}
 
 const TIMEFRAME_UNITS: Record<string, string> = {
   hour: "hour", hours: "hour",
@@ -149,6 +210,32 @@ function translateProfileMetricCondition(
     });
     return null;
   }
+  // Consent metrics leave the activity vocabulary entirely — see
+  // CONSENT_METRIC_TO_DIMENSION.
+  const consentDimension = CONSENT_METRIC_TO_DIMENSION[metric.name.toLowerCase()];
+  if (consentDimension) {
+    const subscribed = consentValueFromCount(
+      c.measurement_filter?.operator ?? "greater-than",
+      Number(c.measurement_filter?.value ?? 0),
+      metric.name,
+      warnings,
+      actionId,
+    );
+    warnings.push({
+      kind: "degraded-mapping",
+      actionId,
+      message: `"${metric.name}" (${subscribed ? "has" : "has not"} subscribed) mapped to Redo's ${consentDimension} = ${subscribed}. Klaviyo asks whether they ever subscribed; Redo asks whether they are subscribed now — a profile that has since opted out no longer matches.`,
+    });
+    return {
+      type: "customer_attribute",
+      whereCondition: {
+        type: "boolean",
+        dimension: consentDimension,
+        comparison: { type: "boolean", value: subscribed },
+      },
+    };
+  }
+
   const activityType = METRIC_TO_ACTIVITY[metric.name.toLowerCase()];
   if (!activityType) {
     warnings.push({
@@ -929,10 +1016,10 @@ export function translateMessageAdditionalFilters(
 //            = "skip if (NOT c1 OR NOT c2 OR ...) AND (NOT c1' OR ...)"
 //
 // V1 handles single-group profile-metric conditions fully (invert each
-// operator, mode flips from AND→OR). Other condition types
-// (profile-marketing-consent, profile-property, profile-group-membership)
-// warn-only because their inversion requires per-type logic the per-
-// action translator hasn't generalized to negation. Multi-group (OR'd
+// operator, mode flips from AND→OR) and profile-marketing-consent (invert
+// the subscription enum). The remaining types (profile-property,
+// profile-group-membership) warn-only because their inversion requires
+// per-type logic the per-action translator hasn't generalized to negation. Multi-group (OR'd
 // groups) warns and processes only the first group. Per memory
 // `feedback_flow_status_mapping`, imported flows land inactive regardless,
 // so an imperfect translation can't accidentally fire.
@@ -947,6 +1034,23 @@ const INVERT_KLAVIYO_OPERATOR: Record<string, string> = {
 };
 
 function invertKlaviyoCondition(c: any): any {
+  // Consent has no measurement_filter — its "operator" is the subscription
+  // enum, so inverting means flipping subscribed ↔ not. Klaviyo has several
+  // non-subscribed values; the translator collapses all of them to false, so
+  // inverting a false is the one case that has to name a value: "subscribed".
+  if (c.type === "profile-marketing-consent") {
+    const subscribed = c.consent?.consent_status?.subscription === "subscribed";
+    return {
+      ...c,
+      consent: {
+        ...c.consent,
+        consent_status: {
+          ...c.consent?.consent_status,
+          subscription: subscribed ? "unsubscribed" : "subscribed",
+        },
+      },
+    };
+  }
   const op = c.measurement_filter?.operator;
   if (!op || !(op in INVERT_KLAVIYO_OPERATOR)) return c;
   return {
@@ -980,6 +1084,13 @@ function translateKlaviyoCondition(
       // See hasNotInFlowCondition in parser.ts.
       return null;
     case "profile-marketing-consent":
+      // Same translator the conditional-split path uses — the shape Redo
+      // wants is identical, only the inversion above is filter-specific.
+      return translateProfileMarketingConsentCondition(
+        inverted,
+        warnings,
+        "flow-profile-filter",
+      );
     case "profile-property":
     case "profile-group-membership":
       warnings.push({
