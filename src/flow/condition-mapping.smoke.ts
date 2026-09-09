@@ -497,7 +497,7 @@ console.log("✓ value-measurement smoke tests pass");
     },
     links: {},
   } as any;
-  const out = translateTriggerSplitExpression(act, SchemaType.MARKETING_CART_ABANDONMENT, warnings) as any;
+  const out = translateTriggerSplitExpression(act, SchemaType.MARKETING_CART_ABANDONMENT, {}, warnings) as any;
   if (out?.dataSource !== "trigger-data") fail(`trigger Items: dataSource=${out?.dataSource}`);
   const e = out.schemaBooleanExpression;
   if (e?.type !== "text_match") fail(`trigger Items: type=${e?.type}`);
@@ -505,6 +505,83 @@ console.log("✓ value-measurement smoke tests pass");
   if (e.operator !== "includes") fail(`trigger Items: operator=${e.operator}`);
   if (JSON.stringify(e.matchValues) !== JSON.stringify(["Epropulsion"])) fail(`trigger Items: matchValues=${JSON.stringify(e.matchValues)}`);
   console.log("✓ trigger Items contains X → text_match productInCartName includes [X]");
+}
+
+// ─── trigger Collections contains → order-placed collection_name (V8DN6Q) ──
+// order_tracking's schema has no collections field, so the trigger-data path
+// can't express it. Falls back to the customer-activity vocabulary instead of
+// emitting an empty inline-segment that would evaluate FALSE.
+{
+  const warnings: ParseWarning[] = [];
+  const act = {
+    id: "104690769",
+    type: "trigger-split",
+    data: {
+      trigger_id: "S6THwm",
+      trigger_type: "metric",
+      trigger_filter: {
+        condition_groups: [{
+          conditions: [{
+            type: "metric-property",
+            metric_id: "S6THwm",
+            field: "Collections",
+            filter: { type: "list", operator: "contains", value: "Chest Holsters" },
+          }],
+        }],
+      },
+    },
+    links: {},
+  } as any;
+  const metrics = { S6THwm: { id: "S6THwm", name: "Fulfilled Order" } } as any;
+  const out = translateTriggerSplitExpression(act, SchemaType.ORDER_TRACKING, metrics, warnings) as any;
+  if (out?.dataSource !== "inline-segment") fail(`trigger Collections: dataSource=${out?.dataSource}`);
+  const conds = out.inlineSegment?.conditions ?? [];
+  if (conds.length !== 1) fail(`trigger Collections: ${conds.length} conditions, want 1`);
+  const c = conds[0];
+  if (c.type !== "customer_activity") fail(`trigger Collections: type=${c.type}`);
+  if (c.activityType !== "order-placed") fail(`trigger Collections: activityType=${c.activityType}`);
+  if (c.count?.type !== "at_least_once") fail(`trigger Collections: count=${JSON.stringify(c.count)}`);
+  if (c.timeframe?.type !== "all-time") fail(`trigger Collections: timeframe=${JSON.stringify(c.timeframe)}`);
+  const w = c.whereConditions?.[0];
+  if (w?.dimension !== "collection_name") fail(`trigger Collections: dimension=${w?.dimension}`);
+  if (w?.comparison?.operator !== "any") fail(`trigger Collections: operator=${w?.comparison?.operator}`);
+  if (JSON.stringify(w.comparison.values) !== JSON.stringify(["Chest Holsters"])) {
+    fail(`trigger Collections: values=${JSON.stringify(w.comparison.values)}`);
+  }
+  if (!warnings.some((x) => x.kind === "degraded-mapping")) {
+    fail("trigger Collections: expected a degraded-mapping warning");
+  }
+  console.log("✓ trigger Collections contains X → order-placed collection_name any [X]");
+}
+
+// ─── trigger-split with an unknown metric still returns null ───────────────
+// No metric means no activity vocabulary to fall back to; the caller must
+// keep warning rather than invent a condition.
+{
+  const warnings: ParseWarning[] = [];
+  const act = {
+    id: "ts-unknown",
+    type: "trigger-split",
+    data: {
+      trigger_filter: {
+        condition_groups: [{
+          conditions: [{
+            type: "metric-property",
+            metric_id: "ZZZZZZ",
+            field: "Collections",
+            filter: { type: "list", operator: "contains", value: "Anything" },
+          }],
+        }],
+      },
+    },
+    links: {},
+  } as any;
+  const out = translateTriggerSplitExpression(act, SchemaType.ORDER_TRACKING, {}, warnings);
+  if (out !== null) fail(`unknown metric: expected null, got ${JSON.stringify(out)}`);
+  if (!warnings.some((w) => w.kind === "requires-review")) {
+    fail("unknown metric: expected a requires-review warning");
+  }
+  console.log("✓ trigger-split with unmappable field + unknown metric → null + warning");
 }
 
 // ─── phone_number is-set → precise warning, no silent-empty mapping ────────

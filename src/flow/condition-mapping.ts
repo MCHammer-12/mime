@@ -1,4 +1,5 @@
 import type { MetricLookup } from "../extract-metrics.js";
+import { mapMetricFilter } from "../segments/maps.js";
 import { SchemaType, type KlaviyoAction, type ParseWarning } from "./types.js";
 
 // Klaviyo metric name (lowercased) → Redo CustomerActivityType enum value.
@@ -341,9 +342,78 @@ const NUMBER_OP_TO_COMPARISON: Record<string, string> = {
   "less-than-or-equal":    "lessThanOrEqual",
 };
 
+// Fallback for a trigger-split whose Klaviyo field the trigger schema can't
+// express. Klaviyo's metric-property condition names the metric it reads, and
+// mime already knows metric → Redo activity (METRIC_TO_ACTIVITY) and Klaviyo
+// event property → Redo event-filter dimension (segments/maps.ts EVENT_FIELDS).
+// Composing the two turns "the triggering Fulfilled Order's Collections
+// contains Chest Holsters" into "the customer has an order-placed activity
+// whose collection_name is any of [Chest Holsters]".
+//
+// SEMANTIC NOTE: Klaviyo evaluates the ONE event that triggered the flow;
+// Redo evaluates the customer's activity history. Timeframe is all-time, not
+// automation-start: an order-placed activity is stamped when the order was
+// placed, which is before a fulfillment-triggered flow starts, so a
+// flow-start window would exclude the very order that triggered it. The cost
+// is over-matching a customer who bought the collection on some earlier
+// order. Flagged degraded so it gets verified in the Redo flow builder.
+function triggerSplitViaActivity(
+  action: KlaviyoAction,
+  conditions: any[],
+  first: any,
+  metrics: MetricLookup,
+  warnings: ParseWarning[],
+): unknown | null {
+  const metricId = first.metric_id ?? action.data?.trigger_id;
+  const metric = metricId ? metrics[metricId] : undefined;
+  if (!metric) return null;
+  const activityType = METRIC_TO_ACTIVITY[metric.name.toLowerCase()];
+  if (!activityType) return null;
+
+  // Same grouping rule the trigger-data paths use: conditions sharing the
+  // first one's field + operator are alternatives on one dimension.
+  const values = conditions
+    .filter(
+      (c: any) =>
+        c.type === "metric-property" &&
+        c.field === first.field &&
+        c.filter?.operator === first.filter?.operator,
+    )
+    .map((c: any) => c.filter?.value);
+
+  const where = mapMetricFilter(activityType, String(first.field), {
+    ...first.filter,
+    value: values.length > 1 ? values : values[0],
+  });
+  if (!where) return null;
+
+  warnings.push({
+    kind: "degraded-mapping",
+    actionId: action.id,
+    message: `trigger-split on "${first.field}" ${first.filter?.operator} ${JSON.stringify(values)} has no field on the trigger schema; mapped to Redo activity "${activityType}" where ${where.dimension} (all-time). Klaviyo tests the triggering event; Redo tests the customer's history — verify the branch in the Redo flow builder.`,
+  });
+
+  return {
+    dataSource: "inline-segment",
+    inlineSegment: {
+      mode: "AND",
+      conditions: [
+        {
+          type: "customer_activity",
+          activityType,
+          count: { type: "at_least_once" },
+          timeframe: { type: "all-time" },
+          whereConditions: [where],
+        },
+      ],
+    },
+  };
+}
+
 export function translateTriggerSplitExpression(
   action: KlaviyoAction,
   schemaType: SchemaType,
+  metrics: MetricLookup,
   warnings: ParseWarning[],
 ): unknown {
   const tf = action.data?.trigger_filter;
@@ -376,6 +446,13 @@ export function translateTriggerSplitExpression(
 
   const ref = resolveTriggerField(first.field, schemaType);
   if (!ref) {
+    // The trigger schema can't express this field, but the customer-activity
+    // vocabulary often can: Klaviyo's "Collections contains X" on a Fulfilled
+    // Order is Redo's order-placed activity with collection_name any [X].
+    // Falling back keeps the branch real instead of emitting an empty
+    // inline-segment, which evaluates FALSE and strands the true branch.
+    const viaActivity = triggerSplitViaActivity(action, conditions, first, metrics, warnings);
+    if (viaActivity) return viaActivity;
     warnings.push({
       kind: "requires-review",
       actionId: action.id,

@@ -640,7 +640,7 @@ async function convertAction(
       // Klaviyo field doesn't have a Redo equivalent in this trigger's schema.
       const nextTrueId = terminate(action.links?.next_if_true, state);
       const nextFalseId = terminate(action.links?.next_if_false, state);
-      const tsExpr = translateTriggerSplitExpression(action, flowSchemaType, warnings);
+      const tsExpr = translateTriggerSplitExpression(action, flowSchemaType, metrics, warnings);
       const expression = tsExpr ?? {
         dataSource: "inline-segment",
         inlineSegment: { mode: "AND", conditions: [] },
