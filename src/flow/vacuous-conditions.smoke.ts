@@ -4,7 +4,7 @@
  */
 
 import { StepType, type Step } from "./types.js";
-import { findVacuousConditions } from "./vacuous-conditions.js";
+import { collapseVacuousConditions, findVacuousConditions } from "./vacuous-conditions.js";
 
 function fail(msg: string): never {
   console.error(`FAIL: ${msg}`);
@@ -75,5 +75,42 @@ console.log("✓ missing inlineSegment flagged");
 const noConditions = findVacuousConditions(tail);
 if (noConditions.length !== 0) fail("non-condition steps: should not be flagged");
 console.log("✓ non-condition steps ignored");
+
+// ─── Collapsing redirects the parent to the true branch and drops the step ───
+
+{
+  const warnings: any[] = [];
+  const steps: Step[] = [
+    { type: StepType.TRIGGER, id: "trigger", nextId: "split" } as Step,
+    condition({ dataSource: "inline-segment", inlineSegment: { mode: "AND", conditions: [] } }),
+    ...tail,
+  ];
+  const collapsed = collapseVacuousConditions(steps, warnings);
+  if (collapsed.some((s) => s.id === "split")) fail("collapse: dead gate survived");
+  const trigger = collapsed.find((s) => s.id === "trigger") as any;
+  if (trigger.nextId !== "send") fail(`collapse: must take the true branch, got ${trigger.nextId}`);
+  if (findVacuousConditions(collapsed).length !== 0) fail("collapse: still vacuous");
+  if (warnings.length !== 1 || warnings[0].kind !== "degraded-mapping") {
+    fail("collapse: expected one degraded-mapping warning");
+  }
+  console.log("✓ collapse redirects to the true branch and warns");
+}
+
+// ─── Nothing to collapse leaves the graph untouched ───
+
+{
+  const steps: Step[] = [
+    condition({
+      dataSource: "trigger-data",
+      schemaBooleanExpression: { type: "text_match", field: "segment", operator: "equals", matchValues: ["x"] },
+    }),
+    ...tail,
+  ];
+  const warnings: any[] = [];
+  const same = collapseVacuousConditions(steps, warnings);
+  if (same.length !== steps.length) fail("collapse: dropped a translatable condition");
+  if (warnings.length !== 0) fail("collapse: warned with nothing to collapse");
+  console.log("✓ translatable conditions survive collapse");
+}
 
 console.log("✓ vacuous-condition smoke tests pass");

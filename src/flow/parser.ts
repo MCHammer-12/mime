@@ -9,6 +9,7 @@ import {
 } from "./condition-mapping.js";
 import type { TemplateResolver } from "./template-resolver.js";
 import { collapseConsentSplits } from "./flatten.js";
+import { collapseVacuousConditions } from "./vacuous-conditions.js";
 import { treeifyFlow } from "./treeify.js";
 import { resolveTrigger, summarizeTriggerFilter, type TriggerResolution } from "./trigger-mapping.js";
 import { rewriteKlaviyoLiquid, sanitizeTemplateLiquid } from "./variable-mapping.js";
@@ -764,6 +765,9 @@ export async function parseFlow(
      *  uses this to recover from an "unresolvable trigger" skip by asking
      *  the user to pick a Redo trigger and re-running parseFlow. */
     forcedTrigger?: TriggerResolution;
+    /** Take the true branch of any condition Redo can't express, instead of
+     *  leaving a gate that matches nobody. Opt-in — see vacuous-conditions.ts. */
+    collapseVacuousConditions?: boolean;
   },
 ): Promise<ParseResult> {
   const warnings: ParseWarning[] = [];
@@ -1101,10 +1105,16 @@ export async function parseFlow(
   // gain, since Redo suppresses sends to profiles without consent anyway.
   const flattenedSteps = collapseConsentSplits(steps, warnings);
 
+  // Opt-in: a condition with no translatable filter matches nobody, so its true
+  // branch never runs. Redirect to it rather than strand a real send.
+  const unblockedSteps = opts.collapseVacuousConditions
+    ? collapseVacuousConditions(flattenedSteps, warnings)
+    : flattenedSteps;
+
   // Klaviyo allows branch re-merging; Redo's advanced flows are trees. Clone
   // any step reachable from >1 parent so each incoming branch has its own
   // copy of the downstream subtree. flow_end stays shared.
-  const treeifiedSteps = treeifyFlow(flattenedSteps, warnings);
+  const treeifiedSteps = treeifyFlow(unblockedSteps, warnings);
 
   // Always import as inactive so the merchant can review the flow in Redo
   // before it starts firing — even if the Klaviyo source was live. Original

@@ -136,6 +136,7 @@ async function main() {
     templateResolver,
     account,
     forcedTrigger,
+    collapseVacuousConditions: !!process.env.COLLAPSE_VACUOUS_CONDITIONS,
   });
   if (parsed.automation && nameSuffix) {
     parsed.automation.name = `${parsed.automation.name}${nameSuffix}`;
@@ -246,8 +247,9 @@ async function main() {
     console.error(
       `\nRefusing to import: ${vacuous.length} condition step(s) carry no translatable ` +
         `filter, so Redo would match no customer and silently take the false branch. ` +
-        `Resolve the filter (see the warnings above) or re-run with ` +
-        `ALLOW_VACUOUS_CONDITIONS=1 to import as-is.`,
+        `Resolve the filter (see the warnings above), re-run with ` +
+        `COLLAPSE_VACUOUS_CONDITIONS=1 to take the true branch unconditionally, ` +
+        `or ALLOW_VACUOUS_CONDITIONS=1 to import the dead gate as-is.`,
     );
     process.exit(1);
   }
