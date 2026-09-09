@@ -83,8 +83,17 @@ Claude resolves each one and records the decision. The order it tries:
    This is the outcome that makes the next run better.
 2. **Map it approximately**, if the degradation is smaller than the loss. The
    approximation and what it costs go in the report.
-3. **Import it degraded on purpose** (`ALLOW_VACUOUS_CONDITIONS=1`) when nothing
-   maps, and report it as a known issue with what a human has to do about it.
+3. **Open the gate** (`FORCE_CONDITIONS_TRUE=<stepId,...>`) when the untranslated
+   condition sits in front of sends and the merchant's own data says almost
+   everyone passes it. Leaving it closed doesn't degrade those messages, it
+   deletes them — the gate matches nobody, so the true branch never runs. mime
+   removes the condition, re-points its inbound edges at the true branch, and
+   prunes what that strands. Check the pass rate against the real list first
+   (Klaviyo `/lists/<id>/profiles/`), and put the rate and the step id in the
+   report — the step ids are a merchant fact, they never go in the code.
+4. **Import it degraded on purpose** (`ALLOW_VACUOUS_CONDITIONS=1`) when nothing
+   maps and the gate isn't in front of sends, and report it as a known issue
+   with what a human has to do about it.
 
 Nothing here waits on you. Every choice is in the report.
 

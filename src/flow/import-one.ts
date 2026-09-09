@@ -193,6 +193,62 @@ async function main() {
     console.log(`      gated on segment ${segmentId}`);
   }
 
+  // A condition mime can't translate lands as an empty inline segment: it
+  // matches nobody, so every profile takes the false branch and everything the
+  // true branch was going to send never sends. Dropping messages is the worse
+  // failure when the gate is near-universal at this merchant — a signup-form
+  // answer every list member gave, a flag set by a tool that is itself being
+  // migrated. FORCE_CONDITIONS_TRUE opens named gates: the condition is
+  // removed and its inbound edges re-point at the true branch. Which gates,
+  // and why they are safe to open, is a merchant fact — it belongs in the run
+  // notes, never hardcoded here.
+  const forceTrueIds = process.env.FORCE_CONDITIONS_TRUE?.split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (forceTrueIds?.length) {
+    for (const id of forceTrueIds) {
+      const gate = parsed.automation.steps.find((s) => s.id === id);
+      if (!gate || gate.type !== StepType.CONDITION) {
+        console.error(
+          `FORCE_CONDITIONS_TRUE names "${id}", which is not a condition step in the parsed flow. ` +
+            `Steps: ${parsed.automation.steps.map((s) => `${s.id}(${s.type})`).join(", ")}`,
+        );
+        process.exit(1);
+      }
+      const target = gate.nextTrueId;
+      for (const s of parsed.automation.steps) {
+        if (s.type === StepType.CONDITION) {
+          if (s.nextTrueId === id) s.nextTrueId = target;
+          if (s.nextFalseId === id) s.nextFalseId = target;
+        } else if (s.type === StepType.AB_TEST) {
+          for (const v of s.variants) if (v.nextId === id) v.nextId = target;
+        } else if ((s as { nextId?: string }).nextId === id) {
+          (s as { nextId?: string }).nextId = target;
+        }
+      }
+      console.log(`      forced condition ${id} true → ${target} (gate removed)`);
+    }
+    // Removing a gate strands its false branch. Keep only what the trigger can
+    // still reach, or QA reports the leftovers as unreachable steps.
+    const byId = new Map(parsed.automation.steps.map((s) => [s.id, s]));
+    const start = parsed.automation.steps.find((s) => s.type === StepType.TRIGGER);
+    const live = new Set<string>();
+    const stack = start ? [start.id] : [];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      if (live.has(cur)) continue;
+      live.add(cur);
+      const s = byId.get(cur);
+      if (!s) continue;
+      if (s.type === StepType.CONDITION) stack.push(s.nextTrueId, s.nextFalseId);
+      else if (s.type === StepType.AB_TEST) stack.push(...s.variants.map((v) => v.nextId));
+      else if ((s as { nextId?: string }).nextId) stack.push((s as { nextId: string }).nextId);
+    }
+    const before = parsed.automation.steps.length;
+    parsed.automation.steps = parsed.automation.steps.filter((s) => live.has(s.id));
+    console.log(`      pruned ${before - parsed.automation.steps.length} now-unreachable step(s)`);
+  }
+
   // Dump the parsed automation to disk for offline inspection + diagnostics.
   const dumpPath = `/tmp/mime-parsed-flow-${flowId}.json`;
   const { writeFileSync } = await import("node:fs");

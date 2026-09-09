@@ -125,9 +125,13 @@ as-is, that branch would match **no** customer and always take the false path â€
 the true branch would never run. The flow would look imported and behave
 differently, silently.
 
-Claude works the mapping out and puts it in the code. If nothing maps, it imports
-on purpose with `ALLOW_VACUOUS_CONDITIONS=1` and the branch goes in the report as
-a known issue. Either way the run continues.
+Claude works the mapping out and puts it in the code. If nothing maps, what it
+does next depends on what the branch holds. A gate in front of sends doesn't
+degrade them, it deletes them â€” so if the merchant's own list says nearly
+everyone passes it, Claude opens the gate with
+`FORCE_CONDITIONS_TRUE=<stepId,...>` and reports the pass rate it measured.
+Otherwise it imports on purpose with `ALLOW_VACUOUS_CONDITIONS=1` and the branch
+goes in the report as a known issue. Either way the run continues.
 
 **3. `"<name>" matches N stores` from resolve-store**
 
