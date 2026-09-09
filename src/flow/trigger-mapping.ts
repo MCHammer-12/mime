@@ -132,6 +132,15 @@ const METRIC_NAME_MAP: Record<
   "added to cart":      { key: MarketingTriggerKey.CART_ABANDONED,     schemaType: SchemaType.MARKETING_CART_ABANDONMENT,     category: "Marketing" },
   "viewed product":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
   "active on site":     { key: MarketingTriggerKey.BROWSE_ABANDONED,   schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,   category: "Marketing" },
+  // Reclaim (third-party retention app) mirrors the three on-site metrics into
+  // Klaviyo under its own names via the custom API. Same shopper activity, same
+  // Redo trigger — Redo detects the abandonment itself, so the Reclaim event
+  // stops mattering once the merchant leaves Klaviyo. Confirmed on the Any
+  // Means Necessary call 2026-09-08 ("this is just like an abandoned cart
+  // through retention").
+  "added to cart reclaim":    { key: MarketingTriggerKey.CART_ABANDONED,   schemaType: SchemaType.MARKETING_CART_ABANDONMENT,   category: "Marketing" },
+  "viewed product reclaim":   { key: MarketingTriggerKey.BROWSE_ABANDONED, schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT, category: "Marketing" },
+  "active on site reclaim":   { key: MarketingTriggerKey.BROWSE_ABANDONED, schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT, category: "Marketing" },
   "back in stock":      { key: MarketingTriggerKey.BACK_IN_STOCK,      schemaType: SchemaType.MARKETING_BACK_IN_STOCK,        category: "Marketing" },
   // Klaviyo's Shopify integration names the metric "Subscribed to Back in
   // Stock" (the subscribe event, which is what flows trigger on). Same
@@ -287,6 +296,19 @@ const ABANDONMENT_SKIP_FIELD: Record<
   [MarketingTriggerKey.COMMENTSOLD_BROWSE_ABANDONED]: "isBrowseAbandoned",
 } as any;
 
+// Which Klaviyo metric a Browse Abandonment flow came from. Both "Viewed
+// Product" and "Active on Site" collapse to Redo's one Browse Abandonment
+// trigger, so parseFlow needs the origin to emit mutually-exclusive skip
+// conditions — without it the customer gets two emails for one browse.
+// Vendor-suffixed variants (Reclaim) must be listed here too: they resolve to
+// the same trigger and would otherwise collide silently.
+const BROWSE_SOURCE_BY_METRIC: Record<string, TriggerResolution["klaviyoSource"]> = {
+  "viewed product": "viewed-product",
+  "viewed product reclaim": "viewed-product",
+  "active on site": "active-on-site",
+  "active on site reclaim": "active-on-site",
+};
+
 // Klaviyo's trigger filter is an object tree of condition_groups → conditions.
 // Returns true if ANY condition has the shape:
 //   { type: "metric-property", field: "Source Name",
@@ -366,13 +388,7 @@ function resolveMetricTrigger(
   // Tag the source so parseFlow can emit the mutually-exclusive viewed-product
   // skip condition for Browse Abandonment flows. Both "Viewed Product" and
   // "Active on Site" map to MARKETING_BROWSE_ABANDONMENT in Redo.
-  const lowerName = m.name.toLowerCase();
-  const klaviyoSource: TriggerResolution["klaviyoSource"] =
-    lowerName === "viewed product"
-      ? "viewed-product"
-      : lowerName === "active on site"
-        ? "active-on-site"
-        : undefined;
+  const klaviyoSource = BROWSE_SOURCE_BY_METRIC[m.name.toLowerCase()];
   // CommentSold detection — upgrade to CS variant if the trigger filter matches.
   // CS variants only exist for the marketing abandonment triggers.
   if (
