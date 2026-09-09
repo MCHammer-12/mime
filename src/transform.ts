@@ -761,6 +761,19 @@ function substituteTextVars(html: string, ctx: Ctx): string {
     ctx.subs.push("{% unsubscribe 'X' %} → <a>X</a> (unsubscribe link)");
   }
 
+  // {% unsubscribe %} as the href value — Klaviyo's other idiom, usually
+  // `href="http://{% unsubscribe %}"`. The token has to go before the bare
+  // rule below, which would otherwise inject a whole <a> element *inside* the
+  // attribute and destroy the markup. Only the href is rewritten; the anchor
+  // keeps its own attributes and visible text.
+  if (/href="[^"]*\{%\s*unsubscribe\s*%\}[^"]*"/i.test(result)) {
+    result = result.replace(
+      /href="[^"]*\{%\s*unsubscribe\s*%\}[^"]*"/gi,
+      'href="{{ unsubscribe_link }}"',
+    );
+    ctx.subs.push("href={% unsubscribe %} → {{ unsubscribe_link }}");
+  }
+
   // {% unsubscribe %} wrapped in <a>: rewrite href, keep visible text.
   const wrappedUnsub = /<a\s[^>]*>([^<]*\{%\s*unsubscribe\s*%\}[^<]*)<\/a>/gi;
   if (wrappedUnsub.test(result)) {

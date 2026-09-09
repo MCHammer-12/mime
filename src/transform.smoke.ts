@@ -261,4 +261,50 @@ function assert(cond: boolean, msg: string): void {
   );
 }
 
+// ─── {% unsubscribe %} as an href value — the Invader sunset case ──────
+//
+// Klaviyo has two idioms for the tag. Bare in text it renders a whole anchor,
+// so mime wraps it in one. As an attribute value — `href="http://{% unsubscribe %}"`,
+// which is what Invader Concepts' sunset series ships — it renders just the URL.
+// With no rule for the second form the bare rule fired *inside* the attribute
+// and injected an <a> element into the href: a dead link, garbled markup, and
+// an unsubscribe check that still passed because the marker text was present.
+{
+  const src =
+    `<a href="http://{% unsubscribe %}" style="color:#49A0E7; text-decoration:underline">` +
+    `unsubscribe</a>`;
+  const { sections } = await transformSections(
+    [{ type: EmailBlockType.TEXT, text: src } as never],
+    null,
+    { skipAi: true },
+  );
+  const out = (sections[0] as { text: string }).text;
+  assert(!out.includes("{% unsubscribe %}"), `token survives, got: ${out}`);
+  assert(out.includes('href="{{ unsubscribe_link }}"'), `href not rewritten, got: ${out}`);
+  assert(/>unsubscribe</.test(out), `visible text lost, got: ${out}`);
+  assert(!/href="[^"]*<a\s/i.test(out), `anchor injected inside the href, got: ${out}`);
+  assert((out.match(/<a\s/gi) ?? []).length === 1, `expected one anchor, got: ${out}`);
+}
+
+// ─── The bare-in-text and already-wrapped forms keep working ───────────
+{
+  for (const [src, want] of [
+    ["<p>To stop these, {% unsubscribe %} any time.</p>", "Unsubscribe"],
+    ['<a href="#" style="color:#000">{% unsubscribe %}</a>', "Unsubscribe"],
+  ] as const) {
+    const { sections } = await transformSections(
+      [{ type: EmailBlockType.TEXT, text: src } as never],
+      null,
+      { skipAi: true },
+    );
+    const out = (sections[0] as { text: string }).text;
+    assert(!out.includes("{% unsubscribe %}"), `token survives for ${src}, got: ${out}`);
+    assert(
+      out.includes('href="{{ unsubscribe_link }}"') && out.includes(want),
+      `anchor form lost for ${src}, got: ${out}`,
+    );
+    assert((out.match(/<a\s/gi) ?? []).length === 1, `expected one anchor for ${src}, got: ${out}`);
+  }
+}
+
 console.log("transform.smoke.ts: all assertions passed");
