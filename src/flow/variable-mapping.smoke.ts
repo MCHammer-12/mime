@@ -158,4 +158,42 @@ const body = `Head back: {{ event.URL|default:'' }}`;
   );
 }
 
+// ─── Renderer-provided email vars are valid on every trigger ────────────
+{
+  const { output, unmappedTokens } = rewriteKlaviyoLiquid(
+    `<a href="{{ unsubscribe_link }}">Unsubscribe</a> · ` +
+      `<a href="{{ view_in_browser_link }}">View in browser</a>`,
+    [],
+    "a1",
+    SchemaType.MARKETING_CART_ABANDONMENT,
+  );
+  assert(
+    output.includes("{{ unsubscribe_link }}") &&
+      output.includes("{{ view_in_browser_link }}"),
+    `renderer vars kept, got: ${JSON.stringify(output)}`,
+  );
+  assert(
+    unmappedTokens.length === 0,
+    `renderer vars not flagged, got: ${unmappedTokens}`,
+  );
+}
+
+// ─── A token this trigger's map already produces is not "unmapped" ──────
+{
+  const { output, unmappedTokens } = rewriteKlaviyoLiquid(
+    `Hi {{ customer_first_name }}`,
+    [],
+    "a1",
+    SchemaType.ORDER_TRACKING,
+  );
+  assert(
+    output === `Hi {{ customer_first_name }}`,
+    `map output kept verbatim, got: ${JSON.stringify(output)}`,
+  );
+  assert(
+    unmappedTokens.length === 0,
+    `map output not flagged, got: ${unmappedTokens}`,
+  );
+}
+
 console.log("variable-mapping.smoke.ts: all assertions passed");

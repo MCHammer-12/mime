@@ -62,7 +62,6 @@ const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string>>> = {
     "catalog_item.url":   "back_in_stock_product_url",
     "catalog_item.title": "back_in_stock_product_title",
     "catalog_item.variant.featured_image.full.src": "restocked_product.image_url",
-    "unsubscribe_link":   "unsubscribe_link",
   },
   // Klaviyo's price-drop event fields → baseMarketingPriceDropSchema
   // (redo/flows/common/src/schemas/marketing/marketing.ts). The schema also
@@ -77,11 +76,24 @@ const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string>>> = {
     "event.price_drop_percent": "formatted_price_drop_percentage",
     "event.image_url":         "discounted_product.image_url",
     "event.url":               "discounted_product.url",
-    // Already a valid Redo field (schema's unsubscribeLink, auto-snake-cased);
-    // listed so the rewriter recognises it instead of flagging it as dropped.
-    "unsubscribe_link":        "unsubscribe_link",
   },
 };
+
+// Variables Redo's email renderer fills in on *every* marketing email, whatever
+// the flow's trigger is. Not trigger schema fields, so they never appear in the
+// maps above — but they are valid tokens, and a template that already carries
+// one must not be reported as referencing data the trigger can't provide.
+//
+// Source: redo/flows/common/src/schemas/available-variables.ts —
+// `rendererProvidedEmailVariableNames` = snake_cased keys of
+// unsubscribeLinkFields + oneClickUnsubscribeLinkFields + sharedEmailSchemaFields.
+// (SMS templates do not render these; the rewriter keeps them verbatim either
+// way, so recognising them only changes what we report.)
+const REDO_RENDERER_EMAIL_VARS = new Set([
+  "unsubscribe_link",
+  "one_click_unsubscribe_link",
+  "view_in_browser_link",
+]);
 
 // Klaviyo `organization.*` tokens are merchant constants (name, site URL,
 // mailing address), not per-send data. No Redo trigger schema exposes an
@@ -203,6 +215,15 @@ export function rewriteKlaviyoLiquid(
     ...KLAVIYO_TO_REDO_VAR_MAP,
     ...(schemaType ? SCHEMA_VAR_MAP[schemaType] : undefined),
   };
+  // A token that is already what this trigger's map *produces* is a Redo field
+  // by construction — a Klaviyo template that used the Redo name directly, or a
+  // re-run over an output of this same rewriter. Flagging those as "Klaviyo data
+  // the trigger doesn't provide" is a false alarm, and false alarms are what
+  // make an operator stop reading the warnings that matter.
+  const recognized = new Set([
+    ...REDO_RENDERER_EMAIL_VARS,
+    ...Object.values(varMap),
+  ]);
   const unmappedTokens: string[] = [];
   const output = input.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (full, inside: string) => {
     const parsed = parseLiquidVar(inside);
@@ -243,6 +264,10 @@ export function rewriteKlaviyoLiquid(
     if (account) {
       const literal = resolveOrgToken(parsed.varPath, account);
       if (literal) return literal;
+    }
+
+    if (recognized.has(parsed.varPath)) {
+      return `{{ ${parsed.varPath}${scrubKlaviyoFilters(parsed.filters)} }}`;
     }
 
     // Inside `{% for i in event.Items %}` loops, `i.ProductID` etc. reference
