@@ -468,7 +468,11 @@ async function preparePayload(
 
   const sections = Array.isArray(rest.sections) ? rest.sections : [];
   rest.sections = [];
-  for (const block of sections) {
+  for (const raw of sections) {
+    // `_feedIndices` is parser bookkeeping for mergeAdjacentProductBlocks
+    // (grid row vs per-column duplicate). It never reaches prod.
+    const block =
+      raw && raw._feedIndices ? (({ _feedIndices, ...rest }) => rest)(raw) : raw;
     if (block && block._pendingFilter) {
       const { _pendingFilter, ...blockRest } = block;
       rest.sections.push({

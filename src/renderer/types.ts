@@ -406,6 +406,11 @@ export interface ProductsBlock extends BaseBlock {
   // `manuallySelectedProducts`, then strips this field. Used only when
   // productSelectionType === "static".
   _pendingProducts?: { name: string }[];
+  // Non-prod: the `feeds.X|index:N` slots this dynamic row references.
+  // mergeAdjacentProductBlocks uses it to tell a second grid ROW (disjoint
+  // slots — sum them) from a per-column DUPLICATE (same slots — drop it).
+  // Stripped before the template reaches prod.
+  _feedIndices?: number[];
 }
 
 export type NonRecursiveBlock =

@@ -4,11 +4,15 @@
  *   npx tsx src/parser/merge-product-blocks.smoke.ts
  *
  * Static grids of the same shape merge (Klaviyo merchants stack hand-picked
- * rows). Dynamic blocks of the SAME feed are per-column duplicates — a
+ * rows). Adjacent dynamic blocks of the SAME feed are told apart by the feed
+ * slots they reference: identical slots are per-column duplicates — a
  * multi-column Klaviyo product row emits one block per column, each
  * hydrating the full feed at send time (White Elm AC grids rendered every
- * grid twice) — so they collapse to the first. Dynamic blocks of different
- * feeds (different filter or schemaFieldName) never merge.
+ * grid twice) — so they collapse to the first; disjoint slots are consecutive
+ * ROWS of one grid and sum (Invader Concepts' 6-product best-seller grids
+ * imported as 3). Cart feeds declare overflow slots, so they never sum.
+ * Dynamic blocks of different feeds (different filter or schemaFieldName)
+ * never merge.
  */
 import { mergeAdjacentProductBlocks } from "./index.js";
 import { EmailBlockType } from "../renderer/types.js";
@@ -30,6 +34,15 @@ const dyn = (filter: object, schemaFieldName?: string): any => ({
   columns: 2,
   ...(schemaFieldName ? { schemaFieldName } : {}),
   _pendingFilter: JSON.parse(JSON.stringify(filter)),
+});
+// A single Klaviyo product ROW: `feeds.X|index:N` slots plus the per-row cap
+// parseDynamicProductBlock applies. Klaviyo emits one `div.kl-product` per row,
+// so a 6-product grid arrives as two of these.
+const dynRow = (filter: object, indices: number[], schemaFieldName?: string): any => ({
+  ...dyn(filter, schemaFieldName),
+  columns: 3,
+  numberOfProducts: indices.length,
+  _feedIndices: indices,
 });
 const spacer = (): any => ({ type: EmailBlockType.SPACER });
 const stat = (names: string[]): any => ({
@@ -88,6 +101,44 @@ const stat = (names: string[]): any => ({
   if (b.numberOfProducts !== 3 || b._pendingProducts.length !== 3)
     fail(`static merge: expected 3 deduped products, got ${JSON.stringify(b._pendingProducts)}`);
   console.log("✓ static merge still dedupes by name and updates the count");
+}
+
+// consecutive ROWS of one grid (disjoint feed slots) → summed, not halved
+{
+  const out = mergeAdjacentProductBlocks([
+    dynRow(BEST, [0, 1, 2]),
+    dynRow(BEST, [3, 4, 5]),
+  ]);
+  if (out.length !== 1) fail(`grid rows: expected 1 block, got ${out.length}`);
+  const b: any = out[0];
+  if (b.numberOfProducts !== 6) fail(`grid rows: expected numberOfProducts 6, got ${b.numberOfProducts}`);
+  if (JSON.stringify(b._feedIndices) !== "[0,1,2,3,4,5]")
+    fail(`grid rows: expected the slot union, got ${JSON.stringify(b._feedIndices)}`);
+  console.log("✓ disjoint feed slots sum into one grid");
+}
+
+// per-column duplicates (identical feed slots) → still collapsed, count untouched
+{
+  const out = mergeAdjacentProductBlocks([
+    dynRow(BEST, [0, 1, 2]),
+    dynRow(BEST, [0, 1, 2]),
+  ]);
+  if (out.length !== 1) fail(`column duplicates: expected 1 block, got ${out.length}`);
+  const b: any = out[0];
+  if (b.numberOfProducts !== 3) fail(`column duplicates: expected numberOfProducts 3, got ${b.numberOfProducts}`);
+  console.log("✓ identical feed slots stay a duplicate (White Elm regression)");
+}
+
+// cart feeds declare overflow slots, not products → never summed
+{
+  const out = mergeAdjacentProductBlocks([
+    dynRow(CART, [0, 1, 2], "cartContext"),
+    dynRow(CART, [3, 4, 5], "cartContext"),
+  ]);
+  if (out.length !== 1) fail(`cart overflow: expected 1 block, got ${out.length}`);
+  const b: any = out[0];
+  if (b.numberOfProducts !== 3) fail(`cart overflow: expected numberOfProducts 3, got ${b.numberOfProducts}`);
+  console.log("✓ cart feed slots are overflow, not additive");
 }
 
 console.log("\nAll merge-product-blocks smoke checks passed.");

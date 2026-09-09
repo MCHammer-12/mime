@@ -174,6 +174,20 @@ function parseDynamicProductBlock(
   // the merchant's column-width intent.
   const numberOfProducts = Math.min($cells.length, columns);
 
+  // Klaviyo lays a >1-row product block out as one `div.kl-product` per row,
+  // and each row is parsed as its own block. The feed indices say which of the
+  // two it is: rows of a single grid reference disjoint slots
+  // (`|index:0..2` then `|index:3..5`), while the per-column duplicates that
+  // mergeAdjacentProductBlocks collapses reference the *same* slots. Record
+  // them so the merge can tell a second row from a second copy.
+  const feedIndices = [
+    ...new Set(
+      [...($product.html() ?? "").matchAll(/\|index:(\d+)/g)].map((m) =>
+        Number(m[1]),
+      ),
+    ),
+  ].sort((a, b) => a - b);
+
   // Which display pieces does the cell reference?
   const showTitle = /\{\{\s*(?:item\.title|Title)\b/.test(cellText);
   const showPrice = /\{\{\s*(?:item\.price|Price|item\.regular_price|Compare_at)\b/.test(
@@ -262,6 +276,7 @@ function parseDynamicProductBlock(
     provider: "shopify",
     ...(cartContext ? { schemaFieldName: "cartContext" } : {}),
     _pendingFilter: pendingFilter,
+    _feedIndices: feedIndices,
   };
 
   return block;

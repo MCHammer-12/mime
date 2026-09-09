@@ -189,10 +189,22 @@ export function parseKlaviyoHtml(
  *
  * Dynamic blocks of DIFFERENT feeds are NOT merged — each carries its own
  * `_pendingFilter` / `schemaFieldName` and combining them would lose
- * semantics. But adjacent dynamic blocks of the SAME feed (identical
- * filter + schemaFieldName) are duplicates — a multi-column Klaviyo
- * product row emits one per column, and each hydrates the full feed at
- * send time — so keep the first and drop the rest.
+ * semantics. Adjacent dynamic blocks of the SAME feed are one of two things,
+ * told apart by the feed slots each references (`_feedIndices`):
+ *
+ *   - Same slots (`|index:0..2` twice) — per-column duplicates of one Klaviyo
+ *     product row, each hydrating the full feed at send time. Keep the first,
+ *     drop the rest.
+ *   - Disjoint slots (`|index:0..2` then `|index:3..5`) — consecutive ROWS of
+ *     one N-product grid, which Klaviyo emits as one `div.kl-product` per row.
+ *     Sum them: the grid shows every slot, and dropping the tail silently
+ *     halves the merchant's product count (Invader Concepts shipped four
+ *     6-product best-seller grids that imported as 3).
+ *
+ * Cart feeds are excluded from the additive path. A `feeds.CART` block declares
+ * overflow slots — up to ~12 cells for "however many items the cart holds" —
+ * not 12 products, so summing them would over-count. Same reasoning as the cap
+ * in parseDynamicProductBlock.
  */
 export function mergeAdjacentProductBlocks(sections: Section[]): Section[] {
   const out: Section[] = [];
@@ -250,6 +262,19 @@ export function mergeAdjacentProductBlocks(sections: Section[]): Section[] {
       JSON.stringify((prev as any)._pendingFilter) ===
         JSON.stringify((s as any)._pendingFilter)
     ) {
+      const prevIdxs: number[] = (prev as any)._feedIndices ?? [];
+      const sIdxs: number[] = (s as any)._feedIndices ?? [];
+      const isCart = (prev as any).schemaFieldName === "cartContext";
+      const disjoint =
+        !isCart &&
+        prevIdxs.length > 0 &&
+        sIdxs.length > 0 &&
+        !sIdxs.some((i) => prevIdxs.includes(i));
+      if (disjoint) {
+        const union = [...new Set([...prevIdxs, ...sIdxs])].sort((a, b) => a - b);
+        (prev as any)._feedIndices = union;
+        (prev as any).numberOfProducts = union.length;
+      }
       out.length = prevIdx + 1;
       continue;
     }
