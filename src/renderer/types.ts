@@ -401,11 +401,12 @@ export interface ProductsBlock extends BaseBlock {
   // Non-prod: executor reads this, POSTs to createProductFilter, then replaces
   // it with recommendedProductFilterId. Stripped before the template reaches prod.
   _pendingFilter?: ProductFilterDoc;
-  // Non-prod: list of product names extracted from a Klaviyo static product
-  // block. Importer resolves each via Shopify search → fills
+  // Non-prod: product names (+ product URLs when the cell links to
+  // /products/<handle>) extracted from a Klaviyo static product block.
+  // Importer resolves each handle via the storefront → fills
   // `manuallySelectedProducts`, then strips this field. Used only when
   // productSelectionType === "static".
-  _pendingProducts?: { name: string }[];
+  _pendingProducts?: { name: string; url?: string }[];
 }
 
 export type NonRecursiveBlock =

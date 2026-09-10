@@ -146,6 +146,12 @@ import { inferDiscountConfig } from "../discount-infer.js";
 export type ImportProgressEvent =
   | { kind: "filter_created"; templateName: string; productFilterId: string }
   | {
+      kind: "static_products_resolved";
+      templateName: string;
+      resolved: string[];
+      unresolved: string[];
+    }
+  | {
       kind: "static_products_fallback";
       templateName: string;
       products: string[];
@@ -209,7 +215,15 @@ export interface ImportOptions {
    * the same run link instead of re-creating.
    */
   discountsPromise?: Promise<any[]>;
+  /**
+   * Per-job memo of storefront product lookups, keyed by product URL. The
+   * same pinned product recurs across a flow's templates (welcome series
+   * grids repeat), and each lookup is a public HTTP fetch.
+   */
+  productCache?: Map<string, Promise<ManualProduct | null>>;
 }
+
+type ManualProduct = { productId: string; variantId: string };
 
 export interface ImportResult {
   templateId: string;
@@ -415,6 +429,49 @@ function inlineDynamicImage(block: Record<string, any>): Record<string, any> {
   };
 }
 
+/**
+ * Resolve a Klaviyo static-grid product link to Redo's manual-selection ids.
+ *
+ * No marketing RPC searches the catalog for a merchant-scoped JWT, but every
+ * Shopify storefront serves `/products/<handle>.js` publicly with the numeric
+ * product id and its variants — and Redo's manual selection stores exactly
+ * those numeric ids (`redo/email/content/src/product-recommendations.ts`
+ * matches through `parseNumericIdFromShopifyId`, so `"7488897679427"` and the
+ * gid form are interchangeable). The link's own origin is used; the myshopify
+ * domain 301s to the primary domain and fetch follows it.
+ *
+ * Variant: the link's `?variant=` when present, otherwise the first available
+ * variant (Redo's pdp link carries the variant, so an in-stock one is the
+ * better landing), otherwise the first variant. Redo itself falls back to the
+ * product's first variant if the stored id no longer exists.
+ */
+async function resolveStorefrontProduct(url: string): Promise<ManualProduct | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  const handle = parsed.pathname.match(/\/products\/([^/?#]+)/)?.[1];
+  if (!handle) return null;
+  const res = await fetch(`${parsed.origin}/products/${handle}.js`, {
+    headers: { accept: "application/json" },
+  });
+  if (!res.ok) return null;
+  const product = (await res.json()) as {
+    id?: number | string;
+    variants?: Array<{ id: number | string; available?: boolean }>;
+  };
+  const variants = product.variants ?? [];
+  if (product.id == null || variants.length === 0) return null;
+  const wanted = parsed.searchParams.get("variant");
+  const variant =
+    variants.find((v) => wanted != null && String(v.id) === wanted) ??
+    variants.find((v) => v.available) ??
+    variants[0];
+  return { productId: String(product.id), variantId: String(variant.id) };
+}
+
 /** Strip non-prod fields + resolve per-block `_pendingFilter` into real filter IDs. */
 async function preparePayload(
   template: Record<string, any>,
@@ -552,22 +609,56 @@ async function preparePayload(
         recommendedProductFilterId: await resolveFilter(_pendingFilter),
       });
     } else if (block && block._pendingProducts) {
-      // Static grid: the parser only recovered product NAMES from the HTML,
-      // and no marketing RPC resolves a name to a Shopify product id. Falling
-      // back to a dynamic best-sellers grid keeps the block visible (static +
-      // empty `manuallySelectedProducts` renders as nothing); the operator can
-      // re-pin the original products in the editor.
+      // Static grid: pin the merchant's products through their storefront
+      // links. Anything without a resolvable link is dropped from the grid
+      // and reported; if nothing resolves, fall back to a dynamic best-sellers
+      // grid so the block stays visible (static + empty
+      // `manuallySelectedProducts` renders as nothing).
       const { _pendingProducts, ...blockRest } = block;
-      rest.sections.push({
-        ...blockRest,
-        productSelectionType: "dynamic",
-        recommendedProductFilterId: await resolveFilter(BEST_SELLERS_FILTER),
-      });
-      options.onProgress?.({
-        kind: "static_products_fallback",
-        templateName: String(template.name ?? ""),
-        products: _pendingProducts.map((p: { name: string }) => p.name),
-      });
+      const pending = _pendingProducts as { name: string; url?: string }[];
+      const productCache = (options.productCache ??= new Map());
+      const resolved: string[] = [];
+      const unresolved: string[] = [];
+      const manuallySelectedProducts: ManualProduct[] = [];
+      for (const p of pending) {
+        let lookup = p.url ? productCache.get(p.url) : undefined;
+        if (p.url && !lookup) {
+          lookup = resolveStorefrontProduct(p.url).catch(() => null);
+          productCache.set(p.url, lookup);
+        }
+        const product = lookup ? await lookup : null;
+        if (product) {
+          manuallySelectedProducts.push(product);
+          resolved.push(p.name);
+        } else {
+          unresolved.push(p.name);
+        }
+      }
+      if (manuallySelectedProducts.length > 0) {
+        rest.sections.push({
+          ...blockRest,
+          productSelectionType: "static",
+          numberOfProducts: manuallySelectedProducts.length,
+          manuallySelectedProducts,
+        });
+        options.onProgress?.({
+          kind: "static_products_resolved",
+          templateName,
+          resolved,
+          unresolved,
+        });
+      } else {
+        rest.sections.push({
+          ...blockRest,
+          productSelectionType: "dynamic",
+          recommendedProductFilterId: await resolveFilter(BEST_SELLERS_FILTER),
+        });
+        options.onProgress?.({
+          kind: "static_products_fallback",
+          templateName,
+          products: unresolved,
+        });
+      }
     } else if (
       block &&
       block.type === "image" &&

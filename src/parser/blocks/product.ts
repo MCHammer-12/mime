@@ -603,12 +603,12 @@ function parseStaticProductBlock(
   const n = $cells.length;
   if (n === 0) return [];
 
-  // Each cell is one merchant-picked product. Extract the product names from
-  // the cell text — they're the visible titles and serve as Shopify search
-  // input on the import side. The redoapp importer (`import-klaviyo-templates`)
-  // resolves each name → {productId, variantId} via Shopify search and fills
-  // `manuallySelectedProducts`, then strips `_pendingProducts`.
-  const pendingProducts: { name: string }[] = [];
+  // Each cell is one merchant-picked product. Extract the product name from
+  // the cell text (the visible title) and the product URL from the cell's
+  // link. The import side (`import-rpc.ts`) resolves the URL's handle to
+  // {productId, variantId} through the public storefront `/products/<handle>.js`
+  // endpoint and fills `manuallySelectedProducts`, then strips `_pendingProducts`.
+  const pendingProducts: { name: string; url?: string }[] = [];
   const $firstCell = $cells.first();
 
   // Look at the first cell for styling defaults shared across the grid.
@@ -643,7 +643,12 @@ function parseStaticProductBlock(
     const key = name.toLowerCase();
     if (seenNames.has(key)) return;
     seenNames.add(key);
-    pendingProducts.push({ name });
+    const url = $cell
+      .find("a[href]")
+      .map((_, a) => $(a).attr("href") ?? "")
+      .get()
+      .find((href) => /\/products\/[^/?#]+/.test(href));
+    pendingProducts.push(url ? { name, url } : { name });
   });
 
   // Columns: width % on cell → columns count = round(100 / width)
@@ -731,7 +736,7 @@ function parseStaticProductBlock(
   }
 
   ctx.warnings.push(
-    `Static product block (${pendingProducts.length} product${pendingProducts.length === 1 ? "" : "s"}) — emitted as Products block with names ["${pendingProducts.map((p) => p.name).slice(0, 3).join('", "')}"...] for the importer to resolve via Shopify search. Verify in Redo editor after import; ambiguous names may need manual picker selection.`,
+    `Static product block (${pendingProducts.length} product${pendingProducts.length === 1 ? "" : "s"}) — emitted as Products block with names ["${pendingProducts.map((p) => p.name).slice(0, 3).join('", "')}"...] for the importer to resolve via the storefront product handle. Verify in Redo editor after import; products without a /products/<handle> link fall back to best-sellers.`,
   );
 
   const block: ProductsBlock = {

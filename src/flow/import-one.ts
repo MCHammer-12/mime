@@ -335,10 +335,16 @@ async function main() {
       case "fonts_done":
         console.log(`      fonts: ${e.uploaded} uploaded, ${e.skipped} skipped`);
         break;
+      case "static_products_resolved":
+        console.log(
+          `      ✓ static product grid in "${e.templateName}" pinned ${e.resolved.length} product(s) via storefront handles` +
+            (e.unresolved.length ? `; unresolved (re-pin in the editor): ${e.unresolved.join(", ")}` : ""),
+        );
+        break;
       case "static_products_fallback":
         console.log(
           `      ~ static product grid in "${e.templateName}" → dynamic best-sellers ` +
-            `(no RPC resolves product names to Shopify ids); re-pin in the editor: ${e.products.join(", ")}`,
+            `(no product link resolved on the storefront); re-pin in the editor: ${e.products.join(", ")}`,
         );
         break;
       case "dynamic_image_inlined":
