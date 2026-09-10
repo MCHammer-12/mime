@@ -20,8 +20,8 @@ function fail(msg: string): never {
   console.error(`FAIL: ${msg}`);
   process.exit(1);
 }
-function run(inner: string, headingStyles?: HeadingStyles): string {
-  const $ = cheerio.load(`<table><tbody><tr><td class="kl-text"><div>${inner}</div></td></tr></tbody></table>`);
+function run(inner: string, headingStyles?: HeadingStyles, divStyle = ""): string {
+  const $ = cheerio.load(`<table><tbody><tr><td class="kl-text"><div style="${divStyle}">${inner}</div></td></tr></tbody></table>`);
   const block = parseTextBlock($ as any, $("td.kl-text") as any, ctx(headingStyles));
   if (!block) throw new Error("parseTextBlock returned null");
   return block.text;
@@ -64,11 +64,23 @@ function run(inner: string, headingStyles?: HeadingStyles): string {
   const rules: HeadingStyles = {
     h3: { "font-size": "32px", "font-weight": "400", "line-height": "1.1", margin: "0", "margin-bottom": "12px", color: "#373F47", "font-family": "Helvetica, Arial", "text-align": "left" },
   };
-  const out = run(`<h3 style="text-align: center;">Hey, it's been a while...</h3>`, rules);
+  const out = run(`<h3 style="text-align: center;">Hey, it's been a while...</h3>`, rules, "color:#373F47;font-size:16px;");
   if (!/<h3 style="text-align: center;font-size:32px;font-weight:400;line-height:1\.1;margin:0;margin-bottom:12px">Hey/i.test(out)) fail(`template h3 rule not inlined: ${out}`);
   if (/<strong>/i.test(out)) fail(`weight-400 template rule must not bold: ${out}`);
   if (/color:|font-family:|text-align:left/i.test(out.replace("text-align: center", ""))) fail(`only metrics should be inlined: ${out}`);
   console.log("✓ template h3 rule (32px/400) inlined, not bolded");
+}
+// Rule color that departs from the block color is a heading accent (Invader
+// Concepts Loyalty h4 #DE6C58 on a #373F47 block) → inlined; same color → not.
+{
+  const rules: HeadingStyles = { h4: { "font-size": "24px", "font-weight": "400", color: "#DE6C58" } };
+  const out = run(`<h4 style="text-align: center;">Ways to earn</h4>`, rules, "color:#373F47;font-size:16px;");
+  if (!/<h4 style="text-align: center;font-size:24px;font-weight:400;color:#DE6C58">Ways/i.test(out)) fail(`accent color not inlined: ${out}`);
+  const same = run(`<h4>Ways to earn</h4>`, rules, "color:#de6c58;");
+  if (/color:/i.test(same)) fail(`block-matching color should not be inlined: ${same}`);
+  const own = run(`<h4 style="color:#111111">Ways to earn</h4>`, rules, "color:#373F47;");
+  if (/#DE6C58/i.test(own)) fail(`inline color on the tag must win: ${own}`);
+  console.log("✓ heading rule color inlined only when it differs from the block color");
 }
 // Template rule says bold → inlined AND <strong>; bare tag gets a fresh style attr.
 {

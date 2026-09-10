@@ -485,9 +485,10 @@ export function stripStandaloneCoupons(html: string): string {
 // tag and make the weight explicit: <strong> when the resolved weight is bold,
 // unless an inline font-weight already decides it. With no rule for the tag,
 // fall back to the stock bold-h2/h3 assumption. Only typographic metrics are
-// inlined — font-family and color follow the block (Klaviyo's rules repeat
-// the block's own values there, and an inline family would bypass the
-// custom-font hoisting above).
+// inlined — font-family follows the block (an inline family would bypass the
+// custom-font hoisting above), and color only when the rule departs from the
+// block's own color (Klaviyo's rules usually repeat it; Invader Concepts'
+// Loyalty template gives h4 a coral accent the block color can't carry).
 const HEADING_INLINE_PROPS = [
   "font-size",
   "font-weight",
@@ -506,7 +507,11 @@ function isBoldWeight(weight: string): boolean {
   return Number.isFinite(n) && n >= 600;
 }
 
-function applyHeadingStyles(html: string, headingStyles: HeadingStyles | undefined): string {
+function applyHeadingStyles(
+  html: string,
+  headingStyles: HeadingStyles | undefined,
+  blockColor: string,
+): string {
   return html.replace(
     /<(h[1-6])\b([^>]*)>([\s\S]*?)<\/\1>/gi,
     (full, tag: string, attrs: string, inner: string) => {
@@ -516,6 +521,13 @@ function applyHeadingStyles(html: string, headingStyles: HeadingStyles | undefin
       const added = HEADING_INLINE_PROPS.filter((p) => rule?.[p] && !inline[p]).map(
         (p) => `${p}:${rule![p]}`,
       );
+      if (
+        rule?.color &&
+        !inline.color &&
+        rule.color.trim().toLowerCase() !== blockColor.trim().toLowerCase()
+      ) {
+        added.push(`color:${rule.color}`);
+      }
       let newAttrs = attrs;
       if (added.length > 0) {
         if (styleMatch) {
@@ -687,7 +699,7 @@ export function parseTextBlock(
   // After the hoist on purpose: the sizes inlined here come from the
   // template's heading rules, not the merchant's inline spans, and must not
   // drag a mixed heading + body block up to the heading size.
-  textHtml = applyHeadingStyles(textHtml, ctx.headingStyles);
+  textHtml = applyHeadingStyles(textHtml, ctx.headingStyles, parseColor(divStyle["color"]));
 
   const sectionColor =
     tdStyle["background-color"] ||
