@@ -21,7 +21,7 @@ import { findKlaviyoImageUrls, KLAVIYO_ASSET_HOST, rehostKlaviyoImages } from ".
 /** Fields the server owns — never echo them back in an update. */
 const SERVER_OWNED = new Set(["_id", "team", "createdAt", "updatedAt", "__v"]);
 
-type Merchant = { name: string; url: string };
+type Merchant = { name: string; url: string; address: string };
 
 /** Redo's storeUrl is the myshopify host; the customer-facing domain is
  *  wherever Shopify redirects it (blacklinedetailing.myshopify.com →
@@ -35,7 +35,19 @@ async function resolveMerchant(options: ImportOptions): Promise<Merchant> {
   try {
     if (url) url = new URL((await fetch(url, { method: "HEAD", redirect: "follow" })).url).origin;
   } catch {}
-  return { name, url };
+  // Same source order as Redo's own footer block: the custom footer address,
+  // else the public one, else the account address.
+  const footer = team?.settings?.emailFooter;
+  const a = (footer?.useCustomAddress && footer.customAddress) || team?.publicAddress || team?.address || {};
+  const address = [
+    [a.street1, a.street2].filter(Boolean).join(" "),
+    a.city,
+    [a.state, a.zip].filter(Boolean).join(" "),
+    a.country || team?.address?.country_name,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  return { name, url, address };
 }
 
 /** `… uses {{ organization }}, which the Marketing email trigger doesn't
@@ -48,91 +60,269 @@ function rejectedRoots(message: string): string[] {
  * updateEmailTemplate validates every {{ token }} against the template's
  * schemaType and rejects the whole document on one unknown root — so a
  * template that was accepted at import can refuse an unrelated image swap.
- * Resolve the roots we know are merchant constants or plain renames; leave
- * anything else for the operator. Returns whether any string changed.
+ *
+ * Two passes. First, tokens with a Redo equivalent are renamed to it and
+ * merchant constants are inlined, anywhere in the document. Then whatever
+ * still carries a rejected root on a site the validator reads (subject,
+ * preview, text/html, links) falls back: the token's own `|default:` literal
+ * if it has one, else "" in copy and the trigger's natural link in a URL.
+ * Returns one line per distinct replacement; empty means nothing changed.
  */
-function fixRejectedRoots(template: any, roots: string[], merchant: Merchant): boolean {
-  const rules: Array<[RegExp, string | ((...m: string[]) => string)]> = [];
+function fixRejectedRoots(template: any, roots: string[], merchant: Merchant): string[] {
   const schema = String(template.schemaType ?? "");
-  // Klaviyo filters that leave a merchant constant unchanged: the url carries
-  // no trailing slash and the name is never empty.
-  const noop = String.raw`(?:\|\s*(?:trim_slash|default:[^|}]*)\s*)*`;
-  if (roots.includes("organization") && merchant.name) {
-    // "Welcome to the {{ organization.name }}" with a team named "The Pretty
-    // Cult" would read "the The Pretty Cult" — drop the article once.
-    rules.push([
-      new RegExp(String.raw`\b(the\s+)\{\{\s*organization\.name\s*${noop}\}\}`, "gi"),
-      (_, the) => the + merchant.name.replace(/^the\s+/i, ""),
-    ]);
-    rules.push([new RegExp(String.raw`\{\{\s*organization\.name\s*${noop}\}\}`, "g"), merchant.name]);
-    if (merchant.url) {
+  const has = (...names: string[]) => roots.some((r) => names.includes(r.toLowerCase()));
+  // Pick the trigger's own name for a concept; marketing_email and
+  // marketing_campaign share the renderer-provided "most recently viewed"
+  // product, the closest thing they have to an event payload.
+  const by = (m: Record<string, string>): string | undefined =>
+    m[schema] ?? (schema === "marketing_email" || schema === "marketing_campaign" ? m.marketing : undefined);
+  const abandonment = schema === "marketing_cart_abandonment" || schema === "marketing_checkout_abandonment";
+
+  // [pattern, replacement, copyOnly]. A copy-only rule swaps in a product
+  // name or price — fine in copy, but inside a link it just renders a broken
+  // URL. There the token is left for the url pass below, which takes the
+  // Klaviyo default (in practice a /cart link) or the schema's own link.
+  const rules: Array<[RegExp, (...m: any[]) => string, boolean?]> = [];
+  const LINK_KEYS = new Set(["buttonLink", "clickthroughUrl", "url", "src"]);
+  const token = (body: string, flags = "g") =>
+    new RegExp(String.raw`\{\{\s*${body}\s*(\|[^}]*?)?\s*\}\}`, flags);
+  // A Redo variable stands in; the filter chain carries over.
+  const rename = (from: string, to: string, flags = "g", copyOnly = false) =>
+    rules.push([token(from, flags), (_, filters) => `{{ ${to}${filters ? " " + filters : ""} }}`, copyOnly]);
+  const renameCopy = (from: string, to: string) => rename(from, to, "g", true);
+  // A merchant constant stands in; the filters go with the token.
+  const literal = (from: string, value: string) => rules.push([token(from), () => value]);
+
+  if (has("organization")) {
+    if (merchant.name) {
+      // "Welcome to the {{ organization.name }}" with a team named "The Pretty
+      // Cult" would read "the The Pretty Cult" — drop the article once.
       rules.push([
-        new RegExp(String.raw`\{\{\s*organization\.(?:url|website|website_url)\s*${noop}\}\}`, "g"),
-        merchant.url,
+        new RegExp(String.raw`\b(the\s+)\{\{\s*organization\.name\s*(?:\|[^}]*)?\}\}`, "gi"),
+        (_, the) => the + merchant.name.replace(/^the\s+/i, ""),
+      ]);
+      literal(String.raw`organization\.name`, merchant.name);
+    }
+    if (merchant.url) literal(String.raw`organization\.(?:url|website|website_url)`, merchant.url);
+    if (merchant.address) literal(String.raw`organization\.full_address`, merchant.address);
+  }
+  // `{{ First_name }}` / `{{ first name }}` never resolved in Klaviyo either; same intent.
+  if (has("first_name", "first")) rename(String.raw`first[\s_]name`, "customer_first_name", "gi");
+  if (has("email")) rename("email", "customer_email");
+  if (has("person")) {
+    rename(String.raw`person\.first_name`, "customer_first_name");
+    rename(String.raw`person\.email`, "customer_email");
+    if (schema !== "yotpo_loyalty_points_earned") rename(String.raw`person\.last_name`, "customer_last_name");
+  }
+  // Klaviyo's preference-centre links all collapse to Redo's one unsubscribe.
+  if (has("unsubscribe_url", "manage_preferences_link", "preferences_link", "email_preference_url")) {
+    rename("(?:unsubscribe_url|manage_preferences_link|preferences_link|email_preference_url)", "unsubscribe_link");
+  }
+  // A bare "click below to stay subscribed" link: any tracked click counts as
+  // engagement in Redo, so send it to the store.
+  if (has("link")) rename("link", "store_link");
+
+  if (has("event")) {
+    // `https://shop.com{{ event.URL|cut:"https://shop.com" }}` — the same link,
+    // written to survive a relative URL. Unwrap before the rename.
+    rules.push([/(https?:\/\/[^\s{"']+)\{\{\s*event\.URL\|cut:"\1"\s*\}\}/g, () => "{{ event.URL }}"]);
+    const cartish = String.raw`event(?:\.checkout_url|\.extra\.(?:responsive_)?checkout_url|\.extra\.cart_url)`;
+    if (abandonment) rename(String.raw`(?:event\.URL|${cartish})`, "checkout_url");
+    else if (by({ marketing: "1" }) && merchant.url) literal(cartish, `${merchant.url}/cart`);
+    if (schema === "marketing_browse_abandonment") rename(String.raw`event\|lookup:["']Url["']`, "browsed_page_url");
+    const link = by({
+      marketing_cart_abandonment: "checkout_url",
+      marketing_checkout_abandonment: "checkout_url",
+      marketing_browse_abandonment: "browsed_page_url",
+      marketing_price_drop: "discounted_product.url",
+      marketing_back_in_stock: "back_in_stock_product_url",
+      marketing: "most_recently_viewed_product_link",
+    });
+    if (link) rename(String.raw`event(?:\.URL|\.url|\.product_url|\.page|\.items\.0\.url)`, link);
+    const name = by({
+      marketing_cart_abandonment: "product_in_cart_name",
+      marketing_checkout_abandonment: "product_in_cart_name",
+      marketing_browse_abandonment: "most_recently_viewed_product_name",
+      marketing_price_drop: "product_title",
+      marketing_back_in_stock: "back_in_stock_product_title",
+      marketing: "most_recently_viewed_product_name",
+    });
+    if (name) {
+      renameCopy(
+        String.raw`event(?:\.Name|\.Title|\.product_name|\.product_title|\.product\.title|\.structured_product\.title|\.extra\.line_items\.0\.product\.title|\s*\|\s*lookup:["']Product Name["'])`,
+        name,
+      );
+    }
+    if (schema === "marketing_price_drop") {
+      renameCopy(String.raw`event\.price_drop_percent`, "formatted_price_drop_percentage");
+      renameCopy(String.raw`event\.reduced_price`, "formatted_current_price");
+      renameCopy(String.raw`event\.original_price`, "formatted_previous_price");
+      renameCopy(String.raw`event\.price_drop_amount`, "formatted_savings");
+    }
+    if (schema === "order_tracking") {
+      rename(String.raw`event\.extra\.(?:order_number|order\.name|order\.meta\.shopify_order\.name)`, "order_number");
+      rename(String.raw`event\.(?:carrier_name|extra\.fulfillments?(?:\.0)?\.tracking_company)`, "carrier");
+      rename(String.raw`event\.(?:tracking_code|extra\.fulfillments?(?:\.0)?\.tracking_number)`, "tracking_number");
+      rename(
+        String.raw`event\.extra\.(?:fulfillments?(?:\.0)?\.tracking_url|order_status_url|order\.(?:url|order_status_url|meta\.shopify_order\.order_status_url))`,
+        "tracking_link",
+      );
+    }
+    rename(String.raw`event\.(?:extra\.(?:customer\.default_address|(?:shipping|billing)_address)\.)?first_name`, "customer_first_name");
+  }
+  if (schema === "order_tracking") {
+    if (has("fulfillment")) {
+      rename(String.raw`fulfillment\.tracking_company`, "carrier");
+      rename(String.raw`fulfillment\.tracking_numbers\.first`, "tracking_number");
+      rename(String.raw`fulfillment\.tracking_urls\.first`, "tracking_link");
+    }
+    if (has("tracking_url")) rename("tracking_url", "tracking_link");
+    // Order address parts live under order_summary, whichever of Klaviyo's
+    // three spellings the template used.
+    if (has("event", "shipping_address", "billing_address")) {
+      const field: Record<string, string> = {
+        name: "name", address1: "address1", address2: "address2", city: "city",
+        province: "province", state: "province", zip: "postal_code", postal_code: "postal_code", phone: "phone",
+        last_name: "", // no per-address last name; the customer's own is below
+      };
+      rules.push([
+        new RegExp(
+          String.raw`\{\{\s*(?:event\.extra\.(?:order\.(?:meta\.shopify_order\.)?)?)?(shipping|billing)(?:_address|Address)\.(${Object.keys(field).join("|")})\s*(\|[^}]*?)?\s*\}\}`,
+          "g",
+        ),
+        (m, kind, part, filters) => {
+          const to = part === "last_name" ? "customer_last_name" : `order_summary.customer_information.${kind}_address.${field[part]}`;
+          return `{{ ${to}${filters ? " " + filters : ""} }}`;
+        },
       ]);
     }
   }
-  // Plain renames; the filter chain carries over.
-  const rename = (from: string, to: string, flags = "g") =>
-    rules.push([
-      new RegExp(String.raw`\{\{\s*${from}\s*(\|[^}]*?)?\s*\}\}`, flags),
-      (_, filters) => `{{ ${to}${filters ? " " + filters : ""} }}`,
-    ]);
-  // `{{ First_name }}` never resolved in Klaviyo either; same intent.
-  if (roots.some((r) => r.toLowerCase() === "first_name")) rename("first_name", "customer_first_name", "gi");
-  if (roots.includes("email")) rename("email", "customer_email");
-  // Abandonment triggers expose one link back to the cart or the browsed
-  // page, which Klaviyo spells several ways per metric. On any other trigger
-  // event.* is a mismatch the operator has to decide on, so it stays.
-  if (roots.includes("event")) {
-    // `https://shop.com{{ event.URL|cut:"https://shop.com" }}` — the same link,
-    // written to survive a relative URL. Unwrap before the rename.
-    rules.push([/(https?:\/\/[^\s{"']+)\{\{\s*event\.URL\|cut:"\1"\s*\}\}/g, "{{ event.URL }}"]);
-    if (schema === "marketing_cart_abandonment" || schema === "marketing_checkout_abandonment") {
-      rename(String.raw`event(?:\.URL|\.checkout_url|\.extra\.(?:responsive_)?checkout_url)`, "checkout_url");
+  // Klaviyo fetches the item with {% catalog %}; Redo's triggers hand the same
+  // fields over flat, so the wrapper goes too (LiquidJS would choke on it).
+  if (has("catalog_item")) {
+    const product = by({ marketing_price_drop: "discounted_product", marketing_back_in_stock: "restocked_product" });
+    if (product) {
+      rules.push([/\{%\s*catalog\b[^%]*%\}\s*/g, () => ""], [/\s*\{%\s*endcatalog\s*%\}/g, () => ""]);
+      renameCopy(String.raw`catalog_item\.title`, `${product}.title`);
+      rename(String.raw`catalog_item\.url`, `${product}.url`);
+      rename(String.raw`catalog_item(?:\.variant)?\.featured_image\.full\.src`, `${product}.image_url`);
+      renameCopy(String.raw`catalog_item(?:\.variant)?\.price`, `${product}.price`);
     }
-    if (schema === "marketing_browse_abandonment") {
-      rename(String.raw`event(?:\.URL|\|lookup:["']Url["'])`, "browsed_page_url");
-    }
-  }
-  // Klaviyo fetches the restocked item with {% catalog %}; Redo's back-in-stock
-  // trigger hands the same URL over flat.
-  if (roots.includes("catalog_item") && schema === "marketing_back_in_stock") {
-    rules.push([
-      /\{%\s*catalog\s+event\.VariantId\b[^%]*%\}\s*\{\{\s*catalog_item\.url\s*\}\}\s*\{%\s*endcatalog\s*%\}/g,
-      "{{ back_in_stock_product_url }}",
-    ]);
   }
   // An older importer resolved organization.name *inside* the braces, leaving
   // `{{ Blackline Car Care }}` — reported as root `Blackline`.
   if (merchant.name && roots.includes(merchant.name.split(/\s+/)[0]!)) {
     const escaped = merchant.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    rules.push([new RegExp(`\\{\\{\\s*${escaped}\\s*\\}\\}`, "g"), merchant.name]);
+    rules.push([new RegExp(`\\{\\{\\s*${escaped}\\s*\\}\\}`, "g"), () => merchant.name]);
   }
-  if (rules.length === 0) return false;
 
-  let changed = false;
-  const visit = (node: any): void => {
+  const log = new Set<string>();
+  const note = (from: string, to: string) => log.add(`${from} → ${to === "" ? '""' : to}`);
+  const apply = (s: string, key: string) =>
+    rules.reduce(
+      (acc, [re, to, copyOnly]) =>
+        copyOnly && LINK_KEYS.has(key)
+          ? acc
+          : acc.replace(re, (...m: any[]) => {
+              const out = to(...m);
+              if (out !== m[0]) note(m[0], out);
+              return out;
+            }),
+      s,
+    );
+  const visit = (node: any, key = ""): void => {
     if (Array.isArray(node)) {
       node.forEach((v, i) => {
-        if (typeof v === "string") {
-          const out = rules.reduce((s, [re, to]) => s.replace(re, to as string), v);
-          if (out !== v) { node[i] = out; changed = true; }
-        } else visit(v);
+        if (typeof v === "string") node[i] = apply(v, key);
+        else visit(v, key);
       });
     } else if (node && typeof node === "object") {
       for (const k of Object.keys(node)) {
         if (k === "name" || SERVER_OWNED.has(k)) continue;
         const v = node[k];
-        if (typeof v === "string") {
-          const out = rules.reduce((s, [re, to]) => s.replace(re, to as string), v);
-          if (out !== v) { node[k] = out; changed = true; }
-        } else visit(v);
+        if (typeof v === "string") node[k] = apply(v, k);
+        else visit(v, k);
       }
     }
   };
   visit(template);
-  return changed;
+
+  // Fallbacks, only where the validator looks. Anything left in altText,
+  // buttonText or an imageUrl is not what blocked the save.
+  const TOKEN = /\{\{\s*([^}]*?)\s*\}\}/g;
+  const rejected = new Set(roots);
+  const rootOf = (body: string) => body.match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0] ?? "";
+  const defaultOf = (body: string) => {
+    const m = body.match(/\|\s*default:\s*(?:'([^']*)'|"([^"]*)")/);
+    return m ? (m[1] ?? m[2] ?? "") : undefined;
+  };
+  const link =
+    by({
+      marketing_cart_abandonment: "{{ checkout_url }}",
+      marketing_checkout_abandonment: "{{ checkout_url }}",
+      marketing_browse_abandonment: "{{ browsed_page_url }}",
+      marketing_price_drop: "{{ discounted_product.url }}",
+      marketing_back_in_stock: "{{ back_in_stock_product_url }}",
+      order_tracking: "{{ tracking_link }}",
+    }) ?? merchant.url;
+  const fallback = (holder: any, key: string, kind: "text" | "url") => {
+    const s = holder?.[key];
+    if (typeof s !== "string") return;
+    let out = s.replace(TOKEN, (m, body) => {
+      if (!rejected.has(rootOf(body))) return m;
+      const d = defaultOf(body);
+      if (d !== undefined && (kind === "text" || d)) {
+        note(m, `"${d}"`);
+        return d;
+      }
+      if (kind === "text") {
+        note(m, "");
+        return "";
+      }
+      return m;
+    });
+    // A link is one value: a rejected root anywhere in it means the whole
+    // thing goes, never `https://shop.com/products/` with a hole in it.
+    if (kind === "url" && link && [...out.matchAll(TOKEN)].some(([, body]) => rejected.has(rootOf(body)))) {
+      note(out, link);
+      out = link;
+    }
+    if (out !== s) holder[key] = out;
+  };
+  const savedSections: string[] = [];
+  const blocks = (list: any[]): void => {
+    for (const b of list ?? []) {
+      switch (b?.type) {
+        case "text": fallback(b, "text", "text"); break;
+        case "html": fallback(b, "html", "text"); break;
+        case "button": fallback(b, "buttonLink", "url"); break;
+        case "image":
+        case "header": fallback(b, "clickthroughUrl", "url"); break;
+        case "qr-code-email": fallback(b, "url", "url"); break;
+        case "menu": for (const item of b.menuItems ?? []) fallback(item, "label", "text"); break;
+        case "table":
+          // Dynamic rows bind {{ item }} alone; nothing from the trigger belongs there.
+          if (b.mode !== "static") break;
+          for (const row of b.staticRows ?? []) {
+            for (const cell of row ?? []) {
+              if (cell?.cellType === "image") { fallback(cell, "src", "url"); fallback(cell, "clickthroughUrl", "url"); }
+              else fallback(cell, "content", "text");
+            }
+          }
+          break;
+        case "column": blocks(b.columns); break;
+        case "interactive-review-request": blocks(b.successSection?.blocks); break;
+        case "section-reference": savedSections.push(String(b.sectionId)); break;
+      }
+    }
+  };
+  fallback(template, "subject", "text");
+  fallback(template, "emailPreview", "text");
+  blocks(template.sections);
+  // A saved section is shared by every email that references it; fixing one
+  // email must not edit it. The retry names the section if that's the blocker.
+  if (savedSections.length) log.add(`saved section(s) ${savedSections.join(", ")} not touched`);
+  return log.size ? [...log] : [];
 }
 
 async function main() {
@@ -209,14 +399,21 @@ async function main() {
           options,
         );
       let resolvedRoots: string[] = [];
+      let replacements: string[] = [];
       try {
         await update();
       } catch (e: any) {
         const roots = rejectedRoots(e?.message ?? "");
         merchant ??= await resolveMerchant(options);
-        if (roots.length === 0 || !fixRejectedRoots(next, roots, merchant)) throw e;
+        replacements = roots.length ? fixRejectedRoots(next, roots, merchant) : [];
+        if (replacements.length === 0) throw e;
         resolvedRoots = roots;
-        await update();
+        try {
+          await update();
+        } catch (e2: any) {
+          for (const r of replacements) console.log(`      ↳ ${r}`);
+          throw e2;
+        }
       }
       fixed++;
       const failed = summary.failed.length ? `, ${summary.failed.length} failed` : "";
@@ -225,6 +422,7 @@ async function main() {
         `  ✓ ${label} — ${summary.rehosted}/${urls.length} asset(s), ${summary.rewritten} field(s)${failed}${liquid}`,
       );
       for (const f of summary.failed) console.log(`      ! ${f.url} — ${f.reason}`);
+      for (const r of replacements) console.log(`      ↳ ${r}`);
     } catch (e: any) {
       failures.push({ template: label, reason: e?.message ?? String(e) });
       console.log(`  ✗ ${label} — ${e?.message ?? e}`);
