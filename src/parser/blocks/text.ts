@@ -507,6 +507,13 @@ function isBoldWeight(weight: string): boolean {
   return Number.isFinite(n) && n >= 600;
 }
 
+// `#000` and `#000000` are the same color; Klaviyo's rules use the short form.
+function canonicalColor(value: string): string {
+  const c = value.trim().toLowerCase();
+  const short = c.match(/^#([0-9a-f])([0-9a-f])([0-9a-f])$/);
+  return short ? `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}` : c;
+}
+
 function applyHeadingStyles(
   html: string,
   headingStyles: HeadingStyles | undefined,
@@ -521,11 +528,7 @@ function applyHeadingStyles(
       const added = HEADING_INLINE_PROPS.filter((p) => rule?.[p] && !inline[p]).map(
         (p) => `${p}:${rule![p]}`,
       );
-      if (
-        rule?.color &&
-        !inline.color &&
-        rule.color.trim().toLowerCase() !== blockColor.trim().toLowerCase()
-      ) {
+      if (rule?.color && !inline.color && canonicalColor(rule.color) !== canonicalColor(blockColor)) {
         added.push(`color:${rule.color}`);
       }
       let newAttrs = attrs;

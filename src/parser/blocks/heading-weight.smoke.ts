@@ -80,6 +80,8 @@ function run(inner: string, headingStyles?: HeadingStyles, divStyle = ""): strin
   if (/color:/i.test(same)) fail(`block-matching color should not be inlined: ${same}`);
   const own = run(`<h4 style="color:#111111">Ways to earn</h4>`, rules, "color:#373F47;");
   if (/#DE6C58/i.test(own)) fail(`inline color on the tag must win: ${own}`);
+  const shorthand = run(`<h2>We love your recent purchase!</h2>`, { h2: { color: "#000" } }, "color:#000000;");
+  if (/color:/i.test(shorthand)) fail(`#000 is the block's #000000, not an accent: ${shorthand}`);
   console.log("✓ heading rule color inlined only when it differs from the block color");
 }
 // Template rule says bold → inlined AND <strong>; bare tag gets a fresh style attr.
