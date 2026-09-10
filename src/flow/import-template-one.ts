@@ -79,7 +79,9 @@ async function main() {
         console.log(`      ✓ font ${e.family}`);
         break;
       case "fonts_done":
-        console.log(`      fonts: ${e.uploaded} uploaded, ${e.skipped} skipped`);
+        console.log(
+          `      fonts: ${e.uploaded} uploaded, ${e.skipped} skipped, ${e.aligned} block name${e.aligned === 1 ? "" : "s"} aligned to the brand kit`,
+        );
         break;
     }
   };

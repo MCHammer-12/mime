@@ -10,6 +10,7 @@
  * fontFamily to the brand-kit name.
  */
 import {
+  brandKitSpellingMap,
   collectFonts,
   fontFamilyKey,
   normalizeFontFamilyName,
@@ -252,3 +253,18 @@ console.log("✓ normalizeForFontMatch strips weight/foundry/case/punct");
 }
 
 console.log("fonts.smoke.ts: all assertions passed");
+
+// ─── brandKitSpellingMap: case-only mismatches against the kit ─────────────
+{
+  // Redo's renderer compares block fontFamily to the kit with ===, so the
+  // Invader Concepts "montserrat" blocks never found the kit's "Montserrat".
+  const map = brandKitSpellingMap(["Montserrat", " Nunito Sans ", "", "MONTSERRAT"]);
+  assert(map.get("montserrat") === "Montserrat", `first kit spelling wins: ${map.get("montserrat")}`);
+  assert(map.get("nunito sans") === "Nunito Sans", "kit names are trimmed");
+  assert(map.size === 2, `empty names skipped, got ${map.size}`);
+  const tmpl: any = { sections: [{ fontFamily: "montserrat" }, { fontFamily: "Montserrat" }, { fontFamily: "Anton" }] };
+  const n = rewriteTemplateFontFamilies(tmpl, map);
+  assert(n === 1 && tmpl.sections[0].fontFamily === "Montserrat", "only the case-mismatched block is rewritten");
+  assert(tmpl.sections[2].fontFamily === "Anton", "names missing from the kit are untouched");
+  console.log("✓ brandKitSpellingMap snaps block names to the kit's spelling");
+}

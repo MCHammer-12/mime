@@ -24,9 +24,15 @@
  * team first and merge into `settings.brandKit.customFontFamilies`.
  */
 
+import { randomUUID } from "node:crypto";
 import type { KlaviyoAccount } from "../fetch-account.js";
 import type { FontPlan, FontPlanEntry, FontFileSpec } from "../fonts.js";
-import { fontFamilyKey } from "../fonts.js";
+import {
+  brandKitSpellingMap,
+  fontFamilyKey,
+  rewriteTemplateFontFamilies,
+  weightedFamilyName,
+} from "../fonts.js";
 
 export const DEFAULT_SERVER_BASE = "https://app-server.getredo.com";
 
@@ -184,7 +190,7 @@ export type ImportProgressEvent =
     }
   | { kind: "font_uploading"; family: string; fileName: string }
   | { kind: "font_registered"; family: string }
-  | { kind: "fonts_done"; uploaded: number; skipped: number }
+  | { kind: "fonts_done"; uploaded: number; skipped: number; aligned: number }
   | {
       kind: "images_rehosted";
       templateName: string;
@@ -578,6 +584,8 @@ export interface FontUploadResult {
   registeredFamilies: number;
   skipped: number; // files skipped because family was already in brand kit
   unresolved: Array<{ family: string; reason: string; usedBy: string[] }>;
+  /** Block-level fontFamily fields rewritten to the brand kit's exact spelling. */
+  aligned: number;
 }
 
 /**
@@ -635,17 +643,23 @@ export async function getBrandKitFontFamilies(
  * caller can decide whether to block or warn. (The bazel importer hard-fails;
  * this function defers that decision upward so the server can produce a more
  * informative per-template report.)
+ *
+ * Also aligns every block-level fontFamily in `templates` (in place) to the
+ * kit's exact spelling once the kit is settled — see brandKitSpellingMap.
  */
 export async function uploadFontsForTemplates(
   templates: Array<{ name?: string; _fontPlan?: FontPlan }>,
   options: ImportOptions,
 ): Promise<FontUploadResult> {
+  // Keyed by base family: "montserrat" and "Montserrat" are one font, and
+  // uploading both registers the same faces twice.
   const unionByFamily = new Map<string, FontPlanEntry>();
   for (const tmpl of templates) {
     const plan = tmpl._fontPlan;
     if (!plan) continue;
     for (const entry of plan.entries) {
-      if (!unionByFamily.has(entry.family)) unionByFamily.set(entry.family, entry);
+      const key = fontFamilyKey(entry.family);
+      if (!unionByFamily.has(key)) unionByFamily.set(key, entry);
     }
   }
 
@@ -661,9 +675,9 @@ export async function uploadFontsForTemplates(
     (e) => e.resolution.available,
   );
 
-  if (resolved.length === 0) {
-    const result = { uploaded: 0, registeredFamilies: 0, skipped: 0, unresolved };
-    options.onProgress?.({ kind: "fonts_done", uploaded: 0, skipped: 0 });
+  if (unionByFamily.size === 0) {
+    const result = { uploaded: 0, registeredFamilies: 0, skipped: 0, unresolved, aligned: 0 };
+    options.onProgress?.({ kind: "fonts_done", uploaded: 0, skipped: 0, aligned: 0 });
     return result;
   }
 
@@ -688,88 +702,146 @@ export async function uploadFontsForTemplates(
   // 2. For each resolved family NOT already in the brand kit, upload each
   //    weight file + record {url, name}. Families already present are skipped
   //    (we don't re-upload to avoid duplicates in the team's file store).
+  //    A variable font answers every requested weight with the same file, so
+  //    files are grouped by source URL and uploaded once per group.
   let uploadedFiles = 0;
   let skippedFamilies = 0;
-  const uploads: Array<{ url: string; name: string; family: string; fallback: string }> = [];
+  const uploads: Array<{
+    url: string;
+    name: string;
+    family: string;
+    fallback: string;
+    weights: number[];
+  }> = [];
 
   for (const entry of resolved) {
+    const resolution = entry.resolution;
+    if (!resolution.available) continue;
     if (existingFamilyKeys.has(fontFamilyKey(entry.family))) {
       skippedFamilies++;
       continue;
     }
-    const files = entry.resolution.available ? entry.resolution.files : [];
-    for (const file of files) {
-      const fileName = synthesizeFontFileName(entry.family, file);
+    // The spelling Google accepted ("Oswald" for "OSWALD") names the kit
+    // family; block names get aligned to it below.
+    const family = resolution.family;
+    const bySource = new Map<string, FontFileSpec[]>();
+    for (const file of resolution.files) {
+      const group = bySource.get(file.url);
+      if (group) group.push(file);
+      else bySource.set(file.url, [file]);
+    }
+    for (const [sourceUrl, group] of bySource) {
+      const fileName = synthesizeFontFileName(family, group);
       options.onProgress?.({
         kind: "font_uploading",
-        family: entry.family,
+        family,
         fileName,
       });
-      const bytes = await downloadFontBytes(file.url);
+      const bytes = await downloadFontBytes(sourceUrl);
       const uploadedUrl = await uploadAttachment(bytes, fileName, options);
       uploadedFiles++;
       uploads.push({
         url: uploadedUrl,
         name: fileName,
-        family: entry.family,
+        family,
         fallback: entry.fallback,
+        weights: group.map((f) => f.weight),
       });
     }
   }
 
-  if (uploads.length === 0) {
-    const result = {
-      uploaded: 0,
-      registeredFamilies: 0,
-      skipped: skippedFamilies,
-      unresolved,
-    };
-    options.onProgress?.({ kind: "fonts_done", uploaded: 0, skipped: skippedFamilies });
-    return result;
-  }
-
   // 3. processFontFiles extracts family/weight/italic from the uploaded files
   //    and returns grouped CustomFontFamily[].
-  const processed = await postRpc(
-    "processFontFiles",
-    { fontUrls: uploads.map((u) => ({ url: u.url, name: u.name })) },
-    options,
-  );
-  const newFamilies: any[] = Array.isArray(processed?.fontFamilies)
-    ? processed.fontFamilies
-    : [];
-
-  // Server may pick a different fallback than we'd prefer; if entry.fallback is
-  // set and the returned family's fallback is "sans-serif" (default), override.
-  // Matched on the base-family key for the same reason as the skip guard above:
-  // the returned name is often weighted ("Montserrat Thin") while our upload
-  // records the base ("Montserrat"), and a raw compare leaves the merchant's
-  // brand font falling back to a generic sans-serif.
-  for (const fam of newFamilies) {
-    const localEntry = uploads.find(
-      (u) => fontFamilyKey(u.family) === fontFamilyKey(String(fam.fontFamily ?? "")),
+  const newFamilies: any[] = [];
+  if (uploads.length > 0) {
+    const processed = await postRpc(
+      "processFontFiles",
+      { fontUrls: uploads.map((u) => ({ url: u.url, name: u.name })) },
+      options,
     );
-    if (localEntry?.fallback) fam.fallbackFont = localEntry.fallback;
-    options.onProgress?.({ kind: "font_registered", family: String(fam.fontFamily ?? "") });
+    const processedFamilies: any[] = Array.isArray(processed?.fontFamilies)
+      ? processed.fontFamilies
+      : [];
+
+    // Redo names each returned family from the file's own name table. Static
+    // Google files carry the family we asked for ("Montserrat Light"), but a
+    // variable font carries its default instance ("Nunito Sans 12pt ExtraLight
+    // 12pt") — a name no template references, so every block that asked for
+    // "Nunito Sans" fell back to Arial. Re-key those under the requested
+    // family, one entry per covered weight, matching the weighted-name
+    // convention static uploads already produce.
+    //
+    // Server may also pick a different fallback than we'd prefer; if
+    // entry.fallback is set, override. Matched on the base-family key: the
+    // returned name is often weighted ("Montserrat Thin") while our upload
+    // records the base ("Montserrat"), and a raw compare leaves the merchant's
+    // brand font falling back to a generic sans-serif.
+    const registeredNames = new Set<string>();
+    for (const fam of processedFamilies) {
+      const famName = String(fam.fontFamily ?? "");
+      const styles: any[] = Array.isArray(fam.styles) ? fam.styles : [];
+      const styleUrls = new Set(styles.map((s) => String(s.fontFileUrl ?? "")));
+      const sources = uploads.filter((u) => styleUrls.has(u.url));
+      const localEntry =
+        sources[0] ??
+        uploads.find((u) => fontFamilyKey(u.family) === fontFamilyKey(famName));
+      if (!localEntry || fontFamilyKey(localEntry.family) === fontFamilyKey(famName)) {
+        if (localEntry?.fallback) fam.fallbackFont = localEntry.fallback;
+        newFamilies.push(fam);
+        options.onProgress?.({ kind: "font_registered", family: famName });
+        continue;
+      }
+      const weights = [...new Set(sources.flatMap((u) => u.weights))].sort((a, b) => a - b);
+      for (const weight of weights) {
+        const name = weightedFamilyName(localEntry.family, weight);
+        if (registeredNames.has(name)) continue;
+        registeredNames.add(name);
+        newFamilies.push({
+          ...fam,
+          _id: randomUUID(),
+          fontFamily: name,
+          fallbackFont: localEntry.fallback || fam.fallbackFont,
+          // The base family keeps Redo's weight (a variable font's full axis
+          // range, so <strong> gets a real bold); a weighted family pins the
+          // axis to its own weight.
+          styles: styles.map((s) => ({
+            ...s,
+            _id: randomUUID(),
+            fontName: name,
+            ...(weight === 400 ? {} : { weight: String(weight) }),
+          })),
+        });
+        options.onProgress?.({ kind: "font_registered", family: name });
+      }
+    }
+
+    // 4. Merge into the existing brand kit and push it back whole.
+    //    updateBrandKit's Zod validator requires colors/font/inputs/buttons/images
+    //    as siblings (see redoapp redo/model/src/brand-kit.ts). Teams that never
+    //    customized the kit may have no values — fall back to a default shape so
+    //    the request validates. Team customizations override the default.
+    const mergedBrandKit = {
+      ...DEFAULT_BRAND_KIT,
+      ...currentBrandKit,
+      customFontFamilies: [...currentFamilies, ...newFamilies],
+    };
+
+    await postRpc("updateBrandKit", { brandKit: mergedBrandKit }, options);
   }
 
-  // 4. Merge into the existing brand kit and push it back whole.
-  //    updateBrandKit's Zod validator requires colors/font/inputs/buttons/images
-  //    as siblings (see redoapp redo/model/src/brand-kit.ts). Teams that never
-  //    customized the kit may have no values — fall back to a default shape so
-  //    the request validates. Team customizations override the default.
-  const mergedBrandKit = {
-    ...DEFAULT_BRAND_KIT,
-    ...currentBrandKit,
-    customFontFamilies: [...currentFamilies, ...newFamilies],
-  };
-
-  await postRpc("updateBrandKit", { brandKit: mergedBrandKit }, options);
+  // 5. Align block names to the kit's spelling. These are the same template
+  //    objects the importer sends, so the rewrite reaches the created emails.
+  const spelling = brandKitSpellingMap(
+    [...currentFamilies, ...newFamilies].map((f) => String(f.fontFamily ?? "")),
+  );
+  let aligned = 0;
+  for (const tmpl of templates) aligned += rewriteTemplateFontFamilies(tmpl, spelling);
 
   options.onProgress?.({
     kind: "fonts_done",
     uploaded: uploadedFiles,
     skipped: skippedFamilies,
+    aligned,
   });
 
   return {
@@ -777,13 +849,16 @@ export async function uploadFontsForTemplates(
     registeredFamilies: newFamilies.length,
     skipped: skippedFamilies,
     unresolved,
+    aligned,
   };
 }
 
-function synthesizeFontFileName(family: string, file: FontFileSpec): string {
+/** One upload per source file; a variable font's group spans several weights. */
+function synthesizeFontFileName(family: string, files: FontFileSpec[]): string {
   const slug = family.replace(/\s+/g, "");
-  const italic = file.italic ? "-italic" : "";
-  return `${slug}-${file.weight}${italic}.woff2`;
+  const italic = files[0]!.italic ? "-italic" : "";
+  const weight = files.length > 1 ? "variable" : String(files[0]!.weight);
+  return `${slug}-${weight}${italic}.woff2`;
 }
 
 /**

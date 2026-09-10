@@ -1138,7 +1138,7 @@ async function runImport(
         } else if (ev.kind === "font_registered") {
           emit({ kind: "log", source: "stdout", text: `registered font: ${ev.family}` });
         } else if (ev.kind === "fonts_done") {
-          emit({ kind: "log", source: "stdout", text: `fonts done: ${ev.uploaded} uploaded, ${ev.skipped} skipped` });
+          emit({ kind: "log", source: "stdout", text: `fonts done: ${ev.uploaded} uploaded, ${ev.skipped} skipped, ${ev.aligned} block name${ev.aligned === 1 ? "" : "s"} aligned to the brand kit` });
         }
       };
 

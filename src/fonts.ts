@@ -608,6 +608,22 @@ export function rewriteTemplateFontFamilies(
   return rewritten;
 }
 
+/**
+ * Mapping for rewriteTemplateFontFamilies that snaps every block-level font
+ * name to the brand kit's exact spelling. Redo's renderer resolves a custom
+ * font with a case-sensitive compare (`cf.fontFamily === fontFamily`), so a
+ * Klaviyo "montserrat" never finds the kit's "Montserrat" and silently falls
+ * back to Arial. First kit entry wins on a case-only collision.
+ */
+export function brandKitSpellingMap(kitFamilies: string[]): Map<string, string> {
+  const mapping = new Map<string, string>();
+  for (const name of kitFamilies) {
+    const key = name.trim().toLowerCase();
+    if (key && !mapping.has(key)) mapping.set(key, name.trim());
+  }
+  return mapping;
+}
+
 export interface FontFileSpec {
   weight: number;
   italic: boolean;
@@ -673,7 +689,8 @@ async function probeGoogleFonts(
  * when the family exists, otherwise available:false with a reason.
  *
  * Tries the literal family first (preserves brand casing like "PT Sans").
- * Falls back to title-case ("OSWALD" → "Oswald") if the literal 400s.
+ * Falls back to title-case ("OSWALD" → "Oswald") if the literal 400s, and
+ * then returns the title-cased spelling as `family`.
  *
  * Uses the public CSS endpoint (no API key). A modern UA header is
  * required to receive WOFF2 URLs — older UAs get TTF/WOFF.
@@ -691,7 +708,14 @@ export async function resolveGoogleFont(
   if (titled !== literal) {
     const second = await probeGoogleFonts(titled);
     if (second.ok) {
-      return { family, available: true, files: second.files, cssUrl: second.cssUrl };
+      // Report the spelling Google accepted: it becomes the brand-kit family
+      // name, and the kit is what the template's block names get aligned to.
+      return {
+        family: titleCaseFamily(family),
+        available: true,
+        files: second.files,
+        cssUrl: second.cssUrl,
+      };
     }
   }
 
