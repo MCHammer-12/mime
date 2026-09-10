@@ -10,6 +10,7 @@ import {
   parsePadding,
   pickContrastingColor,
   sumAncestorPadding,
+  type HeadingStyles,
 } from "../style-utils.js";
 import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
@@ -458,21 +459,66 @@ export function stripStandaloneCoupons(html: string): string {
   );
 }
 
-// Klaviyo's stock heading CSS bolds <h2>/<h3> via the document <style> (h1 and
-// h4 stay normal), so the bold is implied by the tag, not an inline weight.
-// mime preserves the <h2> tag, but Redo's text editor doesn't apply the
-// heading-tag default weight, so the bold is lost on import ("Make Your Dumb
-// Trolling Motor...SMART"). Make it explicit: wrap h2/h3 content in <strong>
-// unless an inline font-weight already decides the weight (override or already
-// bold). Faithful to source regardless of how Redo renders <h2>.
-function applyHeadingWeight(html: string): string {
+// Klaviyo styles headings through the document <style> (`h2 { … }`), never
+// inline — the template's Styles panel sets per-tag size / weight / line-height
+// there, and Klaviyo's stock sheet bolds <h2>/<h3> (h1 and h4 stay normal).
+// mime keeps the <h2> tag, but Redo carries no heading CSS: the editor doesn't
+// apply the tag-default weight ("Make Your Dumb Trolling Motor...SMART" lost
+// its bold) and the renderer falls back to browser defaults (Invader Concepts'
+// 32px/400 <h3> rendered ~19px bold). So inline the template's rule onto the
+// tag and make the weight explicit: <strong> when the resolved weight is bold,
+// unless an inline font-weight already decides it. With no rule for the tag,
+// fall back to the stock bold-h2/h3 assumption. Only typographic metrics are
+// inlined — font-family and color follow the block (Klaviyo's rules repeat
+// the block's own values there, and an inline family would bypass the
+// custom-font hoisting above).
+const HEADING_INLINE_PROPS = [
+  "font-size",
+  "font-weight",
+  "line-height",
+  "letter-spacing",
+  "margin",
+  "margin-top",
+  "margin-bottom",
+];
+const STOCK_BOLD_HEADINGS = new Set(["h2", "h3"]);
+
+function isBoldWeight(weight: string): boolean {
+  const w = weight.trim().toLowerCase();
+  if (w === "bold" || w === "bolder") return true;
+  const n = parseInt(w, 10);
+  return Number.isFinite(n) && n >= 600;
+}
+
+function applyHeadingStyles(html: string, headingStyles: HeadingStyles | undefined): string {
   return html.replace(
-    /<(h2|h3)\b([^>]*)>([\s\S]*?)<\/\1>/gi,
+    /<(h[1-6])\b([^>]*)>([\s\S]*?)<\/\1>/gi,
     (full, tag: string, attrs: string, inner: string) => {
-      if (/font-weight\s*:/i.test(attrs) || /font-weight\s*:|<strong\b|<b\b/i.test(inner)) {
-        return full;
+      const rule = headingStyles?.[tag.toLowerCase() as keyof HeadingStyles];
+      const styleMatch = attrs.match(/\sstyle\s*=\s*"([^"]*)"/i);
+      const inline = parseInlineStyles(styleMatch?.[1]);
+      const added = HEADING_INLINE_PROPS.filter((p) => rule?.[p] && !inline[p]).map(
+        (p) => `${p}:${rule![p]}`,
+      );
+      let newAttrs = attrs;
+      if (added.length > 0) {
+        if (styleMatch) {
+          const existing = styleMatch[1]!.trim().replace(/;\s*$/, "");
+          const merged = existing ? `${existing};${added.join(";")}` : added.join(";");
+          newAttrs = attrs.replace(/\sstyle\s*=\s*"[^"]*"/i, ` style="${merged}"`);
+        } else {
+          newAttrs = ` style="${added.join(";")}"${attrs}`;
+        }
       }
-      return `<${tag}${attrs}><strong>${inner}</strong></${tag}>`;
+      if (inline["font-weight"] || /font-weight\s*:|<strong\b|<b\b/i.test(inner)) {
+        return `<${tag}${newAttrs}>${inner}</${tag}>`;
+      }
+      const bold = rule?.["font-weight"]
+        ? isBoldWeight(rule["font-weight"])
+        : STOCK_BOLD_HEADINGS.has(tag.toLowerCase());
+      return bold
+        ? `<${tag}${newAttrs}><strong>${inner}</strong></${tag}>`
+        : `<${tag}${newAttrs}>${inner}</${tag}>`;
     },
   );
 }
@@ -524,7 +570,6 @@ export function parseTextBlock(
   textHtml = suppressUrlAutolink(textHtml);
   textHtml = substituteSystemFontsInHtml(textHtml);
   textHtml = rewriteWeightedCustomFontSpans(textHtml);
-  textHtml = applyHeadingWeight(textHtml);
   textHtml = wrapText(textHtml);
 
   // Klaviyo often sets the outer div to text-align:left (its default)
@@ -622,6 +667,11 @@ export function parseTextBlock(
   const inlineFontSize = extractDominantInlineFontSize(textHtml);
   const divFontSize = parseFontSize(divStyle["font-size"]);
   const fontSize = inlineFontSize ?? divFontSize;
+
+  // After the hoist on purpose: the sizes inlined here come from the
+  // template's heading rules, not the merchant's inline spans, and must not
+  // drag a mixed heading + body block up to the heading size.
+  textHtml = applyHeadingStyles(textHtml, ctx.headingStyles);
 
   const sectionColor =
     tdStyle["background-color"] ||

@@ -11,7 +11,12 @@
 import * as cheerio from "cheerio";
 import type { Section } from "../renderer/types.js";
 import { EmailBlockType } from "../renderer/types.js";
-import { normalizeStyleAttrQuotes, parseInlineStyles } from "./style-utils.js";
+import {
+  extractHeadingStyles,
+  normalizeStyleAttrQuotes,
+  parseInlineStyles,
+  type HeadingStyles,
+} from "./style-utils.js";
 import { type $, type El, findCls, hasClass, resetBlockCounter, sel } from "./helpers.js";
 
 // Block parsers
@@ -61,6 +66,9 @@ export interface ParseContext {
    *  and a hidden button is worse than a generic /cart link. Confirmed
    *  with Redo eng 2026-05-08. */
   storeUrl?: string | null;
+  /** Per-tag heading rules from the document <style> (see
+   *  extractHeadingStyles). Text blocks inline them onto <hN> tags. */
+  headingStyles?: HeadingStyles;
 }
 
 export interface ParseResult extends ParseContext {
@@ -90,6 +98,7 @@ export function parseKlaviyoHtml(
     reviewItems: [],
     skippedBlocks: [],
     storeUrl: normalizeStoreUrl(opts.storeUrl),
+    headingStyles: extractHeadingStyles($),
   };
   const sections: Section[] = [];
 

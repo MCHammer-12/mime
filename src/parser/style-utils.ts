@@ -335,3 +335,35 @@ export function contrastRatio(fg: string, bg: string): number | null {
   const darker = Math.min(fLum, bLum);
   return (lighter + 0.05) / (darker + 0.05);
 }
+
+export type HeadingStyles = Partial<
+  Record<"h1" | "h2" | "h3" | "h4" | "h5" | "h6", Record<string, string>>
+>;
+
+/**
+ * Klaviyo bakes the template's "text styles" (per-heading size / weight /
+ * line-height, set in the template editor's Styles panel) into the document
+ * <style> as `h1 { … }` … `h6 { … }` rules — nothing is inline on the tag.
+ * Redo's text block carries only HTML, so those rules have to travel inline
+ * or the heading renders at browser defaults (Invader Concepts: 32px/400
+ * became ~19px bold). Returns the rules keyed by tag. `@media` blocks
+ * (Klaviyo's mobile overrides) are skipped.
+ */
+export function extractHeadingStyles($: cheerio.CheerioAPI): HeadingStyles {
+  const out: HeadingStyles = {};
+  $("style").each((_, el) => {
+    const css = ($(el).text() || "")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/@media[^{]*\{(?:[^{}]*\{[^}]*\})*[^}]*\}/g, "");
+    for (const m of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      for (const raw of m[1]!.split(",")) {
+        const sel = raw.trim().toLowerCase();
+        if (!/^h[1-6]$/.test(sel)) continue;
+        const tag = sel as keyof HeadingStyles;
+        const decls = parseInlineStyles(m[2]!.replace(/\s*!important/gi, ""));
+        out[tag] = { ...(out[tag] ?? {}), ...decls };
+      }
+    }
+  });
+  return out;
+}
