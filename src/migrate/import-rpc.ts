@@ -793,7 +793,7 @@ export async function uploadAttachment(
   return url;
 }
 
-async function getTeam(options: ImportOptions): Promise<any> {
+export async function getTeam(options: ImportOptions): Promise<any> {
   const base = resolveServerBase(options.serverBase);
   const res = await fetch(`${base}/team`, {
     method: "GET",
