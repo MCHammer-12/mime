@@ -16,7 +16,7 @@ import { type $, type El, nextId } from "../helpers.js";
 import type { ParseContext } from "../index.js";
 import { classifyKlaviyoUrl } from "../url-mapping.js";
 import { normalizeFontFamilyName, substituteSystemFontsInHtml, weightedFamilyName } from "../../fonts.js";
-import type * as cheerio from "cheerio";
+import * as cheerio from "cheerio";
 
 const BLOCK_ELEMENT_RE = /<(h[1-6]|div|table|ul|ol|blockquote|hr|pre)[\s>]/i;
 
@@ -247,9 +247,24 @@ function parseFontList(raw: string): string[] {
  * single "intent" to hoist — promoting the most-common size would silently
  * grow or shrink whichever spans disagree. In that case return null and
  * let the caller fall back to the outer div's size.
+ *
+ * Text outside every sized element counts as a second vote at the outer
+ * div's size: it inherits that size, so hoisting would resize it too
+ * (Invader Concepts' "Bronze Tier" column had one 12px sub-span inside
+ * otherwise-unsized 16px body copy, and the hoist shrank the whole cell
+ * to 12px). Only hoist when the sized elements cover all visible text.
  */
 const INLINE_FONT_SIZE_RE =
   /<(?:span|p|h[1-6])\b[^>]*style\s*=\s*"[^"]*\bfont-size:\s*(\d+(?:\.\d+)?)px[^"]*"/gi;
+const SIZED_STYLE_RE = /\bfont-size:\s*\d+(?:\.\d+)?px/i;
+
+function hasTextOutsideSizedElements(html: string): boolean {
+  const $ = cheerio.load(html, null, false);
+  $("span[style], p[style], h1[style], h2[style], h3[style], h4[style], h5[style], h6[style]")
+    .filter((_, el) => SIZED_STYLE_RE.test($(el).attr("style") ?? ""))
+    .remove();
+  return $.root().text().replace(/\u00a0/g, " ").trim().length > 0;
+}
 
 export function extractDominantInlineFontSize(html: string): number | null {
   const sizes = new Set<number>();
@@ -261,6 +276,7 @@ export function extractDominantInlineFontSize(html: string): number | null {
     sizes.add(px);
   }
   if (sizes.size !== 1) return null;
+  if (hasTextOutsideSizedElements(html)) return null;
   return [...sizes][0]!;
 }
 

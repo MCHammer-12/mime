@@ -214,4 +214,48 @@ for (const v of [
   );
 }
 
+// ─── Inline font-size hoist ───────────────────────────────────────────────
+
+function runBlock(innerHtml: string) {
+  const html = `
+    <table><tbody><tr>
+      <td class="kl-text" style="padding:9px 18px;">
+        <div style="font-family:Helvetica,Arial;text-align:center;line-height:1.3;color:#373F47;font-size:16px;">${innerHtml}</div>
+      </td>
+    </tr></tbody></table>
+  `;
+  const $ = cheerio.load(html);
+  const block = parseTextBlock($, $("td.kl-text"), emptyCtx());
+  if (!block) throw new Error("parseTextBlock returned null");
+  return block;
+}
+
+// A single sized span that covers all the text is the merchant's intent:
+// hoist it (Charlie 1 Horse's 32px headline inside a 14px reset div).
+{
+  const block = runBlock(`<p><span style="font-size: 32px;">Headline</span></p>`);
+  assert(block.fontSize === 32, `covering span hoisted, got ${block.fontSize}`);
+}
+
+// A sized sub-span next to unsized body copy must NOT be hoisted — the
+// body copy inherits the outer div's 16px and would shrink to 12px
+// (Invader Concepts "Bronze Tier" column).
+{
+  const block = runBlock(
+    `<p style="text-align: center;"><span style="font-weight: bold;">Bronze Tier<br/><span style="font-weight: 400; font-style: italic; font-size: 12px;">Spend [$100/Year]</span></span></p>
+<div style="text-align: center;">Earn [1 Point] for every [$1 Spent]</div>`,
+  );
+  assert(block.fontSize === 16, `partial sub-span not hoisted, got ${block.fontSize}`);
+  assert(/font-size:\s*12px/.test(block.text), `inline 12px span kept in ${block.text}`);
+}
+
+// Whitespace / &nbsp; outside the sized span doesn't count as text.
+{
+  const block = runBlock(
+    `<p><span style="font-size: 32px;">Headline</span></p>
+<div>&nbsp;</div>`,
+  );
+  assert(block.fontSize === 32, `nbsp-only residue still hoists, got ${block.fontSize}`);
+}
+
 console.log("text.smoke.ts: all assertions passed");
