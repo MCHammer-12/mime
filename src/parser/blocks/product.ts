@@ -1,5 +1,6 @@
 import type {
   InlineButton,
+  PendingProduct,
   ProductFilterDoc,
   ProductImageSize,
   ProductsBlock,
@@ -81,6 +82,11 @@ const FEEDS_ITEM_RE = /\{%\s*(?:if|with)\s+[^%]*\bfeeds(?:\.\w+)?\|index:\d+/;
 // image+title grid.
 const CART_ITEM_FIELD_RE =
   /\{\{\s*item\.(?:url|title|price|image|image_url|product_url|compare_at_price|regular_price|quantity|handle)\b/;
+
+// A price as Klaviyo's static product cell prints it: "$159.95", "159,95 €",
+// "$159.95 USD". Anything else in a cell is a title or a button label.
+const STATIC_PRICE_RE =
+  /^(?:[$€£¥]\s?\d[\d,.]*|\d[\d,.]*\s?[$€£¥])(?:\s?[A-Z]{3})?$/;
 
 // Cached per-document cart-context detection. parseProductBlock runs once per
 // product block; cart signal lives in other blocks so we only need to scan the
@@ -618,23 +624,29 @@ function parseStaticProductBlock(
   const n = $cells.length;
   if (n === 0) return [];
 
-  // Each cell is one merchant-picked product. Extract the product names from
-  // the cell text — they're the visible titles and serve as Shopify search
-  // input on the import side. The redoapp importer (`import-klaviyo-templates`)
-  // resolves each name → {productId, variantId} via Shopify search and fills
-  // `manuallySelectedProducts`, then strips `_pendingProducts`.
-  const pendingProducts: { name: string }[] = [];
+  // Each cell is one merchant-picked product. The visible title is the name;
+  // the cell's PDP link carries the Shopify handle, which the importer
+  // resolves to {productId, variantId} through the storefront's public
+  // `/products/<handle>.json` and pins in `manuallySelectedProducts`. A cell
+  // without a link keeps the name only, for the fallback message.
+  const pendingProducts: PendingProduct[] = [];
   const $firstCell = $cells.first();
+
+  // Klaviyo prints title, price and button each in its own leaf td, in that
+  // order. Leaf (no nested td) matters: the side-by-side layout wraps the
+  // text column in a td of its own, whose text is all three run together.
+  const leafTextTds = ($cell: cheerio.Cheerio<El>) =>
+    $cell
+      .find("td")
+      .filter(
+        (_, td) =>
+          $(td).find("td, img").length === 0 &&
+          $(td).text().trim().length > 0,
+      );
 
   // Look at the first cell for styling defaults shared across the grid.
   const $firstImg = $firstCell.find("img").first();
-  const $firstTitleTd = $firstCell
-    .find("td")
-    .filter(
-      (_, td) =>
-        $(td).find("img").length === 0 && $(td).text().trim().length > 0,
-    )
-    .first();
+  const $firstTitleTd = leafTextTds($firstCell).first();
   const titleStyle = parseInlineStyles($firstTitleTd.attr("style"));
   const imgStyle = parseInlineStyles($firstImg.attr("style"));
 
@@ -646,20 +658,28 @@ function parseStaticProductBlock(
   const seenNames = new Set<string>();
   $cells.each((_, cell) => {
     const $cell = $(cell);
-    const $titleTd = $cell
-      .find("td")
-      .filter(
-        (_, td) =>
-          $(td).find("img").length === 0 && $(td).text().trim().length > 0,
-      )
-      .first();
-    const name = $titleTd.text().trim();
+    const name = leafTextTds($cell).first().text().trim();
     if (!name) return;
     const key = name.toLowerCase();
     if (seenNames.has(key)) return;
     seenNames.add(key);
-    pendingProducts.push({ name });
+    const url = $cell.find("a[href*='/products/']").first().attr("href");
+    pendingProducts.push(url ? { name, url } : { name });
   });
+
+  // Klaviyo bakes the price ("$159.95") and the "Shop now" button into a
+  // static cell instead of templating them, so their presence is the
+  // merchant's show/hide setting.
+  const showPrice = leafTextTds($firstCell)
+    .toArray()
+    .some((td) => STATIC_PRICE_RE.test($(td).text().trim()));
+  const $cellButton = $firstCell
+    .find("td[bgcolor] a, a[style*='background']")
+    .first();
+  const showButton = $cellButton.length > 0;
+  const lineItemButtons = showButton
+    ? extractInlineButton($, $cellButton)
+    : defaultLineItemButton();
 
   // Columns: width % on cell → columns count = round(100 / width)
   const firstCellStyle = parseInlineStyles($firstCell.attr("style"));
@@ -746,7 +766,7 @@ function parseStaticProductBlock(
   }
 
   ctx.warnings.push(
-    `Static product block (${pendingProducts.length} product${pendingProducts.length === 1 ? "" : "s"}) — emitted as Products block with names ["${pendingProducts.map((p) => p.name).slice(0, 3).join('", "')}"...] for the importer to resolve via Shopify search. Verify in Redo editor after import; ambiguous names may need manual picker selection.`,
+    `Static product block (${pendingProducts.length} product${pendingProducts.length === 1 ? "" : "s"}) — emitted as Products block with names ["${pendingProducts.map((p) => p.name).slice(0, 3).join('", "')}"...] for the importer to pin via the storefront's product links${pendingProducts.some((p) => !p.url) ? " (some cells have no product link and will need the picker)" : ""}. Verify in Redo editor after import.`,
   );
 
   const block: ProductsBlock = {
@@ -758,15 +778,15 @@ function parseStaticProductBlock(
     fontFamily: parseFontFamily(titleStyle["font-family"]) || "Arial",
     titleFontSize: parsePx(titleStyle["font-size"]),
     imageCornerRadius,
-    checkoutButton: defaultLineItemButton(),
-    lineItemButtons: defaultLineItemButton(),
+    checkoutButton: { ...lineItemButtons, buttonText: "Checkout" },
+    lineItemButtons,
     numberOfProducts: pendingProducts.length,
     imageSize,
     productSelectionType: "static",
-    showPrice: false,
+    showPrice,
     showTitle: true,
     showImage: true,
-    showButton: false,
+    showButton,
     layoutType: columns === 1 ? "rows" : "columns",
     alignment: Alignment.CENTER,
     columns,

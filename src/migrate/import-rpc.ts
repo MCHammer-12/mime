@@ -140,7 +140,11 @@ export function decodeJwtAud(jwt: string | null | undefined): string | null {
 
 import { rehostKlaviyoImages } from "./rehost-images.js";
 import { BEST_SELLERS_FILTER } from "../parser/blocks/product.js";
-import type { PendingDiscount } from "../renderer/types.js";
+import type {
+  ManuallySelectedProduct,
+  PendingDiscount,
+  PendingProduct,
+} from "../renderer/types.js";
 import { inferDiscountConfig } from "../discount-infer.js";
 
 export type ImportProgressEvent =
@@ -149,6 +153,12 @@ export type ImportProgressEvent =
       kind: "static_products_fallback";
       templateName: string;
       products: string[];
+    }
+  | {
+      kind: "static_products_pinned";
+      templateName: string;
+      pinned: string[];
+      unresolved: string[];
     }
   | {
       kind: "discount_created";
@@ -198,6 +208,11 @@ export interface ImportOptions {
    * across templates in one import run.
    */
   filterCache?: Map<string, string>;
+  /**
+   * Per-job memo of static-grid products resolved through the storefront,
+   * keyed by PDP URL. Lazily initialized on first use.
+   */
+  productCache?: Map<string, ManuallySelectedProduct | null>;
   /**
    * Per-job memo of the team's discounts (getDiscounts fetched once, on the
    * first coupon chip). Created discounts are appended so later templates in
@@ -480,22 +495,53 @@ async function preparePayload(
         recommendedProductFilterId: await resolveFilter(_pendingFilter),
       });
     } else if (block && block._pendingProducts) {
-      // Static grid: the parser only recovered product NAMES from the HTML,
-      // and no marketing RPC resolves a name to a Shopify product id. Falling
-      // back to a dynamic best-sellers grid keeps the block visible (static +
-      // empty `manuallySelectedProducts` renders as nothing); the operator can
-      // re-pin the original products in the editor.
+      // Static grid: no marketing RPC resolves a product name to a Shopify
+      // id, but each Klaviyo cell links to the PDP, and the storefront's
+      // public `/products/<handle>.json` returns the ids for free. Pin what
+      // resolves; only a grid where nothing resolves falls back to a dynamic
+      // best-sellers grid (static + empty `manuallySelectedProducts` renders
+      // as nothing), which the operator re-pins in the editor.
       const { _pendingProducts, ...blockRest } = block;
-      rest.sections.push({
-        ...blockRest,
-        productSelectionType: "dynamic",
-        recommendedProductFilterId: await resolveFilter(BEST_SELLERS_FILTER),
-      });
-      options.onProgress?.({
-        kind: "static_products_fallback",
-        templateName: String(template.name ?? ""),
-        products: _pendingProducts.map((p: { name: string }) => p.name),
-      });
+      const pending: PendingProduct[] = _pendingProducts;
+      const pinned: string[] = [];
+      const unresolved: string[] = [];
+      const products: ManuallySelectedProduct[] = [];
+      for (const p of pending) {
+        const product = p.url
+          ? await resolveStorefrontProduct(p.url, options)
+          : null;
+        if (product) {
+          products.push(product);
+          pinned.push(p.name);
+        } else {
+          unresolved.push(p.name);
+        }
+      }
+      if (products.length > 0) {
+        rest.sections.push({
+          ...blockRest,
+          productSelectionType: "static",
+          manuallySelectedProducts: products,
+          numberOfProducts: products.length,
+        });
+        options.onProgress?.({
+          kind: "static_products_pinned",
+          templateName: String(template.name ?? ""),
+          pinned,
+          unresolved,
+        });
+      } else {
+        rest.sections.push({
+          ...blockRest,
+          productSelectionType: "dynamic",
+          recommendedProductFilterId: await resolveFilter(BEST_SELLERS_FILTER),
+        });
+        options.onProgress?.({
+          kind: "static_products_fallback",
+          templateName: String(template.name ?? ""),
+          products: unresolved,
+        });
+      }
     } else if (block && block._pendingDiscount) {
       const { _pendingDiscount, ...blockRest } = block;
       const discountId = await resolveDiscount(_pendingDiscount);
@@ -738,6 +784,40 @@ function synthesizeFontFileName(family: string, file: FontFileSpec): string {
   const slug = family.replace(/\s+/g, "");
   const italic = file.italic ? "-italic" : "";
   return `${slug}-${file.weight}${italic}.woff2`;
+}
+
+/**
+ * Resolve a Klaviyo product-cell link to Redo's {productId, variantId} via the
+ * storefront's public `/products/<handle>.json` (no auth; the Klaviyo href
+ * already points at the merchant's Shopify domain). Returns null when the
+ * link isn't a PDP, the store 404s the handle, or the request fails.
+ */
+async function resolveStorefrontProduct(
+  url: string,
+  options: ImportOptions,
+): Promise<ManuallySelectedProduct | null> {
+  const cache = (options.productCache ??= new Map());
+  const cached = cache.get(url);
+  if (cached !== undefined) return cached;
+  let resolved: ManuallySelectedProduct | null = null;
+  try {
+    const parsed = new URL(url);
+    const handle = /\/products\/([^/?#]+)/.exec(parsed.pathname)?.[1];
+    if (handle) {
+      const res = await fetch(`${parsed.origin}/products/${handle}.json`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      const product = res.ok ? (await res.json())?.product : null;
+      const variantId = product?.variants?.[0]?.id;
+      if (product?.id && variantId) {
+        resolved = { productId: String(product.id), variantId: String(variantId) };
+      }
+    }
+  } catch {
+    // unreachable store or non-JSON body — treated as unresolved
+  }
+  cache.set(url, resolved);
+  return resolved;
 }
 
 async function downloadFontBytes(url: string): Promise<Uint8Array> {

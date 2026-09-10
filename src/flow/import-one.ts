@@ -281,10 +281,19 @@ async function main() {
       case "fonts_done":
         console.log(`      fonts: ${e.uploaded} uploaded, ${e.skipped} skipped`);
         break;
+      case "static_products_pinned":
+        console.log(
+          `      = static product grid in "${e.templateName}" pinned ${e.pinned.length} ` +
+            `product(s) via the storefront` +
+            (e.unresolved.length
+              ? `; unresolved (re-pin in the editor): ${e.unresolved.join(", ")}`
+              : ""),
+        );
+        break;
       case "static_products_fallback":
         console.log(
           `      ~ static product grid in "${e.templateName}" → dynamic best-sellers ` +
-            `(no RPC resolves product names to Shopify ids); re-pin in the editor: ${e.products.join(", ")}`,
+            `(no product link resolved on the storefront); re-pin in the editor: ${e.products.join(", ")}`,
         );
         break;
       case "discount_created":

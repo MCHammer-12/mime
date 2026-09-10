@@ -347,6 +347,13 @@ export type ProductLayoutType = "rows" | "columns";
 export type ProductObjectFit = "cover" | "contain";
 export type ProductSelectionType = "dynamic" | "static";
 
+/** A static-grid product the parser saw: its visible title and, when the
+ * cell linked to a PDP, the href the importer resolves to a Shopify id. */
+export interface PendingProduct {
+  name: string;
+  url?: string;
+}
+
 export interface ManuallySelectedProduct {
   productId: string;
   variantId: string;
@@ -405,7 +412,7 @@ export interface ProductsBlock extends BaseBlock {
   // block. Importer resolves each via Shopify search → fills
   // `manuallySelectedProducts`, then strips this field. Used only when
   // productSelectionType === "static".
-  _pendingProducts?: { name: string }[];
+  _pendingProducts?: PendingProduct[];
   // Non-prod: the `feeds.X|index:N` slots this dynamic row references.
   // mergeAdjacentProductBlocks uses it to tell a second grid ROW (disjoint
   // slots — sum them) from a per-column DUPLICATE (same slots — drop it).
