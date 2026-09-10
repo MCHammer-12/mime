@@ -384,6 +384,15 @@ function resolveTriggerField(
     }
     return null;
   }
+  // "SKU" = the line-item SKUs on a Placed Order event (Klaviyo flattens the
+  // nested Items list, so one `SKU equals X` reads "some item has SKU X").
+  // `baseTrackingSchema.skus` ("Multiple Text") is the order-wide list.
+  if (f === "sku") {
+    if (schemaType === SchemaType.ORDER_TRACKING) {
+      return { field: "skus", isArray: true };
+    }
+    return null;
+  }
   return null;
 }
 
@@ -627,6 +636,18 @@ export function translateFlowTriggerFilter(
     warnings.push({
       kind: "requires-review",
       message: `Klaviyo trigger_filter AND's ${conditions.length} conditions; mime translated the ${matched.length} on "${first.field}" ${rawOp} — add the rest in the Redo flow builder`,
+    });
+  }
+  // Same-field conditions collapse into one matchValues list, which Redo
+  // reads as any-of. Klaviyo AND'd them (every value must be present), but
+  // a merchant listing several SKUs or names of one product almost always
+  // means any-of — say so rather than silently changing the semantics.
+  if (matched.length > 1) {
+    warnings.push({
+      kind: "requires-review",
+      message: `Klaviyo trigger_filter AND's ${matched.length} "${first.field}" ${rawOp} conditions; mime translated them as any-of (${matched
+        .map((c: any) => String(c.filter.value))
+        .join(", ")}) — tighten in the Redo flow builder if all must match`,
     });
   }
 

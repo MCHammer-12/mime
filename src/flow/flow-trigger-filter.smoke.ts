@@ -147,4 +147,51 @@ function filter(field: string, type: string, operator: string, value: string) {
   );
 }
 
+// ─── Several SKUs of one product, AND'd in Klaviyo → any-of gate on `skus` ──
+// Any Means Necessary's pre-order flow lists the three editions of one book.
+{
+  const warnings: ParseWarning[] = [];
+  const tf = filter("SKU", "string", "equals", "BK-UNSGN-IAIYH");
+  for (const value of ["BK-SGN-IAIYH", "BK-UNSGN-IAIYHSFT"]) {
+    tf.condition_groups[0].conditions.push({
+      type: "metric-property",
+      metric_id: "M1",
+      field: "SKU",
+      filter: { type: "string", operator: "equals", value },
+    });
+  }
+  const out = translateFlowTriggerFilter(tf, SchemaType.ORDER_TRACKING, warnings);
+  assert(out?.kind === "gate", "SKU filter gates");
+  const e = (out as any).expression.schemaBooleanExpression;
+  assert(
+    e.type === "array_predicate" && e.field === "skus" && e.operator === "some",
+    "SKU → skus (Multiple Text), wrapped in array_predicate/some",
+  );
+  assert(
+    e.condition.operator === "equals" &&
+      JSON.stringify(e.condition.matchValues) ===
+        JSON.stringify(["BK-UNSGN-IAIYH", "BK-SGN-IAIYH", "BK-UNSGN-IAIYHSFT"]),
+    "all three SKUs land in one matchValues list",
+  );
+  assert(
+    warnings.some((w) => w.message.includes("translated them as any-of")),
+    "warns that AND'd same-field conditions became any-of",
+  );
+  assert(
+    !warnings.some((w) => w.message.includes("add the rest")),
+    "no dropped-condition warning when every condition was translated",
+  );
+}
+
+// ─── SKU only resolves on order tracking ─────────────────────────────────
+{
+  const warnings: ParseWarning[] = [];
+  const out = translateFlowTriggerFilter(
+    filter("SKU", "string", "equals", "BK-SGN-IAIYH"),
+    SchemaType.MARKETING_CHECKOUT_ABANDONMENT,
+    warnings,
+  );
+  assert(out === null, "checkout abandonment has no skus field → null");
+}
+
 console.log("flow-trigger-filter.smoke.ts: all assertions passed");
