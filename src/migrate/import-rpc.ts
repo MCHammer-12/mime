@@ -867,7 +867,7 @@ function synthesizeFontFileName(family: string, files: FontFileSpec[]): string {
  * already points at the merchant's Shopify domain). Returns null when the
  * link isn't a PDP, the store 404s the handle, or the request fails.
  */
-async function resolveStorefrontProduct(
+export async function resolveStorefrontProduct(
   url: string,
   options: ImportOptions,
 ): Promise<ManuallySelectedProduct | null> {
