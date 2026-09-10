@@ -108,6 +108,40 @@ if (triggerCollisionChecks([a, b, mine], new Set(["m"])).length !== 1) {
 if (triggerCollisionChecks([a, b]).length !== 1) fail("unscoped collision should still report");
 console.log("✓ collisions scoped to the migration");
 
+// ─── Segment gates split a shared membership trigger ───
+// customer_group_entered fires for every segment; a flow gated on one segment
+// right after the trigger only sees that segment's events.
+
+const gated = (id: string, segment: string) => ({
+  _id: id,
+  name: `gated ${id}`,
+  steps: [
+    trigger("gate", "customer_group_entered"),
+    {
+      type: "condition",
+      id: "gate",
+      expression: {
+        dataSource: "trigger-data",
+        schemaBooleanExpression: { type: "text_match", field: "segment", operator: "equals", matchValues: [segment] },
+      },
+      nextTrueId: "end",
+      nextFalseId: "miss",
+    },
+  ],
+});
+const open = { _id: "o", name: "open", steps: [trigger("end", "customer_group_entered")] };
+
+if (triggerCollisionChecks([gated("g1", "segA"), gated("g2", "segB")]).length !== 0) {
+  fail("flows gated on different segments reported as colliding");
+}
+const same = triggerCollisionChecks([gated("g1", "segA"), gated("g2", "segA")]);
+if (same.length !== 1 || !same[0].item.includes("segA")) fail("flows gated on the same segment not reported");
+const mixed = triggerCollisionChecks([gated("g1", "segA"), open]);
+if (mixed.length !== 1 || !mixed[0].detail.includes("ungated: open")) {
+  fail("ungated flow next to a gated one not reported, or the ungated one not named");
+}
+console.log("✓ segment gates split a shared membership trigger");
+
 // ─── Render checks ───
 
 const good = {

@@ -147,36 +147,68 @@ export function activationChecks(flow: Record<string, any>): Check[] {
 /**
  * Two flows on the same trigger key both fire for the same event. Activating a
  * migrated flow next to a pre-existing one on that key double-sends.
+ *
+ * Segment-membership triggers are the exception: a flow gated on one segment
+ * right after the trigger (mime's SEGMENT_ID gate, or a hand-built one) only
+ * fires for that segment, so two gated flows on different segments don't
+ * collide. An ungated flow on the key still collides with every other.
  */
 export function triggerCollisionChecks(
   flows: Array<Record<string, any>>,
   scopeIds?: Set<string>,
 ): Check[] {
-  const byKey = new Map<string, Array<{ name: string; inScope: boolean }>>();
+  const byKey = new Map<string, Array<{ name: string; inScope: boolean; segment: string | null }>>();
   for (const flow of flows) {
-    const trigger = (flow.steps ?? []).find((s: any) => String(s.type) === "trigger");
+    const steps: any[] = flow.steps ?? [];
+    const trigger = steps.find((s: any) => String(s.type) === "trigger");
     const key = trigger?.key ?? trigger?.schemaType;
     if (!key) continue;
     const list = byKey.get(String(key)) ?? [];
-    list.push({ name: label(flow), inScope: !scopeIds || scopeIds.has(String(flow._id)) });
+    list.push({
+      name: label(flow),
+      inScope: !scopeIds || scopeIds.has(String(flow._id)),
+      segment: gatedSegment(steps, trigger),
+    });
     byKey.set(String(key), list);
   }
 
   const checks: Check[] = [];
-  for (const [key, entries] of byKey) {
-    if (entries.length < 2) continue;
-    // Two of the merchant's own flows sharing a key predates this run — only
-    // report a collision this migration is a party to.
-    if (!entries.some((e) => e.inScope)) continue;
-    const names = entries.map((e) => e.name);
-    checks.push({
-      item: `trigger "${key}"`,
-      dimension: "logic",
-      verdict: "degraded",
-      detail: `${names.length} flows share it — activating more than one double-sends: ${names.join(", ")}`,
-    });
+  for (const [key, all] of byKey) {
+    // Gated flows on distinct segments never see the same event, so they only
+    // collide with each other per segment — unless an ungated flow is on the
+    // key, which fires for every segment and collides with all of them.
+    const ungated = all.filter((e) => e.segment === null);
+    const groups = new Map<string, typeof all>();
+    if (ungated.length) groups.set("", all);
+    else for (const e of all) groups.set(e.segment!, [...(groups.get(e.segment!) ?? []), e]);
+    for (const [segment, entries] of groups) {
+      if (entries.length < 2) continue;
+      // Two of the merchant's own flows sharing a key predates this run — only
+      // report a collision this migration is a party to.
+      if (!entries.some((e) => e.inScope)) continue;
+      const names = entries.map((e) => e.name);
+      const ungatedNote =
+        ungated.length && ungated.length < all.length
+          ? `; ungated: ${ungated.map((e) => e.name).join(", ")} — gate it on a segment to separate them`
+          : "";
+      checks.push({
+        item: segment ? `trigger "${key}" on segment ${segment}` : `trigger "${key}"`,
+        dimension: "logic",
+        verdict: "degraded",
+        detail: `${names.length} flows share it — activating more than one double-sends: ${names.join(", ")}${ungatedNote}`,
+      });
+    }
   }
   return checks;
+}
+
+/** The segment id a flow is pinned to by a condition directly after its trigger, else null. */
+function gatedSegment(steps: any[], trigger: any): string | null {
+  const first = steps.find((s: any) => String(s.id) === String(trigger?.nextId));
+  const expr = first?.type === "condition" ? first.expression?.schemaBooleanExpression : undefined;
+  if (first?.expression?.dataSource !== "trigger-data" || expr?.field !== "segment") return null;
+  const values: unknown[] = Array.isArray(expr.matchValues) ? expr.matchValues : [];
+  return expr.operator === "equals" && values.length === 1 ? String(values[0]) : null;
 }
 
 // ─── rendered-email fidelity ───────────────────────────────────────────────
