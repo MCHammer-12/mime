@@ -370,6 +370,7 @@ export interface ProductFilterDoc {
   productRecommendationType:
     | "best_sellers"
     | "products_added_to_cart"
+    | "viewed_products"
     | "collection";
   sortBy?: "price_desc" | "price_asc";
   unit?: "day";

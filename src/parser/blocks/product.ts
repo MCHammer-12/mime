@@ -48,6 +48,21 @@ const CART_ITEM_FILTER: ProductFilterDoc = {
   value: 90,
 };
 
+// Browse-abandonment card: Redo's `viewed_products` recommendation type
+// takes the same `unit`/`value` lookback as `products_added_to_cart`
+// (product-filters-db-parser.ts `viewedProductsSchema`) and resolves
+// from the recipient at send time.
+const VIEWED_PRODUCTS_FILTER: ProductFilterDoc = {
+  name: "Recently Viewed",
+  provider: "shopify",
+  additionalProductFilters: [
+    { type: "inventory", inventory: 0, comparisonOperator: "greater_than" },
+  ],
+  productRecommendationType: "viewed_products",
+  unit: "day",
+  value: 90,
+};
+
 const CART_CONTEXT_LOOP_RE =
   /\{%\s*for\s+\w+\s+in\s+(event\.extra\.line_items|items)\s*%\}/;
 
@@ -519,15 +534,12 @@ export function parseLineItemsUcbBlock(
 // variables (no Liquid for-loop — there's only one viewed product). The
 // dispatcher otherwise falls through to "Unknown block type".
 //
-// PROPER target: an `interactive-cart` block with a `viewed_products`
-// productRecommendationType + `schemaFieldName: "browseContext"`. That
-// filter type doesn't yet exist in Redo's ProductsBlock schema (only
-// best_sellers / products_added_to_cart / collection are defined at
-// renderer/types.ts). Until Redo adds it, emit a Products block with
-// Best Sellers as a fallback filter. The merchant gets a configurable
-// block in the editor instead of a missing chunk; the emitted warning
-// makes the fallback explicit so they can swap to the real BA filter
-// once schema support lands.
+// Target: an `interactive-cart` block whose filter is Redo's
+// `viewed_products` recommendation type ("Products the recipient has
+// viewed recently" in the editor). It resolves from the recipient's
+// browse history at send time, so — like Cart Item — the block renders
+// empty in a preview without a customer context. Verified against
+// redoapp `product-filters-types.ts` / `create-product-filter.ts`.
 
 const BROWSE_ABANDON_EVENT_RE =
   /\{\{\s*event\.(?:Name|Title|Price|ImageURL|URL|Image)\b/;
@@ -552,7 +564,7 @@ export function parseBrowseAbandonmentCardBlock(
     "#ffffff";
 
   ctx.warnings.push(
-    `Browse Abandonment card ({{ event.Name }} / {{ event.ImageURL }}) → Products block with Best Sellers fallback. Redo's ProductsBlock schema doesn't yet expose a "viewed_products" recommendation type — manually swap to the viewed-product filter once schema support lands.`,
+    `Browse Abandonment card ({{ event.Name }} / {{ event.ImageURL }}) → Products block with a "Recently Viewed" (viewed_products, 90-day) filter. Renders empty in preview — it resolves from the recipient at send time.`,
   );
 
   const fontFamily = extractPrimaryFont(wrapperHtml) ?? "Arial";
@@ -594,7 +606,7 @@ export function parseBrowseAbandonmentCardBlock(
     manuallySelectedProducts: [],
     imageObjectFit: "cover",
     provider: "shopify",
-    _pendingFilter: BEST_SELLERS_FILTER,
+    _pendingFilter: VIEWED_PRODUCTS_FILTER,
   };
 }
 

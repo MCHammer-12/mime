@@ -448,9 +448,8 @@ function parseWrapper(
 
   // Browse-abandonment "product card": hand-built kl-table with inline
   // {{ event.Name }} / {{ event.ImageURL }} variables (no Liquid loop).
-  // Best Sellers fallback until Redo's schema adds a viewed_products
-  // recommendation type — see parseBrowseAbandonmentCardBlock for
-  // context.
+  // Emits a Products block on Redo's viewed_products filter — see
+  // parseBrowseAbandonmentCardBlock for context.
   const baCardBlock = parseBrowseAbandonmentCardBlock($, $wrapper, ctx);
   if (baCardBlock) {
     blocks.push(baCardBlock);
