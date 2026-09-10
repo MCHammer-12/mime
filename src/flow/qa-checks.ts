@@ -243,6 +243,23 @@ export function renderChecks(
     });
   }
 
+  // A rendered <img src> can never legitimately hold Liquid. Redo's Image block
+  // copies `imageUrl` straight into the src without rendering it, so a runtime
+  // token there is the image-block defect (every recipient gets a broken
+  // image), not a preview-context gap — and the whitelist above hid it behind
+  // a 100% score (Any Means Necessary back-in-stock, 2026-09-09).
+  const liquidImgSrcs = [
+    ...html.matchAll(/<img\b[^>]*?\ssrc\s*=\s*["']([^"']*(?:\{\{|\{%)[^"']*)["']/gi),
+  ].map((m) => m[1]!);
+  if (liquidImgSrcs.length) {
+    checks.push({
+      item: item("image src"),
+      dimension: "fidelity",
+      verdict: "broken",
+      detail: `${liquidImgSrcs.length} image(s) whose src is unrendered Liquid: ${[...new Set(liquidImgSrcs)].slice(0, 3).join(" ")}`,
+    });
+  }
+
   const text = html
     .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
     .replace(/<[^>]+>/g, " ")

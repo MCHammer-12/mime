@@ -182,6 +182,11 @@ export type ImportProgressEvent =
       rewritten: number;
       failed: Array<{ url: string; reason: string }>;
     }
+  | {
+      kind: "dynamic_image_inlined";
+      templateName: string;
+      imageUrl: string;
+    }
   | { kind: "flow_started"; flowName: string; placeholderCount: number }
   | { kind: "flow_created"; flowName: string; flowId: string }
   | { kind: "flow_failed"; flowName: string; error: string };
@@ -339,6 +344,77 @@ export async function importTemplateRpc(
   return result;
 }
 
+/** `{{ ... }}` / `{% ... %}` — anything the Liquid renderer still has to resolve. */
+const LIQUID_RE = /\{\{[^}]*\}\}|\{%[^%]*%\}/;
+
+/**
+ * Redo's Image block is a static-asset block: `imageUrl` goes straight into
+ * `<img src>` without passing through the Liquid renderer, so a correctly
+ * mapped token survives the import and then renders as the literal text
+ * `{{ restocked_product.image_url }}` in the delivered email — a broken image
+ * for every recipient, and one QA can't see because the token is valid.
+ *
+ * Verified against a live preview (2026-09-09, Any Means Necessary
+ * back-in-stock): even a flat, known-good token stays literal in an image src
+ * while the same token resolves in a button link on the same template. The
+ * schema has no dynamic-source escape hatch either — `imageSourceType` is only
+ * `url`/`upload` and `clickthroughSchemaFieldName` covers the click target,
+ * not the src (redoapp `marketing/templates/common/src/email-template.ts`).
+ *
+ * Text blocks DO run through Liquid, `<img>` survives their sanitizer, and a
+ * wrapping `<a href>` resolves too — so a dynamic image ships as an inline
+ * `<img>` inside a text block instead. Klaviyo hand-rolls its product cards
+ * (back-in-stock, price-drop, browse abandonment) out of exactly this block,
+ * so this is the difference between a working product card and a broken one.
+ */
+function inlineDynamicImage(block: Record<string, any>): Record<string, any> {
+  const {
+    imageUrl,
+    croppedImageUrl: _crop,
+    padding,
+    horizontalPadding: _hp,
+    verticalPadding: _vp,
+    showCaption,
+    caption,
+    altText,
+    clickthroughUrl,
+    clickthroughLinkType,
+    clickthroughSchemaFieldName,
+    aspectRatio: _ar,
+    cropConfig: _cc,
+    cropConfigV2: _cc2,
+    imageSourceType: _ist,
+    type: _type,
+    ...base
+  } = block;
+  const p = padding ?? {};
+  const pad = `padding:${p.top ?? 0}px ${p.right ?? 0}px ${p.bottom ?? 0}px ${p.left ?? 0}px`;
+  const esc = (v: unknown) => String(v ?? "").replace(/"/g, "&quot;");
+  // The image block's own width comes from the section padding, which rides
+  // along on `base` — width:100% reproduces it inside the text block.
+  let img =
+    `<img src="${esc(imageUrl)}" alt="${esc(altText)}" ` +
+    `style="width:100%;height:auto;display:block;margin:0 auto;${pad}" />`;
+  const href =
+    clickthroughLinkType === "dynamic-variable" && clickthroughSchemaFieldName
+      ? `{{ ${String(clickthroughSchemaFieldName)} }}`
+      : clickthroughUrl;
+  if (href) img = `<a href="${esc(href)}">${img}</a>`;
+  return {
+    ...base,
+    type: "text",
+    textColor: "#222222",
+    fontSize: 14,
+    fontFamily: "Helvetica Neue",
+    linkColor: "#222222",
+    text:
+      `<p style="text-align:center">${img}</p>` +
+      (showCaption && caption
+        ? `<p style="text-align:center">${String(caption)}</p>`
+        : ""),
+  };
+}
+
 /** Strip non-prod fields + resolve per-block `_pendingFilter` into real filter IDs. */
 async function preparePayload(
   template: Record<string, any>,
@@ -491,6 +567,17 @@ async function preparePayload(
         kind: "static_products_fallback",
         templateName: String(template.name ?? ""),
         products: _pendingProducts.map((p: { name: string }) => p.name),
+      });
+    } else if (
+      block &&
+      block.type === "image" &&
+      LIQUID_RE.test(String(block.imageUrl ?? ""))
+    ) {
+      rest.sections.push(inlineDynamicImage(block));
+      options.onProgress?.({
+        kind: "dynamic_image_inlined",
+        templateName,
+        imageUrl: String(block.imageUrl),
       });
     } else if (block && block._pendingDiscount) {
       const { _pendingDiscount, ...blockRest } = block;

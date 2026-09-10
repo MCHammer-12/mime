@@ -126,6 +126,21 @@ console.log("✓ a well-formed template renders clean");
 const liquid = { ...good, html: good.html + "{{ organization.name }}" };
 if (!renderChecks(liquid).some((c) => c.verdict === "broken")) fail("surviving Liquid not flagged");
 
+// Runtime-product tokens are whitelisted because preview may leave them
+// unresolved — but inside an <img src> they mean the Image block never ran
+// Liquid at all, which is broken at send time too.
+const runtimeText = { ...good, html: good.html + "<p>{{ restocked_product.title }}</p>" };
+if (renderChecks(runtimeText).some((c) => c.verdict === "broken")) {
+  fail("runtime token in text wrongly flagged");
+}
+const runtimeImg = {
+  ...good,
+  html: good.html + '<img src="{{ restocked_product.image_url }}" alt="">',
+};
+if (!renderChecks(runtimeImg).some((c) => c.verdict === "broken" && c.item.includes("image src"))) {
+  fail("runtime token in <img src> not flagged");
+}
+
 const klaviyoAsset = { ...good, html: good.html + '<img src="https://d3k81ch9hvuctc.cloudfront.net/x.png">' };
 if (!renderChecks(klaviyoAsset).some((c) => c.verdict === "degraded" && c.detail.includes("CDN"))) {
   fail("Klaviyo CDN asset not flagged");
@@ -138,6 +153,6 @@ if (!renderChecks(noUnsub).some((c) => c.detail.toLowerCase().includes("unsubscr
 if (renderChecks(noUnsub, { requireUnsubscribe: false }).some((c) => c.detail.toLowerCase().includes("unsubscribe"))) {
   fail("unsubscribe flagged when not required");
 }
-console.log("✓ render checks catch Liquid, Klaviyo assets, missing unsubscribe");
+console.log("✓ render checks catch Liquid, Liquid image srcs, Klaviyo assets, missing unsubscribe");
 
 console.log("✓ qa-checks smoke tests pass");
