@@ -1,7 +1,7 @@
 import type { MenuBlock, Section } from "../../renderer/types.js";
 import { Alignment, EmailBlockType } from "../../renderer/types.js";
 import { findAncestorBackgroundColor, parseColor, parseFontFamily, parseFontSize, parseInlineStyles, parsePadding } from "../style-utils.js";
-import { type $, type El, findCls, nextId } from "../helpers.js";
+import { type $, type El, findCls, nextId, sel } from "../helpers.js";
 import { classifyKlaviyoUrl } from "../url-mapping.js";
 import type { ParseContext } from "../index.js";
 import type * as cheerio from "cheerio";
@@ -24,13 +24,16 @@ export function parseMenuFromHeader(
     "#ffffff";
   const settingsPadding = parsePadding(settingsStyle);
 
-  const $navWrappers = findCls($wrapper, "kl-hlb-wrap");
+  // Klaviyo emits one cell per link: `kl-hlb-wrap` when the bar stays inline
+  // on mobile, `kl-hlb-stack` when it stacks. A link with no URL comes out as
+  // `<p href="">` instead of `<a>` (Invader Concepts' Post Purchase "New").
+  const $navWrappers = $wrapper.find(`${sel("kl-hlb-wrap")}, ${sel("kl-hlb-stack")}`);
   if ($navWrappers.length === 0) return null;
 
   const menuItems: { id: string; label: string }[] = [];
-  const $firstLink = $navWrappers.first().find("a").first();
+  const $firstLink = $navWrappers.first().find("a, p[href]").first();
   $navWrappers.each((i, wrap) => {
-    const $link = $(wrap).find("a").first();
+    const $link = $(wrap).find("a, p[href]").first();
     const label = $link.text().trim();
     if (!label) return;
     const href = $link.attr("href") || "#";
@@ -87,6 +90,6 @@ export function parseMenuFromHeader(
     fontFamily: parseFontFamily(firstLinkStyle["font-family"]),
     fontSize: parseFontSize(firstLinkStyle["font-size"]),
     textColor: parseColor(firstLinkStyle["color"]),
-    stackOnMobile: false,
+    stackOnMobile: findCls($wrapper, "kl-hlb-stack").length > 0,
   };
 }
