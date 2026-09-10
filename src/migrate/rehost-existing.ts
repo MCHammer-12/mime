@@ -53,20 +53,54 @@ function rejectedRoots(message: string): string[] {
  */
 function fixRejectedRoots(template: any, roots: string[], merchant: Merchant): boolean {
   const rules: Array<[RegExp, string | ((...m: string[]) => string)]> = [];
+  const schema = String(template.schemaType ?? "");
+  // Klaviyo filters that leave a merchant constant unchanged: the url carries
+  // no trailing slash and the name is never empty.
+  const noop = String.raw`(?:\|\s*(?:trim_slash|default:[^|}]*)\s*)*`;
   if (roots.includes("organization") && merchant.name) {
     // "Welcome to the {{ organization.name }}" with a team named "The Pretty
     // Cult" would read "the The Pretty Cult" — drop the article once.
     rules.push([
-      /\b(the\s+)\{\{\s*organization\.name\s*\}\}/gi,
+      new RegExp(String.raw`\b(the\s+)\{\{\s*organization\.name\s*${noop}\}\}`, "gi"),
       (_, the) => the + merchant.name.replace(/^the\s+/i, ""),
     ]);
-    if (merchant.name) rules.push([/\{\{\s*organization\.name\s*\}\}/g, merchant.name]);
-    if (merchant.url) rules.push([/\{\{\s*organization\.(?:url|website|website_url)\s*\}\}/g, merchant.url]);
+    rules.push([new RegExp(String.raw`\{\{\s*organization\.name\s*${noop}\}\}`, "g"), merchant.name]);
+    if (merchant.url) {
+      rules.push([
+        new RegExp(String.raw`\{\{\s*organization\.(?:url|website|website_url)\s*${noop}\}\}`, "g"),
+        merchant.url,
+      ]);
+    }
   }
-  if (roots.includes("first_name")) {
+  // Plain renames; the filter chain carries over.
+  const rename = (from: string, to: string, flags = "g") =>
     rules.push([
-      /\{\{\s*first_name\s*(\|[^}]*?)?\s*\}\}/g,
-      (_, filters) => `{{ customer_first_name${filters ? " " + filters : ""} }}`,
+      new RegExp(String.raw`\{\{\s*${from}\s*(\|[^}]*?)?\s*\}\}`, flags),
+      (_, filters) => `{{ ${to}${filters ? " " + filters : ""} }}`,
+    ]);
+  // `{{ First_name }}` never resolved in Klaviyo either; same intent.
+  if (roots.some((r) => r.toLowerCase() === "first_name")) rename("first_name", "customer_first_name", "gi");
+  if (roots.includes("email")) rename("email", "customer_email");
+  // Abandonment triggers expose one link back to the cart or the browsed
+  // page, which Klaviyo spells several ways per metric. On any other trigger
+  // event.* is a mismatch the operator has to decide on, so it stays.
+  if (roots.includes("event")) {
+    // `https://shop.com{{ event.URL|cut:"https://shop.com" }}` — the same link,
+    // written to survive a relative URL. Unwrap before the rename.
+    rules.push([/(https?:\/\/[^\s{"']+)\{\{\s*event\.URL\|cut:"\1"\s*\}\}/g, "{{ event.URL }}"]);
+    if (schema === "marketing_cart_abandonment" || schema === "marketing_checkout_abandonment") {
+      rename(String.raw`event(?:\.URL|\.checkout_url|\.extra\.(?:responsive_)?checkout_url)`, "checkout_url");
+    }
+    if (schema === "marketing_browse_abandonment") {
+      rename(String.raw`event(?:\.URL|\|lookup:["']Url["'])`, "browsed_page_url");
+    }
+  }
+  // Klaviyo fetches the restocked item with {% catalog %}; Redo's back-in-stock
+  // trigger hands the same URL over flat.
+  if (roots.includes("catalog_item") && schema === "marketing_back_in_stock") {
+    rules.push([
+      /\{%\s*catalog\s+event\.VariantId\b[^%]*%\}\s*\{\{\s*catalog_item\.url\s*\}\}\s*\{%\s*endcatalog\s*%\}/g,
+      "{{ back_in_stock_product_url }}",
     ]);
   }
   // An older importer resolved organization.name *inside* the braces, leaving
