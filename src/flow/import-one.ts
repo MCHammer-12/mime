@@ -341,6 +341,12 @@ async function main() {
             `(no RPC resolves product names to Shopify ids); re-pin in the editor: ${e.products.join(", ")}`,
         );
         break;
+      case "dynamic_image_inlined":
+        console.log(
+          `      ~ dynamic image ${e.imageUrl} in "${e.templateName}" → inline <img> in a text block ` +
+            `(Redo's Image block doesn't render Liquid)`,
+        );
+        break;
       case "discount_created":
         console.log(`      + discount "${e.couponName}" created (${e.summary}) → ${e.discountId}`);
         break;

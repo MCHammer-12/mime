@@ -56,7 +56,7 @@ await importTemplateRpc(
         type: "image",
         blockId: "card",
         sectionPadding: { top: 0, right: 40, bottom: 0, left: 40 },
-        imageUrl: "{{ restocked_product.image_url }}",
+        imageUrl: " {{ restocked_product.image_url }} ",
         altText: 'Back "in" stock',
         padding: { top: 8, right: 0, bottom: 12, left: 0 },
         showCaption: true,
@@ -79,7 +79,7 @@ assert(card.blockId === "card" && card.sectionPadding?.left === 40, "section-lev
 assert(!("imageUrl" in card) && !("imageSourceType" in card), "image-only fields stripped");
 assert(
   card.text.includes('<img src="{{ restocked_product.image_url }}"'),
-  `token lands in the <img src>, got: ${card.text}`,
+  `token lands trimmed in the <img src>, got: ${card.text}`,
 );
 assert(card.text.includes('alt="Back &quot;in&quot; stock"'), "alt text escaped");
 assert(card.text.includes("padding:8px 0px 12px 0px"), "block padding folded into inline style");
@@ -91,7 +91,7 @@ assert(card.text.includes("<p style=\"text-align:center\">Now available</p>"), "
 
 const inlined = events.filter((e) => e.kind === "dynamic_image_inlined");
 assert(
-  inlined.length === 1 && (inlined[0] as any).imageUrl === "{{ restocked_product.image_url }}",
+  inlined.length === 1 && (inlined[0] as any).imageUrl === " {{ restocked_product.image_url }} ",
   "exactly one dynamic_image_inlined event, for the card",
 );
 

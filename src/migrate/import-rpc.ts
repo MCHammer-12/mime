@@ -393,7 +393,7 @@ function inlineDynamicImage(block: Record<string, any>): Record<string, any> {
   // The image block's own width comes from the section padding, which rides
   // along on `base` — width:100% reproduces it inside the text block.
   let img =
-    `<img src="${esc(imageUrl)}" alt="${esc(altText)}" ` +
+    `<img src="${esc(String(imageUrl ?? "").trim())}" alt="${esc(altText)}" ` +
     `style="width:100%;height:auto;display:block;margin:0 auto;${pad}" />`;
   const href =
     clickthroughLinkType === "dynamic-variable" && clickthroughSchemaFieldName
