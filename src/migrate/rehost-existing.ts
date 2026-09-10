@@ -143,7 +143,11 @@ async function main() {
   const ids = process.env.TEMPLATE_IDS?.split(",").map((s) => s.trim()).filter(Boolean);
   const dryRun = !!process.env.DRY_RUN;
 
-  const all: any[] = await postMarketingRpc("getEmailTemplates", {}, options);
+  // getEmailTemplates is the list-view RPC and hides campaign templates
+  // (schemaType marketing_campaign); getEmailTemplatesByTeam returns the
+  // whole team, which is what the CRDB scan counts.
+  const byTeam = await postMarketingRpc("getEmailTemplatesByTeam", {}, options);
+  const all: any[] = byTeam.data ?? byTeam;
   const templates = all.filter(
     (t) =>
       (!nameFilter || String(t.name ?? "").toLowerCase().includes(nameFilter)) &&
