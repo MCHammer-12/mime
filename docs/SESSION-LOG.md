@@ -1,5 +1,37 @@
 # Session Log
 
+## 2026-09-10/11 — Jack Henry hybrid run (Klaviyo + OneText → Redo): 17 email flows imported, 4 SMS flows rebuilt, 12 parser/flow fixes
+
+**Context**
+Full HYBRID-RUN loop for Jack Henry Co (team `6877ca4dfbc2e80adb2b02ea`) on branch `claude/jack-henry-mime-migration-84dcd3` (worktree `sharp-dirac-c4835c`). Scope: all 28 live Klaviyo flows minus Retention (4), Tapcart (5) and the two Klaviyo-side OneText webhook flows = 17; Skio and Okendo flows pulled back into scope mid-run. OneText (the merchant's SMS vendor) had to be captured through its dashboard UI + stats API and rebuilt by hand over the Redo RPCs. Merchant output lives in gitignored `migrations/jack-henry/` (run-log, write-back report, visual-qa pages, OneText notes).
+
+**Done — code (12 commits, all pushed, `origin` at `5e3153a`)**
+- `07a8c0b` / `9fcef15` Liquid rewriter: `unsubscribe_link` / `view_in_browser_link` recognised; Redo field names on a second pass are not counted as dropped.
+- `9d30390` transform: Klaviyo link tags rewritten on image/header clickthroughs; footer appended when no unsubscribe exists.
+- `c90995a` `cleanup-import` CLI: deletes a prior run's flows and only the templates they alone reference (dry-run default, `CONFIRM=1`).
+- `a273738` segments: Klaviyo returns the definition by default; `additional-fields` accepts only `profile_count`.
+- `94409c9` Skio "Subscription Cancelled" → native `product_subscription_cancelled` (Recharge-only source today).
+- `6f94398` treeify never folds vacuous conditions (browse-abandonment body branch was silently dropped).
+- `86fc5c2` / `ebaa0a6` cart + browse product cards, incl. Klaviyo's kl-split image-product pattern, emit Redo's trigger-products sentinel `00000000feedb10cfeedb10c` instead of a run-created static filter.
+- `7229c7d` template names derived from subjects with Liquid rendered.
+- `ca64b2a` / `5e3153a` kl-table image cells → one ColumnBlock per `<tr>` (was flattened to one 4- or 9-across row) + DECISIONS entry.
+
+**Done — merchant (everything disabled)**
+- 17 email flows / 57 templates imported; qa-store 96% A → 97% A after live fixes (0 broken). 9 visual pairs Klaviyo-render vs Redo-preview pass; the rest structural only.
+- 4 OneText SMS flows / 8 SMS templates rebuilt via `createAdvancedFlow` + `createSmsTemplate` (Welcome on `sms_confirmed`, Browse + Product View on `browse_abandoned`, Cart, Checkout), builder QA pass. OneText AI pieces (Cart Concierge, purchase-offer AI, reply routing) documented for a joint session in `migrations/jack-henry/onetext/joint-session-notes.md`.
+- Deleted a 2026-09-01 partial import (18 flows + 51 templates) first. Live fixes in place: 9 kl-table blocks, 13 grid repoints, SJgdq6 card rebuilt, brand prefix stripped from two SMS templates.
+- A human edited three run-created templates in the Redo editor on 2026-09-11 08:05–08:14 local while the run was live; edits kept, one resulting duplicate row removed. Flagged in the report.
+
+**Files changed**
+`src/flow/{types,marketing-trigger-options,trigger-mapping,treeify,vacuous-conditions,variable-mapping}.ts` (+ `treeify.test.ts`, `variable-mapping.smoke.ts`), new `src/flow/cleanup-import.ts`, `src/transform.ts` (+ smoke), `src/parser/{index,blocks/product,blocks/column}.ts` (+ `event-product-card`, `trust-bar`, `merge-product-blocks` smokes), `src/migrate/{import-rpc,segments-import}.ts` (+ `template-name.smoke.ts`), `src/segments/{import-one,klaviyo-types}.ts`, `src/extract-segments.ts`, `src/export-template.ts`, `docs/DECISIONS.md`.
+
+**Decisions (see DECISIONS.md, 2026-09-10 entries)**
+kl-table → one ColumnBlock per row; Liquid rendered in template names; trigger-products sentinel for cart/browse grids; Skio cancellation → native trigger; vacuous conditions never folded.
+
+**Open / next steps**
+- Gaps with no instructions anywhere, from the write-back report §1h: browse-abandonment category splits need a Redo schema field; third-party events (Okendo review request, Skio subscription created) need Redo-side ingestion; `build-redo-automation` skill has wrong merge tags / builder URL / no `rpc` vs `marketing-rpc` note; HYBRID-RUN says nothing about a second SMS vendor or mid-run human edits.
+- Merchant: pick one Welcome Series (V1 vs V2 collide on `email_signup`), decide Review Request vs the live "Order Delivered" default, fix the Sunset segment (0 members), set `settings.marketing.smsStoreName`, delete one duplicate `JH10`.
+
 ## 2026-06-08 — Reviewer dashboard (Phases 1-4) + 5 production parser/RPC fixes
 
 **Context**
