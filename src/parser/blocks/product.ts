@@ -385,11 +385,17 @@ const UCB_WEB_SAFE = new Set([
  * Also strips the "-Klaviyo-Hosted" suffix Klaviyo adds to Google Fonts
  * when it self-hosts them (so "Kanit-Klaviyo-Hosted" → "Kanit").
  */
+const KLAVIYO_DEFAULT_STACK_RE = /^\s*Ubuntu\s*,\s*Helvetica\s*,\s*Arial\s*,\s*sans-serif\s*$/i;
+
 function extractPrimaryFont(html: string): string | null {
   const counts = new Map<string, number>();
   const re = /font-family:\s*([^;"}]+)/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(html)) !== null) {
+    // Klaviyo's MJML container default, not merchant styling. When the
+    // merchant's text is web-safe (Helvetica Neue) nothing out-counts it and
+    // the card would inherit "Ubuntu".
+    if (KLAVIYO_DEFAULT_STACK_RE.test(m[1]!)) continue;
     const families = m[1]!
       .split(",")
       .map((f) => f.trim().replace(/^['"]|['"]$/g, ""));
@@ -494,22 +500,31 @@ export function parseLineItemsUcbBlock(
   };
 }
 
-// ─── Browse Abandonment card: hand-built kl-table with event.* vars ─
+// ─── Event product card: hand-built kl-table / kl-split with event.* vars ─
 //
-// Klaviyo's Browse Abandonment templates often skip kl-product entirely
-// and lay out the viewed product as a hand-built kl-table card with
-// inline {{ event.Name }} / {{ event.ImageURL }} / {{ event.Price }}
-// variables (no Liquid for-loop — there's only one viewed product). The
-// dispatcher otherwise falls through to "Unknown block type".
+// Klaviyo's Browse Abandonment and Added to Cart templates often skip
+// kl-product entirely and lay out the event's product as a hand-built card
+// with inline {{ event.Name }} / {{ event.ImageURL }} / {{ event.Price }}
+// variables (no Liquid for-loop — the event carries one product). Two
+// layouts in the wild: a kl-table (falls through to "Unknown block type"),
+// and a kl-split with the product image on one side and the title / price
+// on the other (Jack Henry Added to Cart). The split otherwise parses as a
+// layout column whose image src is the unresolvable `{{ event.ImageUrl }}` —
+// an empty image next to gutted text, silently wrong.
 //
 // Target: an `interactive-cart` block on the trigger-products source
-// (TRIGGER_PRODUCTS_FILTER_ID). For browse abandonment Redo resolves it to
-// the products the customer recently viewed — the same products Klaviyo's
-// `event.*` variables carried — so no filter is created and nothing falls
-// back to Best Sellers.
+// (TRIGGER_PRODUCTS_FILTER_ID). Redo resolves it to the products the trigger
+// provided — the recently viewed products for browse abandonment, the cart's
+// line items for cart abandonment — the same products Klaviyo's `event.*`
+// variables carried, so no filter is created and nothing falls back to Best
+// Sellers.
 
+// Case-insensitive: Klaviyo emits both `event.ImageURL` and `event.ImageUrl`.
 const BROWSE_ABANDON_EVENT_RE =
-  /\{\{\s*event\.(?:Name|Title|Price|ImageURL|URL|Image)\b/;
+  /\{\{\s*event\.(?:Name|Title|Price|ImageURL|URL|Image)\b/i;
+// An <img src> that is the event's product image:
+// `{{ event.ImageURL }}`, `{{ event.ImageUrl|default:'' }}`, `{{ event.Image }}`.
+const EVENT_IMAGE_SRC_RE = /^\s*\{\{\s*event\.image(?:_?url)?\b/i;
 
 export function parseBrowseAbandonmentCardBlock(
   $: $,
@@ -518,9 +533,16 @@ export function parseBrowseAbandonmentCardBlock(
 ): ProductsBlock | null {
   const wrapperHtml = $wrapper.html() || "";
   if (!BROWSE_ABANDON_EVENT_RE.test(wrapperHtml)) return null;
-  // Must be the kl-table layout, not e.g. a text block that happens to
-  // mention an event variable inline.
-  if (!$wrapper.find(".kl-table, .gxp-kl-table").length) return null;
+  // Must be a card layout — a kl-table, or a kl-split whose <img> is the
+  // event's product image — not e.g. a text block that happens to mention
+  // an event variable inline.
+  const isSplitCard =
+    $wrapper.find(".kl-split, .gxp-kl-split").length > 0 &&
+    $wrapper
+      .find("img")
+      .toArray()
+      .some((img) => EVENT_IMAGE_SRC_RE.test($(img).attr("src") ?? ""));
+  if (!isSplitCard && !$wrapper.find(".kl-table, .gxp-kl-table").length) return null;
 
   const $sectionTd = $wrapper.children("table").find("> tbody > tr > td").first();
   const outerStyle = parseInlineStyles($sectionTd.attr("style"));
@@ -531,7 +553,7 @@ export function parseBrowseAbandonmentCardBlock(
     "#ffffff";
 
   ctx.warnings.push(
-    `Browse Abandonment card ({{ event.Name }} / {{ event.ImageURL }}) → Products block on "Products from this trigger" (recently viewed products). Verify in Redo editor after import.`,
+    `Product card (${isSplitCard ? "kl-split" : "kl-table"} with {{ event.* }} variables) → Products block on "Products from this trigger" (the products the trigger provides). Verify in Redo editor after import.`,
   );
 
   const fontFamily = extractPrimaryFont(wrapperHtml) ?? "Arial";

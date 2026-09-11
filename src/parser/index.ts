@@ -357,10 +357,14 @@ function parseWrapper(
     return blocks;
   }
 
-  // Split block
+  // Split block. A kl-split whose image is the event's product image is a
+  // hand-rolled product card (Added to Cart / Browse Abandonment), not a
+  // layout: parsed as a column it kept an empty imageUrl and gutted text.
   const $splitTd = findCls($wrapper, "kl-split");
   if ($splitTd.length > 0) {
-    const block = parseSplitBlock($, $splitTd.first(), ctx);
+    const block =
+      parseBrowseAbandonmentCardBlock($, $wrapper, ctx) ??
+      parseSplitBlock($, $splitTd.first(), ctx);
     if (block) blocks.push(block);
     return blocks;
   }
@@ -414,10 +418,10 @@ function parseWrapper(
     return blocks;
   }
 
-  // Browse-abandonment "product card": hand-built kl-table with inline
-  // {{ event.Name }} / {{ event.ImageURL }} variables (no Liquid loop).
-  // Emitted on the trigger-products source (recently viewed products) —
-  // see parseBrowseAbandonmentCardBlock.
+  // Event "product card": hand-built kl-table with inline
+  // {{ event.Name }} / {{ event.ImageURL }} variables (no Liquid loop); the
+  // kl-split variant is routed from the split branch above. Emitted on the
+  // trigger-products source — see parseBrowseAbandonmentCardBlock.
   const baCardBlock = parseBrowseAbandonmentCardBlock($, $wrapper, ctx);
   if (baCardBlock) {
     blocks.push(baCardBlock);
