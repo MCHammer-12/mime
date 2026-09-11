@@ -1060,7 +1060,7 @@ export async function importFlowRpc(
     p: { subject: string; klaviyoTemplateId: string | null },
     reason: string,
   ) => {
-    const name = `${bundle.automation.name} — ${p.subject || "email"}`.slice(0, 200);
+    const name = `${bundle.automation.name} — ${liquidToPlainText(p.subject) || "email"}`.slice(0, 200);
     blankedTemplates!.push({ name, klaviyoTemplateId: p.klaviyoTemplateId, reason });
     options.onProgress?.({
       kind: "template_blanked",
@@ -1085,7 +1085,7 @@ export async function importFlowRpc(
           // the action than from the template HTML).
           subject: ph.subject || ph.fullTemplate.subject || "",
           emailPreview: ph.previewText ?? ph.fullTemplate.emailPreview ?? null,
-          name: `${bundle.automation.name} — ${ph.subject || ph.fullTemplate.name || "email"}`.slice(0, 200),
+          name: `${bundle.automation.name} — ${liquidToPlainText(ph.subject) || ph.fullTemplate.name || "email"}`.slice(0, 200),
           schemaType: flowSchemaType,
         }
       : buildBlankTemplate(bundle.automation.name, ph, flowSchemaType);
@@ -1151,7 +1151,7 @@ export async function importFlowRpc(
     const teamId = await resolveTeamId(options);
     const template: Record<string, any> = {
       team: teamId,
-      name: `${bundle.automation.name} — ${ph.name}`.slice(0, 200),
+      name: `${bundle.automation.name} — ${liquidToPlainText(ph.name)}`.slice(0, 200),
       content: ph.content,
       templateType: "marketing",
       category: ph.category,
@@ -1368,13 +1368,26 @@ export async function importFlowRpc(
   };
 }
 
+// Template names are merchant-facing labels in Redo's template list, so a
+// subject like `Question For {{ customer_first_name |default:'You' }}` has to
+// read "Question For You" there. Only the name is rendered; the subject keeps
+// its Liquid for Redo to fill at send time.
+export function liquidToPlainText(s: string): string {
+  return s
+    .replace(/\{\{[^}]*?\|\s*default\s*:\s*(['"])(.*?)\1[^}]*\}\}/g, "$2")
+    .replace(/\{\{.*?\}\}|\{%.*?%\}/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s,;:!.-]+/, "")
+    .trim();
+}
+
 function buildBlankTemplate(
   flowName: string,
   ph: FlowImportBundle["placeholderTemplates"][number],
   schemaType: string = "marketing_email",
 ): Record<string, any> {
   return {
-    name: `[Placeholder] ${flowName} — ${ph.subject || ph.klaviyoTemplateId || "email"}`.slice(0, 200),
+    name: `[Placeholder] ${flowName} — ${liquidToPlainText(ph.subject) || ph.klaviyoTemplateId || "email"}`.slice(0, 200),
     subject: ph.subject || "",
     emailPreview: ph.previewText ?? null,
     templateType: "marketing",
