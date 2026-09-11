@@ -158,4 +158,25 @@ const body = `Head back: {{ event.URL|default:'' }}`;
   );
 }
 
+// ─── Redo's own email fields are recognised, not counted as dropped ─────
+// Every transformed Klaviyo footer carries {{ unsubscribe_link }}; before
+// the base map listed it, each one raised a false "Dropped: unsubscribe_link"
+// review warning (46 on Jack Henry, 2026-09-10) on every trigger except
+// back-in-stock / price-drop.
+{
+  const warnings: ParseWarning[] = [];
+  const { output, unmappedTokens } = rewriteKlaviyoLiquid(
+    `<a href="{{ unsubscribe_link }}">Unsubscribe</a> <a href="{{ view_in_browser_link }}">View</a>`,
+    warnings,
+    "a1",
+    SchemaType.ORDER_TRACKING,
+  );
+  assert(
+    output.includes("{{ unsubscribe_link }}") && output.includes("{{ view_in_browser_link }}"),
+    `email fields kept verbatim, got: ${JSON.stringify(output)}`,
+  );
+  assert(unmappedTokens.length === 0, `not flagged as dropped, got: ${unmappedTokens}`);
+  assert(warnings.length === 0, `no warnings, got: ${warnings.length}`);
+}
+
 console.log("variable-mapping.smoke.ts: all assertions passed");

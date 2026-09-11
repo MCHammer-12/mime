@@ -24,6 +24,12 @@ export const KLAVIYO_TO_REDO_VAR_MAP: Record<string, string> = {
   "event.extra.responsive_checkout_url": "checkout_url",
   "event.extra.checkout_url":        "checkout_url",
   "event.timestamp":                 "time",
+
+  // Redo's shared email fields, already under Redo's own names — every
+  // transformed Klaviyo footer carries {{ unsubscribe_link }}. Listed so the
+  // rewriter recognises them instead of counting them as dropped.
+  "unsubscribe_link":      "unsubscribe_link",
+  "view_in_browser_link":  "view_in_browser_link",
 };
 
 // Fields that only exist on some trigger schemas. Redo rejects a template whose
@@ -62,7 +68,6 @@ const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string>>> = {
     "catalog_item.url":   "back_in_stock_product_url",
     "catalog_item.title": "back_in_stock_product_title",
     "catalog_item.variant.featured_image.full.src": "restocked_product.image_url",
-    "unsubscribe_link":   "unsubscribe_link",
   },
   // Klaviyo's price-drop event fields → baseMarketingPriceDropSchema
   // (redo/flows/common/src/schemas/marketing/marketing.ts). The schema also
@@ -77,9 +82,6 @@ const SCHEMA_VAR_MAP: Partial<Record<SchemaType, Record<string, string>>> = {
     "event.price_drop_percent": "formatted_price_drop_percentage",
     "event.image_url":         "discounted_product.image_url",
     "event.url":               "discounted_product.url",
-    // Already a valid Redo field (schema's unsubscribeLink, auto-snake-cased);
-    // listed so the rewriter recognises it instead of flagging it as dropped.
-    "unsubscribe_link":        "unsubscribe_link",
   },
 };
 
