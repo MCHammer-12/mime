@@ -24,6 +24,7 @@ import {
 } from "./renderer/types.js";
 import type { PendingDiscount } from "./renderer/types.js";
 import { nextId } from "./parser/helpers.js";
+import { pickContrastingColor } from "./parser/style-utils.js";
 import { hasInlineCoupon, rewriteInlineCoupon } from "./ai-rewrite.js";
 import { extractCouponName, inferDiscountConfig } from "./discount-infer.js";
 
@@ -97,6 +98,64 @@ export async function transformSections(
   }
 
   return { sections: out, substitutions: subs, warnings, aiRewrites, aiUsage: usage };
+}
+
+/**
+ * Klaviyo appends its own unsubscribe footer at send time when a template
+ * has none; Redo doesn't — its builder refuses the save until one exists and
+ * offers to append its default footer block. Do the same after the section
+ * transform, so an image-only Klaviyo email (Jack Henry Win Back) lands
+ * sendable instead of failing QA on a missing unsubscribe link. An empty
+ * template is a parse failure to surface, not an email to patch.
+ */
+export function ensureUnsubscribeLink(sections: Section[], warnings: string[]): Section[] {
+  if (sections.length === 0 || hasUnsubscribeLink(sections)) return sections;
+  warnings.push(
+    "no unsubscribe link anywhere in the template — appended Redo's default footer block (Klaviyo adds one at send time; Redo requires it in the template)",
+  );
+  return [...sections, buildDefaultFooter(sections[sections.length - 1]!)];
+}
+
+const UNSUBSCRIBE_VAR_RE = /\{\{\s*(?:one_click_)?unsubscribe_link\s*\}\}/;
+
+// Same sites Redo's builder gate (`hasUnsubscribeLink` in
+// email-builder/utils/unsubscribe-link-warning-modal.tsx) inspects, plus
+// image / header clickthroughs: Redo renders those as a working unsubscribe
+// URL, its gate just doesn't count them — the merchant sees the "add default
+// footer" prompt on first save of such an email, nothing worse.
+function hasUnsubscribeLink(sections: Section[]): boolean {
+  return sections.some((s: any) => {
+    if (!s) return false;
+    if (s.type === EmailBlockType.FOOTER) return true;
+    if (s.type === EmailBlockType.COLUMN) return hasUnsubscribeLink(s.columns ?? []);
+    if (/unsubscribelink/i.test(String(s.schemaFieldName ?? ""))) return true;
+    return [s.text, s.html, s.buttonLink, s.clickthroughUrl].some(
+      (v) => typeof v === "string" && UNSUBSCRIBE_VAR_RE.test(v),
+    );
+  });
+}
+
+// Mirrors Redo's footerDefault() (marketing/templates/common/src/
+// email-template-defaults.ts) — the block its builder appends on "Continue
+// with default" — except the section colour follows the preceding section so
+// a dark email doesn't end on a white strip.
+function buildDefaultFooter(prev: Section): FooterBlock {
+  const sectionColor = (prev as any).sectionColor ?? "#ffffff";
+  return {
+    type: EmailBlockType.FOOTER,
+    blockId: nextId(),
+    padding: { top: 40, right: 0, bottom: 40, left: 0 },
+    sectionPadding: { top: 40, right: 0, bottom: 40, left: 0 },
+    horizontalPadding: Size.MEDIUM,
+    verticalPadding: Size.MEDIUM,
+    sectionColor,
+    textColor: pickContrastingColor(sectionColor),
+    alignment: Alignment.CENTER,
+    fontFamily: "Arial",
+    fontSize: 12,
+    schemaFieldName: "unsubscribeLink",
+    useTemplateAddress: false,
+  };
 }
 
 interface Ctx {
@@ -200,6 +259,23 @@ async function transformBlock(
       return [textBlock, buildDiscountFromTextBlock(textBlock, pending)];
     }
     return [withSubs];
+  }
+
+  // Klaviyo lets an image carry the unsubscribe / manage-preferences /
+  // web-view tag as its link — a footer drawn as a graphic (Jack Henry
+  // Espresso Shot). `{% unsubscribe_link %}` isn't a registered tag in Redo's
+  // LiquidJS, so the clickthrough shipped as the literal tag text. Rewrite to
+  // the runtime variables the text-block href path already emits.
+  if (
+    (block.type === EmailBlockType.IMAGE || block.type === EmailBlockType.HEADER) &&
+    typeof (block as any).clickthroughUrl === "string"
+  ) {
+    const url: string = (block as any).clickthroughUrl;
+    const rewritten = rewriteLinkTag(url);
+    if (rewritten !== url) {
+      ctx.subs.push(`${block.type} link: ${url.trim()} → ${rewritten}`);
+      block = { ...block, clickthroughUrl: rewritten } as Section;
+    }
   }
 
   // Image blocks under custom_event: Klaviyo builds product-recommendation
@@ -409,6 +485,22 @@ function buildFooterFromTextBlock(tb: TextBlock): FooterBlock {
     fontFamily: tb.fontFamily,
     schemaFieldName: "unsubscribeLink",
   };
+}
+
+// Klaviyo link tags that stand alone as a URL value. Both produce a URL when
+// Klaviyo renders them; Redo exposes the same as runtime variables on every
+// trigger except custom_event (handled downstream by the custom-event pass).
+const LINK_TAG_REWRITES: ReadonlyArray<[RegExp, string]> = [
+  [
+    /^\s*\{%\s*(?:unsubscribe_link|manage_preferences(?:_link)?)(?:\s+'[^']*')?\s*%\}\s*$/i,
+    "{{ unsubscribe_link }}",
+  ],
+  [/^\s*\{%\s*web_view_link\s*%\}\s*$/i, "{{ view_in_browser_link }}"],
+];
+
+function rewriteLinkTag(url: string): string {
+  for (const [re, to] of LINK_TAG_REWRITES) if (re.test(url)) return to;
+  return url;
 }
 
 // ─── Text variable substitution (E1) ──────────────────────────────

@@ -16,7 +16,7 @@
  * become a DiscountBlock (White Elm welcome heroes shipped the raw tag as
  * button text).
  */
-import { substituteStringVars, transformSections } from "./transform.js";
+import { ensureUnsubscribeLink, substituteStringVars, transformSections } from "./transform.js";
 import { Alignment, ButtonLinkType, EmailBlockType } from "./renderer/types.js";
 
 const orgCtx = {
@@ -222,6 +222,108 @@ function assert(cond: boolean, msg: string): void {
     `plain CTA stays a button, got: ${JSON.stringify(res.sections.map((s) => s.type))}`,
   );
   assert(outBtn.buttonText === "SHOP NOW", `CTA label untouched, got: ${outBtn.buttonText}`);
+}
+
+// ─── Image whose link is Klaviyo's unsubscribe tag ─────────────────────
+// A footer drawn as a graphic (Jack Henry Espresso Shot): the image's href
+// is `{% unsubscribe_link %}`, which Redo's LiquidJS has no tag for — the
+// literal tag text shipped as the clickthrough.
+const imageBase = {
+  type: EmailBlockType.IMAGE,
+  blockId: "img-1",
+  sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
+  sectionColor: "#ffffff",
+  imageUrl: "https://d3k81ch9hvuctc.cloudfront.net/company/x/images/footer.png",
+  showCaption: false,
+  padding: { top: 0, right: 0, bottom: 0, left: 0 },
+};
+{
+  const res = await transformSections(
+    [
+      { ...imageBase, clickthroughUrl: "{% unsubscribe_link %}" } as any,
+      { ...imageBase, blockId: "img-2", clickthroughUrl: "{% manage_preferences_link %}" } as any,
+      { ...imageBase, blockId: "img-3", clickthroughUrl: "{% web_view_link %}" } as any,
+      { ...imageBase, blockId: "img-4", clickthroughUrl: "https://example.com/shop" } as any,
+    ],
+    null,
+    { skipAi: true },
+  );
+  const links = res.sections.map((b: any) => b.clickthroughUrl);
+  assert(
+    links[0] === "{{ unsubscribe_link }}" && links[1] === "{{ unsubscribe_link }}",
+    `unsubscribe / manage-preferences image links → {{ unsubscribe_link }}, got: ${JSON.stringify(links)}`,
+  );
+  assert(
+    links[2] === "{{ view_in_browser_link }}",
+    `web_view_link image link → {{ view_in_browser_link }}, got: ${JSON.stringify(links)}`,
+  );
+  assert(links[3] === "https://example.com/shop", `static image link untouched, got: ${links[3]}`);
+  assert(
+    res.substitutions.filter((x) => x.includes("image link")).length === 3,
+    `three rewrites noted, got: ${JSON.stringify(res.substitutions)}`,
+  );
+}
+
+// ─── Under custom_event the rewritten link can't ship — cleared instead ──
+{
+  const res = await transformSections(
+    [{ ...imageBase, clickthroughUrl: "{% unsubscribe_link %}" } as any],
+    null,
+    { skipAi: true, customEvent: true },
+  );
+  assert(
+    (res.sections[0] as any).clickthroughUrl === "",
+    `custom_event clears the unsubscribe image link, got: ${JSON.stringify((res.sections[0] as any).clickthroughUrl)}`,
+  );
+}
+
+// ─── No unsubscribe anywhere → Redo's default footer block appended ─────
+// Image-only Klaviyo emails (Jack Henry Win Back) rely on Klaviyo's send-time
+// footer; Redo has no such thing, so the template must carry one.
+{
+  const warnings: string[] = [];
+  const out = ensureUnsubscribeLink(
+    [{ ...imageBase, sectionColor: "#111111", clickthroughUrl: "https://example.com" } as any],
+    warnings,
+  );
+  const footer: any = out[out.length - 1];
+  assert(out.length === 2 && footer.type === EmailBlockType.FOOTER, `footer appended, got: ${JSON.stringify(out.map((b: any) => b.type))}`);
+  assert(
+    footer.schemaFieldName === "unsubscribeLink" && footer.useTemplateAddress === false,
+    `footer reads the schema's unsubscribe link, got: ${JSON.stringify(footer)}`,
+  );
+  assert(
+    footer.sectionColor === "#111111" && footer.textColor === "#ffffff",
+    `footer follows the preceding dark section, got: ${footer.sectionColor}/${footer.textColor}`,
+  );
+  assert(warnings.length === 1 && warnings[0]!.includes("appended Redo's default footer"), `warned, got: ${JSON.stringify(warnings)}`);
+}
+
+// ─── Any existing unsubscribe affordance suppresses the footer ──────────
+{
+  const text = {
+    type: EmailBlockType.TEXT,
+    blockId: "t-1",
+    sectionPadding: { top: 0, right: 0, bottom: 0, left: 0 },
+    sectionColor: "#ffffff",
+    text: '<p><a href="{{ unsubscribe_link }}">Unsubscribe</a></p>',
+  } as any;
+  const imgUnsub = { ...imageBase, clickthroughUrl: "{{ unsubscribe_link }}" } as any;
+  const inColumn = { type: EmailBlockType.COLUMN, blockId: "c-1", sectionPadding: {}, sectionColor: "#fff", columns: [null, text] } as any;
+  for (const [label, sections] of [
+    ["text link", [imageBase, text]],
+    ["image link", [imgUnsub]],
+    ["link inside a column", [inColumn]],
+    ["existing footer block", [{ type: EmailBlockType.FOOTER, blockId: "f-1" }]],
+    ["empty template", []],
+  ] as [string, any[]][]) {
+    const warnings: string[] = [];
+    const out = ensureUnsubscribeLink(sections, warnings);
+    assert(
+      out.length === sections.length && warnings.length === 0,
+      `${label}: no footer appended, got ${out.length} blocks / ${JSON.stringify(warnings)}`,
+    );
+  }
 }
 
 console.log("transform.smoke.ts: all assertions passed");

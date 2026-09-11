@@ -22,7 +22,7 @@ import * as cheerio from "cheerio";
 import { parseKlaviyoHtml } from "./parser/index.js";
 import { parseCodeTemplateHtml } from "./parser/code-template.js";
 import { fetchAccount, type KlaviyoAccount } from "./fetch-account.js";
-import { transformSections, substituteStringVars } from "./transform.js";
+import { ensureUnsubscribeLink, substituteStringVars, transformSections } from "./transform.js";
 import { formatAddress } from "./fetch-account.js";
 import { buildFontPlan } from "./fonts.js";
 
@@ -188,7 +188,7 @@ export async function exportTemplateFromHtml(
       skipAi: opts.skipAi,
       customEvent: opts.customEvent,
     });
-    sections = result.sections;
+    sections = ensureUnsubscribeLink(result.sections, result.warnings);
     substitutions = result.substitutions;
     aiRewrites = result.aiRewrites;
     aiUsage = result.aiUsage;
