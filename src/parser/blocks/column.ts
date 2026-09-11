@@ -365,44 +365,57 @@ export function parseSplitBlock(
  * whole table falls through to the "Unknown block" fallback and every badge is
  * dropped. Emit the cells side-by-side as a ColumnBlock so the row survives.
  *
+ * One ColumnBlock per table `<tr>`: a 2×2 static product-card table (Jack
+ * Henry Welcome #1 / #3) has to stay two rows of two, not flatten into a
+ * single 4-across row of thumbnails.
+ *
  * Requires ≥2 image cells (a genuine row); a lone-image table is left to the
  * other handlers / fallback rather than speculatively reshaped.
  */
-export function parseTableImageRow(
+export function parseTableImageRows(
   $: $,
   $wrapper: cheerio.Cheerio<El>,
   ctx: ParseContext,
-): ColumnBlock | null {
+): ColumnBlock[] {
   const $table = findCls($wrapper, "kl-table").first();
-  if ($table.length === 0) return null;
+  if ($table.length === 0) return [];
 
-  // Each kl-table-subblock cell carrying an image is one badge column.
-  const cells: cheerio.Cheerio<El>[] = [];
+  // Each kl-table-subblock cell carrying an image is one badge column,
+  // grouped by the table row that holds it.
+  const rows = new Map<El, cheerio.Cheerio<El>[]>();
   findCls($table, "kl-table-subblock").each((_, el) => {
     const $cell = $(el);
-    if ($cell.find("img[src]").length > 0) cells.push($cell);
+    if ($cell.find("img[src]").length === 0) return;
+    const tr = $cell.closest("tr").get(0);
+    if (!tr) return;
+    rows.set(tr, [...(rows.get(tr) ?? []), $cell]);
   });
-  if (cells.length < 2) return null;
+  const cellCount = [...rows.values()].reduce((n, c) => n + c.length, 0);
+  if (cellCount < 2) return [];
 
   const sectionColor = findAncestorBackgroundColor($table) || "#ffffff";
-  // Reuse the split-subblock extractor (button > image > text) per cell so
-  // badge images get the same padding/clickthrough treatment as split images.
-  const columns = cells.map((c) => parseSplitSubblock($, c, ctx, sectionColor));
-  if (columns.filter(Boolean).length < 2) return null;
-
-  const width = Math.round(100 / columns.length);
-  return {
-    type: EmailBlockType.COLUMN,
-    blockId: nextId(),
-    sectionPadding: sumAncestorPadding($table),
-    sectionColor,
-    columns,
-    columnCount: columns.length,
-    gap: 0,
-    stackOnMobile: true,
-    alignment: VerticalAlignment.CENTER,
-    columnWidths: columns.map(() => width),
-  };
+  const sectionPadding = sumAncestorPadding($table);
+  const blocks: ColumnBlock[] = [];
+  for (const cells of rows.values()) {
+    // Reuse the split-subblock extractor (button > image > text) per cell so
+    // badge images get the same padding/clickthrough treatment as split images.
+    const columns = cells.map((c) => parseSplitSubblock($, c, ctx, sectionColor));
+    if (columns.filter(Boolean).length === 0) continue;
+    const width = Math.round(100 / columns.length);
+    blocks.push({
+      type: EmailBlockType.COLUMN,
+      blockId: nextId(),
+      sectionPadding,
+      sectionColor,
+      columns,
+      columnCount: columns.length,
+      gap: 0,
+      stackOnMobile: true,
+      alignment: VerticalAlignment.CENTER,
+      columnWidths: columns.map(() => width),
+    });
+  }
+  return blocks;
 }
 
 /**
