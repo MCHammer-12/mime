@@ -170,6 +170,15 @@ export const MARKETING_TRIGGER_OPTIONS: MarketingTriggerOption[] = [
       category: "Marketing",
     },
   },
+  {
+    value: "product_subscription_cancelled",
+    label: "Product subscription cancelled",
+    resolution: {
+      key: MarketingTriggerKey.PRODUCT_SUBSCRIPTION_CANCELLED,
+      schemaType: SchemaType.MARKETING_PRODUCT_SUBSCRIPTION_CANCELLED,
+      category: "Marketing",
+    },
+  },
 
   // ─── Yotpo Integration triggers ──────────────────────────────────
   // Yotpo Loyalty + Yotpo Reviews. Each is its own (key, schemaType)

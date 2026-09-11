@@ -33,6 +33,10 @@ export enum SchemaType {
   MARKETING_CAMPAIGN = "marketing_campaign",
   REFUND_RETURN_SUBMITTED = "refund_return_submitted",
   EXCHANGE_PROCESSED_WITH_CREDIT = "exchange_processed_with_credit",
+  // Subscription cancelled on the merchant's subscription platform. Redo's
+  // schema is platform-agnostic (subscriptionPlatform field), but today only
+  // the Recharge webhook emits the event — see trigger-mapping.ts.
+  MARKETING_PRODUCT_SUBSCRIPTION_CANCELLED = "marketing_product_subscription_cancelled",
   ORDER_TRACKING = "order_tracking",
   REVIEWS = "reviews",
   // Merchant-defined event delivered to Redo via the public custom-event API.
@@ -154,6 +158,7 @@ export enum MarketingTriggerKey {
   PRICE_DROP = "price_drop",
   REFUND_RETURN_SUBMITTED = "refund_return_submitted",
   EXCHANGE_PROCESSED_WITH_CREDIT = "exchange_processed_with_credit",
+  PRODUCT_SUBSCRIPTION_CANCELLED = "product_subscription_cancelled",
 }
 
 export enum WaitTimeUnit {

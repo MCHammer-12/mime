@@ -153,6 +153,18 @@ const METRIC_NAME_MAP: Record<
   "subscribed to sms marketing":            { key: MarketingTriggerKey.SMS_SIGNUP,   schemaType: SchemaType.SMS_MARKETING_SIGNUP,   category: "Marketing" },
   "subscribed to email marketing":          { key: MarketingTriggerKey.EMAIL_SIGNUP, schemaType: SchemaType.EMAIL_MARKETING_SIGNUP, category: "Marketing" },
 
+  // ─── Subscriptions ────────────────────────────────────────────────
+  // Skio's Klaviyo integration names the cancel metric "Skio: Subscription
+  // Cancelled". Redo has a native, platform-agnostic trigger for it
+  // (redo/marketing/service trigger-product-subscription-cancelled.ts), so
+  // route there instead of the custom-event picker — a custom event named
+  // after a Klaviyo metric never fires in Redo. Caveat (Jack Henry,
+  // 2026-09-10): only Recharge's webhook emits the event today; Redo's
+  // customer-event-pipeline derive-event-source.ts says "add Skio/etc. when
+  // their webhook ingestion lands". No subscription-*created* trigger exists,
+  // so "Skio: New Subscription Created" stays on the picker.
+  "skio: subscription cancelled":           { key: MarketingTriggerKey.PRODUCT_SUBSCRIPTION_CANCELLED, schemaType: SchemaType.MARKETING_PRODUCT_SUBSCRIPTION_CANCELLED, category: "Marketing" },
+
   // ─── Order Tracking — full set ────────────────────────────────────
   // Klaviyo's shipment events vary by source (Shopify Klaviyo integration,
   // Aftership, ShipBob, etc.). The names here cover the common patterns;
