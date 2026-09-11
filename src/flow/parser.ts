@@ -764,6 +764,10 @@ export async function parseFlow(
      *  uses this to recover from an "unresolvable trigger" skip by asking
      *  the user to pick a Redo trigger and re-running parseFlow. */
     forcedTrigger?: TriggerResolution;
+    /** Klaviyo flow id → Redo flow id for flows already imported to this
+     *  store (import-one reads it off the run ledger). Lets a profile_filter
+     *  "Received Email where Flow equals X" point at X's Redo automation. */
+    flowIdMap?: Record<string, string>;
   },
 ): Promise<ParseResult> {
   const warnings: ParseWarning[] = [];
@@ -809,19 +813,20 @@ export async function parseFlow(
     });
   }
   // Flow-level profile_filter: Klaviyo says "only run for profiles
-  // matching these conditions". Redo expresses it as a skipCondition on
+  // matching these conditions". Redo expresses it as skipConditions on
   // the trigger step (semantically inverted: "skip if the profile does
-  // NOT match"). See translateFlowProfileFilter for the De Morgan logic.
-  // Push BEFORE the abandonment + activity skips so the filter applies
-  // alongside them under OR conjunction at the trigger level.
-  const profileFilterSkip = translateFlowProfileFilter(
-    defn?.profile_filter,
-    metrics,
-    warnings,
+  // NOT match"), one per Klaviyo group — see translateFlowProfileFilter
+  // for the De Morgan logic. Push BEFORE the abandonment + activity skips
+  // so the filter applies alongside them under OR conjunction at the
+  // trigger level.
+  skipConditions.push(
+    ...translateFlowProfileFilter(
+      defn?.profile_filter,
+      metrics,
+      warnings,
+      opts.flowIdMap,
+    ),
   );
-  if (profileFilterSkip) {
-    skipConditions.push(profileFilterSkip);
-  }
 
   // Flow-level `definition.reentry_criteria`: Klaviyo's "wait N days
   // before letting the same profile re-enter THIS flow". Redo has a

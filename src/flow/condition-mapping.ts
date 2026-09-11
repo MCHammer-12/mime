@@ -29,6 +29,17 @@ const METRIC_TO_ACTIVITY: Record<string, string> = {
   "fulfilled order": "order-placed",
 };
 
+// Redo activities whose whereConditions accept the `automation` (Redo flow
+// id) token dimension — the marketingActivityDataStructure in redoapp
+// segment-data-structures.ts. Klaviyo's `$flow` metric filter maps onto it.
+const AUTOMATION_DIMENSION_ACTIVITIES = new Set([
+  "opened-email",
+  "clicked-email",
+  "received-email",
+  "clicked-text",
+  "received-text",
+]);
+
 const TIMEFRAME_UNITS: Record<string, string> = {
   hour: "hour", hours: "hour",
   day: "day", days: "day",
@@ -77,7 +88,9 @@ function translateCount(
     case "equals":
       return n === 0 ? { type: "zero_times" } : { type: "n_times", n };
     case "not-equals":
-      return { type: "not_n_times", n };
+      // "not 0 times" is how an inverted "zero times" arrives (flow
+      // profile_filter → skip); Redo's UI saves that as "at least once".
+      return n === 0 ? { type: "at_least_once" } : { type: "not_n_times", n };
     case "greater-than":
       // Klaviyo's ">0" renders as "at least once" in the UI — match that.
       return n === 0 ? { type: "at_least_once" } : { type: "greater_than_n", n };
@@ -139,6 +152,7 @@ function translateProfileMetricCondition(
   metrics: MetricLookup,
   warnings: ParseWarning[],
   actionId: string,
+  flowIdMap?: Record<string, string>,
 ): unknown | null {
   const metric = metrics[c.metric_id];
   if (!metric) {
@@ -162,6 +176,15 @@ function translateProfileMetricCondition(
   const value = Number(c.measurement_filter?.value ?? 0);
   const measurement = String(c.measurement ?? "count").toLowerCase();
   const timeframe = translateTimeframe(c.timeframe_filter, warnings, actionId);
+  const whereConditions = translateMetricFilters(
+    c,
+    metric.name,
+    activityType,
+    warnings,
+    actionId,
+    flowIdMap,
+  );
+  if (!whereConditions) return null;
 
   // Value-measurement path: Klaviyo "Added to Cart VALUE > 74.99" is a
   // dollar threshold on the event's value property — NOT an event count.
@@ -195,6 +218,7 @@ function translateProfileMetricCondition(
       count: { type: "at_least_once" },
       timeframe,
       whereConditions: [
+        ...whereConditions,
         {
           type: "numeric",
           dimension,
@@ -220,8 +244,59 @@ function translateProfileMetricCondition(
     activityType,
     count: translateCount(operator, value),
     timeframe,
-    whereConditions: [],
+    whereConditions,
   };
+}
+
+// Klaviyo `metric_filters` narrow a metric condition to events carrying a
+// property value — "Received Email zero times where Flow equals X". Only
+// `$flow equals` translates: it becomes a Redo `automation` whereCondition
+// holding the Redo id of the flow that X was imported as (flowIdMap comes
+// from the run ledger). Anything unresolvable returns null so the caller
+// drops the whole condition with a warning — emitting it without the
+// filter would silently widen "received an email from flow X" to
+// "received any email" (Jack Henry WC | Site Abandon, 2026-09-11).
+function translateMetricFilters(
+  c: any,
+  metricName: string,
+  activityType: string,
+  warnings: ParseWarning[],
+  actionId: string,
+  flowIdMap?: Record<string, string>,
+): unknown[] | null {
+  const whereConditions: unknown[] = [];
+  for (const mf of c.metric_filters ?? []) {
+    const property = mf.property;
+    const filterOp = mf.filter?.operator;
+    const klaviyoFlowId = mf.filter?.value;
+    if (
+      property !== "$flow" ||
+      filterOp !== "equals" ||
+      !AUTOMATION_DIMENSION_ACTIVITIES.has(activityType)
+    ) {
+      warnings.push({
+        kind: "requires-review",
+        actionId,
+        message: `condition on "${metricName}" filters by ${property} ${filterOp} ${JSON.stringify(klaviyoFlowId)} — mime only translates "$flow equals" on email/text activities; add the condition manually in the Redo flow builder`,
+      });
+      return null;
+    }
+    const redoFlowId = flowIdMap?.[klaviyoFlowId];
+    if (!redoFlowId) {
+      warnings.push({
+        kind: "requires-review",
+        actionId,
+        message: `condition on "${metricName}" filters by Klaviyo flow ${klaviyoFlowId}, which has not been imported to this store yet — import it, re-run this flow, or add "${metricName} … where Automation is <that flow>" to the skip conditions in the Redo flow builder`,
+      });
+      return null;
+    }
+    whereConditions.push({
+      type: "token",
+      dimension: "automation",
+      comparison: { type: "token", operator: "ANY", values: [redoFlowId] },
+    });
+  }
+  return whereConditions;
 }
 
 // ---------- Klaviyo trigger-split (metric-property) → Redo TriggerData ----------
@@ -919,23 +994,29 @@ export function translateMessageAdditionalFilters(
 // have placed 0 orders). The flow-action graph parser doesn't touch this
 // — it lives at `definition.profile_filter`, not on any action.
 //
-// Redo's equivalent: a SKIP condition on the trigger step
-// (`trigger.skipConditions[]`). Skip semantics are the LOGICAL INVERSE of
-// Klaviyo's include filter:
+// Klaviyo's condition_groups are AND'ed together and the conditions inside
+// a group are OR'ed (same shape the segment translator reads — see
+// src/segments/translate.ts). The UI renders every group on its own row
+// joined by "and", so "Viewed Product zero times / and / Added to Cart
+// zero times / and / ..." is six single-condition groups.
 //
-//   Klaviyo: "run if (g1) OR (g2)"      where each group is c1 AND c2 ...
-//   Redo:    "skip if NOT((g1) OR (g2))"
-//            = "skip if NOT(g1) AND NOT(g2)"     De Morgan
-//            = "skip if (NOT c1 OR NOT c2 OR ...) AND (NOT c1' OR ...)"
+// Redo's equivalent: SKIP conditions on the trigger step
+// (`trigger.skipConditions[]`), which are OR'ed, each one an inline-segment
+// whose conditions are joined by a flat `mode`. Skip is the LOGICAL INVERSE
+// of Klaviyo's include filter:
 //
-// V1 handles single-group profile-metric conditions fully (invert each
-// operator, mode flips from AND→OR). Other condition types
-// (profile-marketing-consent, profile-property, profile-group-membership)
-// warn-only because their inversion requires per-type logic the per-
-// action translator hasn't generalized to negation. Multi-group (OR'd
-// groups) warns and processes only the first group. Per memory
-// `feedback_flow_status_mapping`, imported flows land inactive regardless,
-// so an imperfect translation can't accidentally fire.
+//   Klaviyo: "run if G1 AND G2 AND ..."     where Gn = c1 OR c2 OR ...
+//   Redo:    "skip if NOT(G1) OR NOT(G2) OR ..."          De Morgan
+//            where NOT(Gn) = NOT c1 AND NOT c2 AND ...
+//
+// So every Klaviyo group becomes exactly one skip condition: an inline-
+// segment in mode "AND" holding that group's conditions with their
+// operators inverted. Any group shape maps without loss. For the common
+// one-condition-per-group filter this is byte-for-byte what the Redo UI
+// saves when a human adds the same skips by hand (Jack Henry WC | Site
+// Abandon, 2026-09-11). Condition types other than profile-metric warn
+// (their inversion needs per-type logic) and profile-not-in-flow is
+// handled natively as the trigger's frequencyCap.
 
 const INVERT_KLAVIYO_OPERATOR: Record<string, string> = {
   "equals": "not-equals",
@@ -962,6 +1043,7 @@ function translateKlaviyoCondition(
   kc: any,
   metrics: MetricLookup,
   warnings: ParseWarning[],
+  flowIdMap?: Record<string, string>,
 ): unknown | null {
   const inverted = invertKlaviyoCondition(kc);
   switch (inverted.type) {
@@ -971,6 +1053,7 @@ function translateKlaviyoCondition(
         metrics,
         warnings,
         "flow-profile-filter",
+        flowIdMap,
       );
     case "profile-not-in-flow":
       // Klaviyo's "a profile can only be in this flow once". The parser
@@ -996,90 +1079,32 @@ function translateKlaviyoCondition(
   }
 }
 
+// One skip condition per Klaviyo group (see the De Morgan note above).
+// `flowIdMap` (Klaviyo flow id → Redo flow id) resolves "where Flow equals
+// X" metric filters; without it those conditions warn and drop.
 export function translateFlowProfileFilter(
   profileFilter: unknown,
   metrics: MetricLookup,
   warnings: ParseWarning[],
-): unknown | null {
+  flowIdMap?: Record<string, string>,
+): unknown[] {
   const pf = profileFilter as any;
-  const groups = pf?.condition_groups ?? [];
-  if (groups.length === 0) return null;
-
-  // De Morgan from Klaviyo "include" to Redo "skip":
-  //
-  //   Klaviyo: include if G1 OR G2 OR ...   where each Gn is c1 AND c2 ...
-  //   Redo:    skip    if NOT(G1) AND NOT(G2) AND ...
-  //                    where NOT(Gn) = NOT c1 OR NOT c2 OR ...
-  //
-  // Redo's inline-segment supports a flat `mode: "AND"|"OR"` — not nested
-  // groups. So:
-  //
-  //  - Single group → emit one inline-segment with mode "OR" containing
-  //    each condition inverted (NOT of an AND-group).
-  //  - Multi-group where every group has exactly 1 condition → flatten
-  //    to one inline-segment with mode "AND" and each inverted condition.
-  //  - Multi-group with any multi-condition group → would need nested
-  //    AND-of-ORs which inline-segment can't express. Warn + process the
-  //    first group only.
-  //
-  // Per memory `feedback_flow_status_mapping`, imported flows land
-  // inactive — an imperfect filter still gets reviewed before going live.
-
-  const everyGroupHasOneCondition = groups.every(
-    (g: any) => (g.conditions ?? []).length === 1,
-  );
-
-  if (groups.length === 1) {
-    const klaviyoConditions = groups[0].conditions ?? [];
-    if (klaviyoConditions.length === 0) return null;
+  const skips: unknown[] = [];
+  for (const g of pf?.condition_groups ?? []) {
     const redoConditions: unknown[] = [];
-    for (const kc of klaviyoConditions) {
-      const rc = translateKlaviyoCondition(kc, metrics, warnings);
+    for (const kc of g.conditions ?? []) {
+      const rc = translateKlaviyoCondition(kc, metrics, warnings, flowIdMap);
       if (rc) redoConditions.push(rc);
     }
-    if (redoConditions.length === 0) return null;
-    return {
+    if (redoConditions.length === 0) continue;
+    skips.push({
       dataSource: "inline-segment",
       inlineSegment: {
-        // De Morgan: AND inside Klaviyo include → OR for the inverted skip.
-        mode: "OR",
-        conditions: redoConditions,
-      },
-    };
-  }
-
-  if (everyGroupHasOneCondition) {
-    const redoConditions: unknown[] = [];
-    for (const g of groups) {
-      const kc = g.conditions[0];
-      const rc = translateKlaviyoCondition(kc, metrics, warnings);
-      if (rc) redoConditions.push(rc);
-    }
-    if (redoConditions.length === 0) return null;
-    return {
-      dataSource: "inline-segment",
-      inlineSegment: {
-        // De Morgan: OR across Klaviyo groups → AND for the inverted skip.
+        // NOT(c1 OR c2 ...) = NOT c1 AND NOT c2 ...
         mode: "AND",
         conditions: redoConditions,
       },
-    };
+    });
   }
-
-  // Multi-group with at least one multi-condition group — can't flatten.
-  warnings.push({
-    kind: "requires-review",
-    message: `flow profile_filter has ${groups.length} OR'd groups where at least one group has multiple AND'd conditions — V1 migrates only the first group; the rest need manual config in the Redo flow builder`,
-  });
-  const klaviyoConditions = groups[0].conditions ?? [];
-  const redoConditions: unknown[] = [];
-  for (const kc of klaviyoConditions) {
-    const rc = translateKlaviyoCondition(kc, metrics, warnings);
-    if (rc) redoConditions.push(rc);
-  }
-  if (redoConditions.length === 0) return null;
-  return {
-    dataSource: "inline-segment",
-    inlineSegment: { mode: "OR", conditions: redoConditions },
-  };
+  return skips;
 }

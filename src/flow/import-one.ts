@@ -51,7 +51,7 @@ import {
 import { SchemaType, StepType, type KlaviyoFlow } from "./types.js";
 import { findVacuousConditions } from "./vacuous-conditions.js";
 import { assertUpToDate } from "../git-freshness.js";
-import { recordRun } from "./run-ledger.js";
+import { readLedger, recordRun } from "./run-ledger.js";
 import { formatReport, verifyImportedFlow } from "./verify-import.js";
 
 async function main() {
@@ -131,11 +131,24 @@ async function main() {
   const audTeamId = redoJwt ? decodeJwtAud(redoJwt) : null;
   if (audTeamId) console.log(`      target store: ${audTeamId}`);
 
+  // Flows already imported to this store, so a profile_filter that
+  // references another flow ("Received Email where Flow equals X") can
+  // resolve X's Redo id. A flow imported after this one needs a re-run;
+  // the translator warns when it can't resolve one.
+  const flowIdMap = audTeamId
+    ? Object.fromEntries(
+        readLedger()
+          .filter((r) => r.teamId === audTeamId && r.redoFlowId)
+          .map((r) => [r.klaviyoFlowId, r.redoFlowId as string]),
+      )
+    : undefined;
+
   const parsed = await parseFlow(flow, metrics, {
     teamId: audTeamId ?? "__TEAM_ID__",
     templateResolver,
     account,
     forcedTrigger,
+    flowIdMap,
   });
   if (parsed.automation && nameSuffix) {
     parsed.automation.name = `${parsed.automation.name}${nameSuffix}`;
