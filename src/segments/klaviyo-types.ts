@@ -1,5 +1,5 @@
 // Klaviyo segment `definition` shapes, as returned by
-//   GET /api/segments/{id}?additional-fields[segment]=definition
+//   GET /api/segments/{id}  (definition is a default attribute; additional-fields accepts only profile_count)
 // and accepted by POST /api/segments.
 //
 // Structure: condition_groups[] are joined by AND; conditions[] within a

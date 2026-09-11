@@ -71,7 +71,7 @@ async function main() {
   const detail = segmentFile
     ? JSON.parse(readFileSync(segmentFile, "utf8"))
     : await klaviyo(
-        `/segments/${segmentId}/?additional-fields%5Bsegment%5D=definition,profile_count`,
+        `/segments/${segmentId}/?additional-fields%5Bsegment%5D=profile_count`,
         key,
       );
   const attrs = detail.data?.attributes ?? {};
@@ -127,7 +127,14 @@ async function main() {
     console.log(`\nDIAGNOSE_ONLY=1 — not creating.`);
     return;
   }
-  if (v.withinTolerance === false && process.env.FORCE !== "1") {
+  // The tolerance gate exists to catch a bad *substitution*. A translation with
+  // no substitutions and no drops is condition-for-condition exact, so a count
+  // delta there is data history (Redo has different send/open/order history
+  // than Klaviyo), not a translation error — create it and say so.
+  const exact = t.substitutions.length === 0 && t.dropped.length === 0;
+  if (v.withinTolerance === false && exact) {
+    console.log(`      exact translation (no substitutions) — the delta is data history, not the query. Creating anyway.`);
+  } else if (v.withinTolerance === false && process.env.FORCE !== "1") {
     console.log(`\nrefusing to create (outside tolerance). Re-run with FORCE=1 to import anyway, or adjust MERCHANT_AOV.`);
     return;
   }
