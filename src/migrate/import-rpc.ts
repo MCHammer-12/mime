@@ -368,8 +368,9 @@ async function preparePayload(
   // `static` with an empty product list — an invisible block.
   //
   // Identical filter docs are created once per import job, not once per block:
-  // a cart-abandonment template holds one Cart Item grid per branch and every
-  // template in the flow repeats it.
+  // a flow's templates repeat the same recommendation grid (e.g. Best
+  // Sellers) in every branch. Cart and browse grids carry
+  // TRIGGER_PRODUCTS_FILTER_ID directly and never come through here.
   const filterCache = (options.filterCache ??= new Map<string, string>());
   const resolveFilter = async (filterDoc: Record<string, any>) => {
     const key = JSON.stringify(filterDoc);

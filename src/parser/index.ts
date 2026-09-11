@@ -188,9 +188,9 @@ export function parseKlaviyoHtml(
  * sections are dropped when a merge happens.
  *
  * Dynamic blocks of DIFFERENT feeds are NOT merged — each carries its own
- * `_pendingFilter` / `schemaFieldName` and combining them would lose
- * semantics. But adjacent dynamic blocks of the SAME feed (identical
- * filter + schemaFieldName) are duplicates — a multi-column Klaviyo
+ * `_pendingFilter` / `recommendedProductFilterId` / `schemaFieldName` and
+ * combining them would lose semantics. But adjacent dynamic blocks of the
+ * SAME feed (identical filter + schemaFieldName) are duplicates — a multi-column Klaviyo
  * product row emits one per column, and each hydrates the full feed at
  * send time — so keep the first and drop the rest.
  */
@@ -247,6 +247,8 @@ export function mergeAdjacentProductBlocks(sections: Section[]): Section[] {
       (prev as any).productSelectionType === "dynamic" &&
       (s as any).productSelectionType === "dynamic" &&
       (prev as any).schemaFieldName === (s as any).schemaFieldName &&
+      (prev as any).recommendedProductFilterId ===
+        (s as any).recommendedProductFilterId &&
       JSON.stringify((prev as any)._pendingFilter) ===
         JSON.stringify((s as any)._pendingFilter)
     ) {
@@ -414,9 +416,8 @@ function parseWrapper(
 
   // Browse-abandonment "product card": hand-built kl-table with inline
   // {{ event.Name }} / {{ event.ImageURL }} variables (no Liquid loop).
-  // Best Sellers fallback until Redo's schema adds a viewed_products
-  // recommendation type — see parseBrowseAbandonmentCardBlock for
-  // context.
+  // Emitted on the trigger-products source (recently viewed products) —
+  // see parseBrowseAbandonmentCardBlock.
   const baCardBlock = parseBrowseAbandonmentCardBlock($, $wrapper, ctx);
   if (baCardBlock) {
     blocks.push(baCardBlock);

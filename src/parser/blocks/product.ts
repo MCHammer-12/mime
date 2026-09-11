@@ -35,17 +35,17 @@ export const BEST_SELLERS_FILTER: ProductFilterDoc = {
   productRecommendationType: "best_sellers",
 };
 
-const CART_ITEM_FILTER: ProductFilterDoc = {
-  name: "Cart Item",
-  provider: "shopify",
-  additionalProductFilters: [
-    { type: "inventory", inventory: 0, comparisonOperator: "greater_than" },
-  ],
-  productRecommendationType: "products_added_to_cart",
-  sortBy: "price_desc",
-  unit: "day",
-  value: 90,
-};
+// Redo's "Products from this trigger" source. Not a filter: a dynamic grid
+// carrying this id renders exactly the products the trigger provided — the
+// cart's line items for cart/checkout abandonment, the recently viewed
+// products for browse abandonment — and ignores `numberOfProducts`. Mirrors
+// TRIGGER_PRODUCTS_FILTER_ID in
+// redo/marketing/templates/common/src/email-builder.ts. Needs no
+// createProductFilter call, so it is emitted directly rather than via
+// `_pendingFilter`. Supersedes the old "Cart Item" filter
+// (products_added_to_cart, 90-day customer history), which approximated the
+// cart from the customer's history instead of the event's own items.
+export const TRIGGER_PRODUCTS_FILTER_ID = "00000000feedb10cfeedb10c";
 
 const CART_CONTEXT_LOOP_RE =
   /\{%\s*for\s+\w+\s+in\s+(event\.extra\.line_items|items)\s*%\}/;
@@ -230,9 +230,8 @@ function parseDynamicProductBlock(
 
   // Cart vs Best Sellers
   const cartContext = detectCartContext($);
-  const pendingFilter = cartContext ? CART_ITEM_FILTER : BEST_SELLERS_FILTER;
   ctx.warnings.push(
-    `Dynamic product block → ${pendingFilter.name} filter (${numberOfProducts} products × ${columns} cols). Verify in Redo editor after import.`,
+    `Dynamic product block → ${cartContext ? "products from this trigger" : "Best Sellers filter"} (${numberOfProducts} products × ${columns} cols). Verify in Redo editor after import.`,
   );
 
   const block: ProductsBlock = {
@@ -260,8 +259,12 @@ function parseDynamicProductBlock(
     manuallySelectedProducts: [],
     imageObjectFit: "cover",
     provider: "shopify",
-    ...(cartContext ? { schemaFieldName: "cartContext" } : {}),
-    _pendingFilter: pendingFilter,
+    ...(cartContext
+      ? {
+          schemaFieldName: "cartContext",
+          recommendedProductFilterId: TRIGGER_PRODUCTS_FILTER_ID,
+        }
+      : { _pendingFilter: BEST_SELLERS_FILTER }),
   };
 
   return block;
@@ -343,8 +346,9 @@ function defaultLineItemButton(): InlineButton {
 //   </td>
 //
 // In Redo terms this is exactly a PRODUCTS block with
-// `schemaFieldName: "cartContext"` + Cart Item filter. Redo's render
-// time replaces the dynamic loop with real cart items.
+// `schemaFieldName: "cartContext"` + the trigger-products source
+// (TRIGGER_PRODUCTS_FILTER_ID). Redo's render time replaces the dynamic
+// loop with the cart's real line items.
 
 const LINE_ITEMS_UCB_RE =
   /\{%\s*for\s+\w+\s+in\s+event\.extra\.line_items\s*%\}/;
@@ -486,7 +490,7 @@ export function parseLineItemsUcbBlock(
     imageObjectFit: "cover",
     provider: "shopify",
     schemaFieldName: "cartContext",
-    _pendingFilter: CART_ITEM_FILTER,
+    recommendedProductFilterId: TRIGGER_PRODUCTS_FILTER_ID,
   };
 }
 
@@ -498,15 +502,11 @@ export function parseLineItemsUcbBlock(
 // variables (no Liquid for-loop — there's only one viewed product). The
 // dispatcher otherwise falls through to "Unknown block type".
 //
-// PROPER target: an `interactive-cart` block with a `viewed_products`
-// productRecommendationType + `schemaFieldName: "browseContext"`. That
-// filter type doesn't yet exist in Redo's ProductsBlock schema (only
-// best_sellers / products_added_to_cart / collection are defined at
-// renderer/types.ts). Until Redo adds it, emit a Products block with
-// Best Sellers as a fallback filter. The merchant gets a configurable
-// block in the editor instead of a missing chunk; the emitted warning
-// makes the fallback explicit so they can swap to the real BA filter
-// once schema support lands.
+// Target: an `interactive-cart` block on the trigger-products source
+// (TRIGGER_PRODUCTS_FILTER_ID). For browse abandonment Redo resolves it to
+// the products the customer recently viewed — the same products Klaviyo's
+// `event.*` variables carried — so no filter is created and nothing falls
+// back to Best Sellers.
 
 const BROWSE_ABANDON_EVENT_RE =
   /\{\{\s*event\.(?:Name|Title|Price|ImageURL|URL|Image)\b/;
@@ -531,7 +531,7 @@ export function parseBrowseAbandonmentCardBlock(
     "#ffffff";
 
   ctx.warnings.push(
-    `Browse Abandonment card ({{ event.Name }} / {{ event.ImageURL }}) → Products block with Best Sellers fallback. Redo's ProductsBlock schema doesn't yet expose a "viewed_products" recommendation type — manually swap to the viewed-product filter once schema support lands.`,
+    `Browse Abandonment card ({{ event.Name }} / {{ event.ImageURL }}) → Products block on "Products from this trigger" (recently viewed products). Verify in Redo editor after import.`,
   );
 
   const fontFamily = extractPrimaryFont(wrapperHtml) ?? "Arial";
@@ -573,7 +573,7 @@ export function parseBrowseAbandonmentCardBlock(
     manuallySelectedProducts: [],
     imageObjectFit: "cover",
     provider: "shopify",
-    _pendingFilter: BEST_SELLERS_FILTER,
+    recommendedProductFilterId: TRIGGER_PRODUCTS_FILTER_ID,
   };
 }
 
@@ -697,7 +697,7 @@ function parseStaticProductBlock(
 
   if (cartContext) {
     ctx.warnings.push(
-      `AC dynamic product block (${columns} cols) → Cart Item filter. Verify in Redo editor after import.`,
+      `AC dynamic product block (${columns} cols) → products from this trigger. Verify in Redo editor after import.`,
     );
     const block: ProductsBlock = {
       type: EmailBlockType.PRODUCTS,
@@ -725,7 +725,7 @@ function parseStaticProductBlock(
       imageObjectFit: "cover",
       provider: "shopify",
       schemaFieldName: "cartContext",
-      _pendingFilter: CART_ITEM_FILTER,
+      recommendedProductFilterId: TRIGGER_PRODUCTS_FILTER_ID,
     };
     return [block];
   }

@@ -8,10 +8,12 @@
  * multi-column Klaviyo product row emits one block per column, each
  * hydrating the full feed at send time (White Elm AC grids rendered every
  * grid twice) — so they collapse to the first. Dynamic blocks of different
- * feeds (different filter or schemaFieldName) never merge.
+ * feeds (different filter, recommendedProductFilterId or schemaFieldName)
+ * never merge.
  */
 import { mergeAdjacentProductBlocks } from "./index.js";
 import { EmailBlockType } from "../renderer/types.js";
+import { TRIGGER_PRODUCTS_FILTER_ID } from "./blocks/product.js";
 
 function fail(msg: string): never {
   console.error(`FAIL: ${msg}`);
@@ -30,6 +32,15 @@ const dyn = (filter: object, schemaFieldName?: string): any => ({
   columns: 2,
   ...(schemaFieldName ? { schemaFieldName } : {}),
   _pendingFilter: JSON.parse(JSON.stringify(filter)),
+});
+// Cart/browse cards: no `_pendingFilter`, the trigger-products sentinel
+// carried directly on the block.
+const trig = (schemaFieldName?: string): any => ({
+  type: EmailBlockType.PRODUCTS,
+  productSelectionType: "dynamic",
+  columns: 2,
+  ...(schemaFieldName ? { schemaFieldName } : {}),
+  recommendedProductFilterId: TRIGGER_PRODUCTS_FILTER_ID,
 });
 const spacer = (): any => ({ type: EmailBlockType.SPACER });
 const stat = (names: string[]): any => ({
@@ -70,6 +81,27 @@ const stat = (names: string[]): any => ({
   const out = mergeAdjacentProductBlocks([dyn(CART, "cartContext"), dyn(CART)]);
   if (out.length !== 2) fail(`schemaFieldName mismatch: expected 2 blocks, got ${out.length}`);
   console.log("✓ schemaFieldName mismatch blocks the merge");
+}
+
+// trigger-products duplicates (per-column cart cards) → collapsed to the first
+{
+  const out = mergeAdjacentProductBlocks([
+    trig("cartContext"),
+    spacer(),
+    trig("cartContext"),
+  ]);
+  if (out.length !== 1) fail(`trigger-products duplicates: expected 1 block, got ${out.length}`);
+  const b: any = out[0];
+  if (b.recommendedProductFilterId !== TRIGGER_PRODUCTS_FILTER_ID || "_pendingFilter" in b)
+    fail(`trigger-products merge lost the sentinel: ${JSON.stringify(b)}`);
+  console.log("✓ trigger-products duplicates collapse and keep the sentinel");
+}
+
+// trigger products vs a Best Sellers feed → NOT merged
+{
+  const out = mergeAdjacentProductBlocks([trig("cartContext"), dyn(BEST)]);
+  if (out.length !== 2) fail(`sentinel vs filter: expected 2 blocks, got ${out.length}`);
+  console.log("✓ trigger products and a filter feed stay separate");
 }
 
 // non-decorative block between duplicates breaks the chain
