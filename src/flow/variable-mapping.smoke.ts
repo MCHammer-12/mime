@@ -179,4 +179,25 @@ const body = `Head back: {{ event.URL|default:'' }}`;
   assert(warnings.length === 0, `no warnings, got: ${warnings.length}`);
 }
 
+// ─── A second pass over already-rewritten output is a no-op ─────────────
+// sanitizeTemplateLiquid runs over sections transformSections has already
+// rewritten, so it sees Redo's names ({{ customer_first_name }}), not
+// Klaviyo's. Those used to surface as "Dropped: customer_first_name" on every
+// personalised subject line (Jack Henry, 2026-09-10).
+{
+  const warnings: ParseWarning[] = [];
+  const { output, unmappedTokens } = rewriteKlaviyoLiquid(
+    `Hi {{ customer_first_name|default:'there' }}, your {{ checkout_url }}`,
+    warnings,
+    "a1",
+    SchemaType.MARKETING_CART_ABANDONMENT,
+  );
+  assert(
+    output === `Hi {{ customer_first_name|default:'there' }}, your {{ checkout_url }}`,
+    `Redo names kept verbatim, got: ${JSON.stringify(output)}`,
+  );
+  assert(unmappedTokens.length === 0, `Redo names not counted as dropped, got: ${unmappedTokens}`);
+  assert(warnings.length === 0, `no warnings on a second pass, got: ${warnings.length}`);
+}
+
 console.log("variable-mapping.smoke.ts: all assertions passed");

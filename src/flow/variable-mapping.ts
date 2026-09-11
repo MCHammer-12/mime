@@ -205,6 +205,7 @@ export function rewriteKlaviyoLiquid(
     ...KLAVIYO_TO_REDO_VAR_MAP,
     ...(schemaType ? SCHEMA_VAR_MAP[schemaType] : undefined),
   };
+  const redoNames = new Set(Object.values(varMap));
   const unmappedTokens: string[] = [];
   const output = input.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (full, inside: string) => {
     const parsed = parseLiquidVar(inside);
@@ -238,6 +239,13 @@ export function rewriteKlaviyoLiquid(
     const mapped = varMap[parsed.varPath];
     if (mapped) {
       return `{{ ${mapped}${scrubKlaviyoFilters(parsed.filters)} }}`;
+    }
+
+    // Already a Redo field name — the template sanitizer runs over sections
+    // transformSections has rewritten (first_name → customer_first_name), so
+    // a second pass sees Redo's names, not Klaviyo's. Keep, don't count.
+    if (redoNames.has(parsed.varPath)) {
+      return `{{ ${parsed.varPath}${scrubKlaviyoFilters(parsed.filters)} }}`;
     }
 
     // Merchant constants resolve to literals — filters are dropped along with
