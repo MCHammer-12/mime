@@ -234,4 +234,59 @@ function run(label: string, steps: Step[]): {
   assert(sharedIds.length === 2, `2 copies of email_shared (got ${sharedIds.length}: ${sharedIds.join(", ")})`);
 }
 
+// Fixture 5: two DIFFERENT untranslatable trigger-splits, nested (Jack Henry
+// browse abandonment: "hair" split, then "body" split on its false branch).
+// Both become the same empty inline-segment. They must not be folded as a
+// repeated predicate — folding would delete the body branch outright.
+{
+  const vacuous = () => ({
+    dataSource: "inline-segment",
+    inlineSegment: { mode: "AND", conditions: [] },
+  });
+  const email = (id: string, nextId?: string): Step => ({
+    type: StepType.SEND_EMAIL,
+    id,
+    templateId: `tpl_${id}`,
+    emailAddressFieldName: "customerEmail",
+    recipientNameFieldName: "customerFullName",
+    ...(nextId ? { nextId } : {}),
+  });
+  const steps: Step[] = [
+    {
+      type: StepType.TRIGGER,
+      id: "trigger",
+      schemaType: SchemaType.MARKETING_BROWSE_ABANDONMENT,
+      category: "Marketing",
+      key: MarketingTriggerKey.BROWSE_ABANDONED,
+      nextId: "split_hair",
+    },
+    {
+      type: StepType.CONDITION,
+      id: "split_hair",
+      expression: vacuous(),
+      nextTrueId: "email_hair",
+      nextFalseId: "split_body",
+    },
+    email("email_hair"),
+    {
+      type: StepType.CONDITION,
+      id: "split_body",
+      expression: vacuous(),
+      nextTrueId: "email_body",
+      nextFalseId: "email_general",
+    },
+    email("email_body"),
+    email("email_general"),
+  ];
+  const { out, warnings } = run("nested vacuous splits are not folded", steps);
+  const ids = out.map((s) => s.id);
+  assert(ids.includes("split_body"), "second vacuous split survives");
+  assert(ids.includes("email_body"), "body-branch email survives");
+  assert(ids.includes("email_general"), "general email survives");
+  assert(
+    !warnings.some((w) => w.message.includes("folded")),
+    "no fold warning for vacuous conditions",
+  );
+}
+
 console.log("\nAll assertions passed.");

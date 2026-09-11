@@ -22,7 +22,7 @@ export interface VacuousCondition {
   trueBranchType: string;
 }
 
-function isVacuousExpression(expression: unknown): boolean {
+export function isVacuousExpression(expression: unknown): boolean {
   if (typeof expression !== "object" || expression === null) return false;
   const expr = expression as { dataSource?: unknown; inlineSegment?: unknown };
   if (expr.dataSource !== "inline-segment") return false;

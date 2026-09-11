@@ -21,6 +21,7 @@ import {
   type TriggerStep,
   type WaitStep,
 } from "./types.js";
+import { isVacuousExpression } from "./vacuous-conditions.js";
 
 const TRIGGER_STEP_ID = "trigger";
 const FLOW_END_ID = "flow_end";
@@ -45,6 +46,13 @@ export function treeifyFlow(
   // a branch, every downstream copy of that predicate is a foregone conclusion,
   // so we descend straight into the known branch instead of cloning both sides.
   // This is what keeps a re-tested predicate from doubling the tree each time.
+  //
+  // A vacuous expression (untranslatable Klaviyo filter → empty inline segment)
+  // carries no predicate, so two of them being equal says nothing about the
+  // source splits being equal. Jack Henry's browse abandonment nested a "body"
+  // trigger-split inside the false branch of a "hair" one; both translated to
+  // the same empty expression, and folding deleted the whole body branch (two
+  // emails) with no warning. Vacuous conditions never participate in folding.
   const decided = new Map<string, boolean>();
   const foldedIds = new Set<string>();
   let foldedCount = 0;
@@ -53,7 +61,7 @@ export function treeifyFlow(
     const origStep = byId.get(origId);
     if (!origStep) return origId;
 
-    if (origStep.type === StepType.CONDITION) {
+    if (origStep.type === StepType.CONDITION && !isVacuousExpression(origStep.expression)) {
       const known = decided.get(JSON.stringify(origStep.expression));
       if (known !== undefined && !dfsStack.has(origId)) {
         foldedCount++;
@@ -110,6 +118,11 @@ export function treeifyFlow(
         if (step.nextId) step.nextId = nextClonedId(step.nextId);
         return;
       case StepType.CONDITION: {
+        if (isVacuousExpression(step.expression)) {
+          step.nextTrueId = nextClonedId(step.nextTrueId);
+          step.nextFalseId = nextClonedId(step.nextFalseId);
+          return;
+        }
         const key = JSON.stringify(step.expression);
         const prior = decided.get(key);
         decided.set(key, true);
